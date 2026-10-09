@@ -1,0 +1,56 @@
+name: Tests and Docker smoke check
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install and test (no AHledger network calls)
+        run: |
+          python -m pip install '.[dev,web]'
+          python -m pytest -q
+          python -m ruff check src tests
+          python -m mypy src/ahledger
+      - name: Build application image
+        run: docker build -t ahledger:ci .
+      - name: Check container starts idle and API requires a key
+        run: |
+          docker run -d --name ahledger-ci -p 127.0.0.1:8000:8000 -e AHL_WEB_API_KEY=ci-check-only-not-a-production-key-0000000000000000 ahledger:ci
+          python - <<'PY'
+          import json, time, urllib.error, urllib.request
+          base = 'http://127.0.0.1:8000'
+          deadline = time.monotonic() + 40
+          while True:
+              try:
+                  urllib.request.urlopen(base + '/healthz', timeout=2).close()
+                  break
+              except urllib.error.URLError:
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(1)
+          request = urllib.request.Request(base + '/api/status', headers={'X-API-Key': 'ci-check-only-not-a-production-key-0000000000000000'})
+          with urllib.request.urlopen(request, timeout=3) as response:
+              status = json.load(response)
+          assert status['run']['state'] == 'idle' and status['jobs'] == {}
+          try:
+              urllib.request.urlopen(base + '/api/status', timeout=3)
+          except urllib.error.HTTPError as error:
+              assert error.code == 401
+          else:
+              raise AssertionError('API must require a secret')
+          PY
+          docker exec ahledger-ci test ! -e /data/state.sqlite
+      - name: Validate HTTPS configuration
+        run: docker run --rm -e AHL_PUBLIC_IP=203.0.113.10 -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Show container logs
+        if: failure()
+        run: docker logs ahledger-ci || true
+      - name: Remove test container
+        if: always()
+        run: docker rm -f ahledger-ci || true

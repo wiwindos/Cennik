@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      AHL_WEB_API_KEY: ${AHL_WEB_API_KEY:?Set AHL_WEB_API_KEY}
+      AHL_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - archive:/data
+    stop_grace_period: 30s
+volumes:
+  archive:

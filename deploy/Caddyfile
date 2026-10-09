@@ -1,0 +1,14 @@
+{
+    admin off
+}
+
+{$AHL_PUBLIC_IP} {
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy app:8000
+}

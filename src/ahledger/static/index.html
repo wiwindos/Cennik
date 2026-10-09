@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AHledger · Архив</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head>
+<body>
+<header><a class="brand" href="/">AH<span>ledger</span><small>ЛИЧНЫЙ АРХИВ</small></a><div class="header-right"><span id="connection" class="pill">Нет подключения</span><button id="logout" class="quiet" hidden>Выйти</button></div></header>
+<main>
+<section class="intro"><div><p class="eyebrow">WOW FOREVER / ИСТОРИЯ РЫНКОВ</p><h1>Архив экономики</h1><p>Выберите данные и запустите загрузку. Прогресс сохраняется между остановками.</p></div><a class="source" href="https://ahledger.com" target="_blank" rel="noreferrer">Данные и цены: AHledger ↗</a></section>
+<section id="login" class="card login"><div><h2>Войти в панель</h2><p>Введите секретный ключ, заданный при развёртывании сервера.</p></div><form id="login-form"><label>Секретный ключ<input id="key" type="password" autocomplete="off" required minlength="32" placeholder="AHL_WEB_API_KEY"></label><button type="submit" class="primary">Подключиться</button></form><p id="login-error" class="error" aria-live="polite"></p></section>
+<div id="dashboard" hidden>
+<p id="message" class="notice" role="status" hidden></p>
+<div class="workspace">
+<section class="card controls"><div class="section-head"><h2>Новая загрузка</h2><span class="step">01</span></div><p class="muted">После запуска сервера загрузка не начинается автоматически.</p>
+<form id="download-form">
+<label>Рынки<select id="markets" multiple size="4"></select></label><p class="hint">Выберите один или несколько рынков. Ctrl / ⌘ для нескольких.</p>
+<fieldset><legend>Что скачать</legend><label class="check"><input type="checkbox" id="all-datasets" checked>Все доступные данные</label><div id="datasets" hidden></div><p class="hint">Снимите флажок, чтобы выбрать типы данных. Необходимые справочники загружаются вместе с ними.</p></fieldset>
+<div class="row"><label>Запросов / сек<input id="rate" type="number" min="0.01" max="5" step="any" value="1" required></label><label>Market tools / сек<input id="tool-rate" type="number" min="0.01" max="1" step="any" value="0.5" required></label></div>
+<label class="check"><input id="retry" type="checkbox">Повторить задания с ошибками</label>
+<button type="submit" id="start" class="primary wide">Запустить / продолжить</button>
+<button type="button" id="stop" class="danger wide" disabled>Остановить и сохранить прогресс</button>
+</form>
+<div class="tools"><button data-action="discover">Обновить справочники</button><button data-action="build">Построить базу из скачанного</button><button data-action="verify">Проверить целостность</button></div>
+</section>
+<div class="right">
+<section class="card progress-card"><div class="section-head"><h2>Прогресс загрузки</h2><span id="run-state" class="pill">Ожидание</span></div>
+<div class="metrics"><div><span>Обработано заданий</span><strong id="done">0</strong></div><div><span>В очереди</span><strong id="remaining">0</strong></div><div><span>Сохранено записей</span><strong id="records">0</strong></div><div><span>Raw-ответы</span><strong id="raw">0 МБ</strong></div></div>
+<div class="bar"><div id="progress-fill"></div></div><p id="progress-note" class="hint">Очередь появится после первого запуска.</p>
+<dl class="details"><div><dt>Текущее задание</dt><dd id="current">—</dd></div><div><dt>Скорость / ориентир</dt><dd id="eta">—</dd></div><div><dt>Ошибки / повторы</dt><dd id="errors">0 / 0</dd></div><div><dt>Аналитическая база</dt><dd id="database">Ещё не построена</dd></div></dl>
+<p class="hint">ETA рассчитана для текущей очереди. Она растёт при обнаружении предметов. База строится после загрузки или по кнопке.</p></section>
+<section class="card"><div class="section-head"><h2>Журнал</h2><button id="refresh-log" class="quiet">Обновить</button></div><pre id="log">Журнал пока пуст.</pre></section>
+</div></div>
+<section class="card explorer"><div class="section-head"><h2>Сохранённая история цен</h2><span class="step">02</span></div><p class="muted">История доступна после построения базы. Цены показаны в меди, время — UTC.</p>
+<form id="search-form" class="search"><label>Предмет<input id="search" placeholder="Название или ID, например 2589" maxlength="100"></label><button type="submit">Найти</button></form><div id="search-results" class="search-results"></div>
+<form id="history-form" class="history-form"><label>ID предмета<input id="item-id" type="number" min="1" value="2589" required></label><label>Рынок<select id="history-market"></select></label><label>Точки<select id="granularity"><option value="hour">По часам</option><option value="scan">По сканам</option><option value="day">По дням</option></select></label><button type="submit">Показать историю</button></form>
+<p id="history-note" class="hint" aria-live="polite">Выберите предмет и рынок.</p><div class="table-wrap"><table><thead><tr><th>Время UTC</th><th>Минимум</th><th>Медиана</th><th>Количество</th><th>Аукционы</th></tr></thead><tbody id="history"></tbody></table></div>
+</section>
+<footer><span>Доступ к API: заголовок <code>X-API-Key</code>. <code>GET /api/status</code>, <code>/api/items</code>, <code>/api/prices/{market}/{item_id}</code>, <code>/api/files</code>.</span><span>Prices from <a href="https://ahledger.com" target="_blank" rel="noreferrer">AHledger</a></span></footer>
+</div></main></body></html>
