@@ -11,6 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import duckdb
 import uvicorn
 import websocket
 
@@ -34,8 +35,21 @@ def main():
             destination.close()
         analytics = archive / "analytics"
         analytics.mkdir()
-        shutil.copy2(project / "data/analytics/ahledger.duckdb", analytics / "ahledger.duckdb")
+        samples = sorted((project / "data/samples").glob("*/analytics/ahledger.duckdb"))
+        source_database = samples[0] if samples else project / "data/analytics/ahledger.duckdb"
+        shutil.copy2(source_database, analytics / "ahledger.duckdb")
+        with duckdb.connect(str(analytics / "ahledger.duckdb"), read_only=True) as db:
+            history_market, history_item, history_grain = db.execute(
+                "SELECT market,item_id,granularity FROM price_history GROUP BY ALL ORDER BY count(*) DESC,item_id LIMIT 1"
+            ).fetchone()
         app = create_app(Settings(data_dir=archive), key)
+        # Widen freshness only in this isolated UI check; real old archives stay old.
+        from cennik.core.models import AnalyticsConfig, AnalyticsSettings
+
+        covered = [m for m in app.state.analytics.markets() if m["observed_at"]]
+        chosen = max(covered, key=lambda m: m["observed_at"])["market"]
+        app.state.analytics.update_settings(AnalyticsSettings(
+            active_market=chosen, config=AnalyticsConfig(max_price_age_seconds=31536000)))
         received = []
 
         def fake_job(request):
@@ -109,7 +123,8 @@ def main():
                 return result.get("result", {}).get("value")
 
             def wait_for(expression):
-                while time.monotonic() < deadline:
+                condition_deadline = time.monotonic() + 20
+                while time.monotonic() < condition_deadline:
                     if evaluate(expression):
                         return
                     time.sleep(0.1)
@@ -127,8 +142,34 @@ def main():
                 "document.getElementById('search').value='2589'; document.getElementById('search-form').requestSubmit()"
             )
             wait_for("document.querySelectorAll('#search-results button').length > 0")
-            evaluate("document.getElementById('history-form').requestSubmit()")
+            evaluate("document.getElementById('history-market').value=" + json.dumps(history_market) +
+                     ";document.getElementById('item-id').value=" + str(history_item) +
+                     ";document.getElementById('granularity').value=" + json.dumps(history_grain) +
+                     ";document.getElementById('history-form').requestSubmit()")
             wait_for("document.querySelectorAll('#history tr').length > 0")
+            wait_for("document.getElementById('analytics-market').options.length > 1 && !document.getElementById('analytics-recalculate').disabled")
+            assert app.state.analytics.thread is None  # Reading the UI never calculates.
+            evaluate("document.getElementById('analytics-recalculate').click()")
+            wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
+            evaluate("document.querySelector('#analytics-results button').click()")
+            wait_for("!document.getElementById('analytics-detail').hidden")
+            assert evaluate("document.getElementById('analytics-inputs').textContent.includes('indicative')")
+            evaluate("document.getElementById('analytics-sort').value='roi';document.getElementById('analytics-filters').requestSubmit()")
+            wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
+            roi_values = evaluate("Array.from(document.querySelectorAll('#analytics-results tr'),r=>Number(r.cells[4].textContent.replace('%','')))")
+            assert roi_values == sorted(roi_values, reverse=True)
+            evaluate("document.querySelector('#analytics-results button').click()")
+            wait_for("!document.getElementById('analytics-detail').hidden")
+            screenshot = project / "data/reports/cennik-analytics-preview.png"
+            evaluate("document.getElementById('analytics-title').scrollIntoView()")
+            screenshot.write_bytes(base64.b64decode(call("Page.captureScreenshot", {"format":"png"})["data"]))
+            other = next(m["market"] for m in app.state.analytics.markets() if m["market"] != chosen)
+            evaluate("document.getElementById('analytics-market').value=" + json.dumps(other) + ";document.getElementById('analytics-market').dispatchEvent(new Event('change'))")
+            wait_for("document.querySelectorAll('#analytics-results tr').length === 0")
+            wait_for("document.getElementById('analytics-result-note').textContent.includes('ещё нет успешного')")
+            assert app.state.analytics.store.settings().active_market == other
+            evaluate("document.getElementById('analytics-market').value=" + json.dumps(chosen) + ";document.getElementById('analytics-market').dispatchEvent(new Event('change'))")
+            wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             evaluate(
                 "document.getElementById('rate').value='2'; document.getElementById('download-form').requestSubmit()"
             )
@@ -152,7 +193,7 @@ def main():
             )
             assert not exceptions, exceptions
             print(
-                "UI OK: authorization, search, actual saved history, fake start/stop, mobile layout; no AHledger requests"
+                "UI OK: authorization, search, saved history, Cennik manual calculation, details, sorting, market switch/history, fake start/stop, mobile layout; no AHledger requests"
             )
             print(output)
         finally:

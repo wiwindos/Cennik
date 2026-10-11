@@ -16,7 +16,7 @@ async function api(path, options = {}) {
   }
   return value;
 }
-function disconnect(){secret="";sessionStorage.removeItem("ahl-key");clearInterval(timer);timer=null;byId("login").hidden=false;byId("dashboard").hidden=true;byId("logout").hidden=true;byId("connection").textContent="Нет подключения";byId("connection").classList.remove("active");}
+function disconnect(){window.dispatchEvent(new Event("cennik-disconnected"));secret="";sessionStorage.removeItem("ahl-key");clearInterval(timer);timer=null;byId("login").hidden=false;byId("dashboard").hidden=true;byId("logout").hidden=true;byId("connection").textContent="Нет подключения";byId("connection").classList.remove("active");}
 function setMarkets(markets){
   const signature = JSON.stringify(markets.map(m=>m.id)); if(signature===marketSignature)return;marketSignature=signature;
   const selected = new Set(Array.from(byId("markets").selectedOptions, o=>o.value));
@@ -41,7 +41,7 @@ function render(value){
   if(value.run.error)notice(value.run.error);
 }
 async function poll(){if(polling||!secret)return;polling=true;try{render(await api("/status"));byId("connection").textContent="Подключено";byId("connection").classList.add("active");}catch(error){notice(error.message);byId("connection").textContent="Нет связи";}finally{polling=false;}}
-async function connect(){const value=await api("/status");sessionStorage.setItem("ahl-key",secret);byId("key").value="";byId("login").hidden=true;byId("dashboard").hidden=false;byId("logout").hidden=false;render(value);await poll();clearInterval(timer);timer=setInterval(poll,2000);}
+async function connect(){const value=await api("/status");sessionStorage.setItem("ahl-key",secret);byId("key").value="";byId("login").hidden=true;byId("dashboard").hidden=false;byId("logout").hidden=false;render(value);await poll();clearInterval(timer);timer=setInterval(poll,2000);window.dispatchEvent(new Event("cennik-connected"));}
 byId("login-form").addEventListener("submit",async event=>{event.preventDefault();secret=byId("key").value;try{await connect();byId("login-error").textContent="";}catch(error){byId("login-error").textContent=error.message;}});
 byId("logout").addEventListener("click",disconnect);
 for(const [name,label] of Object.entries(datasetNames)){const wrapper=document.createElement("label");wrapper.className="check";const input=document.createElement("input");input.type="checkbox";input.value=name;input.checked=true;input.disabled=true;wrapper.append(input,document.createTextNode(label));byId("datasets").append(wrapper);}

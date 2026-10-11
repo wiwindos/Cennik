@@ -15,6 +15,9 @@ from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 
+from cennik.api.routes import analytics_router
+from cennik.services.analytics import AnalyticsService
+
 from .config import Settings
 from .web_control import Controller, JobRequest
 
@@ -26,10 +29,12 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
     settings = settings or Settings.read(Path(os.getenv("AHL_CONFIG", "config.toml")))
     controller = Controller(settings)
     root = controller.root
+    analytics = AnalyticsService(root)
 
     @asynccontextmanager
     async def lifespan(app):
         yield
+        await asyncio.to_thread(analytics.shutdown)
         await asyncio.to_thread(controller.shutdown)
 
     app = FastAPI(
@@ -41,6 +46,7 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
         lifespan=lifespan,
     )
     app.state.controller = controller
+    app.state.analytics = analytics
     header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
     def authorize(provided: str | None = Depends(header)):
@@ -185,5 +191,6 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
     def openapi():
         return app.openapi()
 
+    router.include_router(analytics_router(analytics))
     app.include_router(router)
     return app

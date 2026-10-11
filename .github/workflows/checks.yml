@@ -16,7 +16,7 @@ jobs:
           python -m pip install '.[dev,web]'
           python -m pytest -q
           python -m ruff check src tests
-          python -m mypy src/ahledger
+          python -m mypy src
       - name: Build application image
         run: docker build -t ahledger:ci .
       - name: Check container starts idle and API requires a key
@@ -38,6 +38,12 @@ jobs:
           with urllib.request.urlopen(request, timeout=3) as response:
               status = json.load(response)
           assert status['run']['state'] == 'idle' and status['jobs'] == {}
+          request = urllib.request.Request(base + '/api/analytics/status', headers={'X-API-Key': 'ci-check-only-not-a-production-key-0000000000000000'})
+          with urllib.request.urlopen(request, timeout=3) as response:
+              analytics = json.load(response)
+          assert analytics['ready'] is False and analytics['active_market'] is None
+          assert analytics['running'] is False and analytics['automatic_recalculation'] is False
+          assert analytics['latest_run'] is None and analytics['opportunity_count'] == 0
           try:
               urllib.request.urlopen(base + '/api/status', timeout=3)
           except urllib.error.HTTPError as error:
