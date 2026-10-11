@@ -215,9 +215,9 @@ def download(
                 state.recover()
             registry(state)
             if build:
-                show(build_database(state))
-                show(check_archive(state))
-            create_report(state)
+                show(build_database(state, settings=settings))
+                show(check_archive(state, settings=settings))
+            create_report(state, settings=settings)
         finally:
             state.close()
 
@@ -259,7 +259,7 @@ def build_db(ctx: typer.Context, restore_state: bool = False):
     with exclusive_lock(ctx.obj.data_dir):
         state = open_state(ctx)
         try:
-            show(build_database(state, restore_state=restore_state))
+            show(build_database(state, restore_state=restore_state, settings=ctx.obj))
         finally:
             state.close()
 
@@ -270,7 +270,7 @@ def verify(ctx: typer.Context):
     with exclusive_lock(ctx.obj.data_dir):
         state = open_state(ctx)
         try:
-            result = check_archive(state)
+            result = check_archive(state, settings=ctx.obj)
             show(result)
             if result["errors"]:
                 raise typer.Exit(1)
@@ -283,7 +283,7 @@ def report(ctx: typer.Context):
     """Сформировать HTML и JSON отчёты по фактически скачанным данным."""
     state = open_state(ctx)
     try:
-        result = create_report(state)
+        result = create_report(state, settings=ctx.obj)
         console.print(str((state.root / "reports" / "download_report.html").resolve()))
         show({"status": result["download_status"], "counts": result["counts"]})
     finally:
@@ -296,7 +296,7 @@ def export(ctx: typer.Context):
     with exclusive_lock(ctx.obj.data_dir):
         state = open_state(ctx)
         try:
-            console.print(str(export_parquet(state).resolve()))
+            console.print(str(export_parquet(state, settings=ctx.obj).resolve()))
         finally:
             state.close()
 

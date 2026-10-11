@@ -15,3 +15,8 @@ enrich_items = "all"
 # Only 12 meaningful model variants; no brute-force deal filter combinations.
 signal_variants = true
 discovery_ttl_hours = 24
+# Budget for database building/export; temporary spill files use the archive disk.
+analytics_memory_mb = 512
+analytics_threads = 1
+analytics_batch_rows = 2048
+analytics_batch_mb = 8

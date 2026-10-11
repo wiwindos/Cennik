@@ -3,8 +3,8 @@ from __future__ import annotations
 import html
 from datetime import UTC, date, datetime, timedelta
 
-import duckdb
-
+from .analytics import analytics_connection
+from .config import Settings
 from .storage import TERMINAL, State
 from .util import atomic_json, atomic_write, dumps, utc_now
 
@@ -15,12 +15,15 @@ def query_rows(connection, sql, params=None):
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
 
-def create_report(state: State) -> dict:
+def create_report(state: State, *, settings: Settings | None = None) -> dict:
+    settings = settings or Settings.read(root=state.root)
     counts = state.counts()
     total = sum(counts.values())
     finished = sum(counts.get(k, 0) for k in TERMINAL)
-    raw_files = list((state.root / "raw" / "blobs").glob("*/*.zst"))
-    raw_size = sum(path.stat().st_size for path in raw_files)
+    raw_count, raw_size = 0, 0
+    for path in (state.root / "raw" / "blobs").glob("*/*.zst"):
+        raw_count += 1
+        raw_size += path.stat().st_size
     dataset_jobs = [
         dict(row)
         for row in state.db.execute(
@@ -49,7 +52,7 @@ def create_report(state: State) -> dict:
         "completion_fraction": finished / total if total else 0,
         "scope": state.get("plan_scope", "bounded_research_only"),
         "queue_completeness_is_not_dataset_continuity": True,
-        "unique_raw_responses": len(raw_files),
+        "unique_raw_responses": raw_count,
         "raw_compressed_bytes": raw_size,
         "storage_bytes": {
             name: sum(p.stat().st_size for p in (state.root / name).rglob("*") if p.is_file())
@@ -90,7 +93,7 @@ def create_report(state: State) -> dict:
     }
     database = state.root / "analytics" / "ahledger.duckdb"
     if database.exists():
-        connection = duckdb.connect(str(database), read_only=True)
+        connection = analytics_connection(database, settings, read_only=True)
         try:
             connection.execute("SET TimeZone='UTC'")
             for table in (

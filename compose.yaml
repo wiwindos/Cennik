@@ -6,6 +6,8 @@ services:
     environment:
       AHL_WEB_API_KEY: ${AHL_WEB_API_KEY:?Set a random AHL_WEB_API_KEY in .env}
       AHL_DATA_DIR: /data
+      AHL_ANALYTICS_MEMORY_MB: ${AHL_ANALYTICS_MEMORY_MB:-512}
+      AHL_ANALYTICS_THREADS: ${AHL_ANALYTICS_THREADS:-1}
     volumes:
       - archive:/data
     expose:

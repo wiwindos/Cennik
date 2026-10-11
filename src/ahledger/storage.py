@@ -317,9 +317,10 @@ class RawArchive:
             raise ValueError("Corrupt HTTP compressed body") from exc
         return body
 
-    def manifests(self):
+    def manifests(self, *, ordered: bool = True):
         # Metadata is authoritative; this also works when SQLite has been lost.
-        for path in sorted((self.root / "metadata").glob("*.json")):
+        paths = (self.root / "metadata").glob("*.json")
+        for path in sorted(paths) if ordered else paths:
             yield loads(path.read_bytes())
 
     def restore_state(self):

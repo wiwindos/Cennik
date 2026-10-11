@@ -23,6 +23,11 @@ class Settings(BaseModel):
     enrich_items: str = "all"  # none | referenced | all
     signal_variants: bool = True  # 4 discounts x 3 horizons, each changes the model
     discovery_ttl_hours: int = Field(default=24, ge=1)
+    # Leave room for Python, Arrow, the web process and the container's file cache.
+    analytics_memory_mb: int = Field(default=512, ge=64)
+    analytics_threads: int = Field(default=1, ge=1, le=8)
+    analytics_batch_rows: int = Field(default=2048, ge=1, le=10000)
+    analytics_batch_mb: int = Field(default=8, ge=1, le=64)
 
     def selected_markets(self, available: list[str]) -> list[str]:
         return [market for market in available if not self.markets or market in self.markets]
@@ -44,6 +49,14 @@ class Settings(BaseModel):
             values["data_dir"] = root
         elif os.getenv("AHL_DATA_DIR"):
             values["data_dir"] = os.environ["AHL_DATA_DIR"]
+        for name in (
+            "analytics_memory_mb",
+            "analytics_threads",
+            "analytics_batch_rows",
+            "analytics_batch_mb",
+        ):
+            if value := os.getenv("AHL_" + name.upper()):
+                values[name] = value
         settings = cls(**values)
         if settings.enrich_items not in {"none", "referenced", "all"}:
             raise ValueError("enrich_items must be none, referenced or all")

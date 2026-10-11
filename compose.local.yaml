@@ -6,6 +6,8 @@ services:
     environment:
       AHL_WEB_API_KEY: ${AHL_WEB_API_KEY:?Set AHL_WEB_API_KEY}
       AHL_DATA_DIR: /data
+      AHL_ANALYTICS_MEMORY_MB: ${AHL_ANALYTICS_MEMORY_MB:-512}
+      AHL_ANALYTICS_THREADS: ${AHL_ANALYTICS_THREADS:-1}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

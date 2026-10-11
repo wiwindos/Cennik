@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 import pyarrow as pa
 
+from .config import Settings
 from .models import JobSpec
 from .parsers import Parsed, parse
 from .storage import RawArchive, State
@@ -235,7 +238,13 @@ KEYS = {
 }
 
 
-def normalized(spec: JobSpec, parsed: Parsed, meta: dict) -> dict[str, list[dict]]:
+def normalized(
+    spec: JobSpec,
+    parsed: Parsed,
+    meta: dict,
+    *,
+    emit: Callable[[str, dict], None] | None = None,
+) -> dict[str, list[dict]]:
     tables: dict[str, list[dict]] = defaultdict(list)
     common = {
         "raw_id": meta["id"],
@@ -244,7 +253,11 @@ def normalized(spec: JobSpec, parsed: Parsed, meta: dict) -> dict[str, list[dict
     }
 
     def add(table, payload, **fields):
-        tables[table].append({**common, "payload_json": dumps(payload), **fields})
+        row = {**common, "payload_json": dumps(payload), **fields}
+        if emit is None:
+            tables[table].append(row)
+        else:
+            emit(table, row)
 
     data, dataset = parsed.data, spec.dataset
     add(
@@ -561,7 +574,55 @@ def arrow_schema(columns: dict[str, str]) -> pa.Schema:
     return pa.schema([(key, type_for(value)) for key, value in columns.items()])
 
 
-def build_database(state: State, *, restore_state: bool = False) -> dict:
+def analytics_connection(
+    database: Path,
+    settings: Settings,
+    *,
+    read_only: bool = False,
+) -> duckdb.DuckDBPyConnection:
+    # Spill on the archive volume, not /tmp (which may be a RAM-backed filesystem).
+    spill = database.parent / (database.name + ".tmp")
+    connection = duckdb.connect(
+        str(database),
+        read_only=read_only,
+        config={
+            "memory_limit": f"{settings.analytics_memory_mb}MiB",
+            "threads": str(settings.analytics_threads),
+            "preserve_insertion_order": "false",
+            "temp_directory": str(spill),
+        },
+    )
+    connection.execute("SET TimeZone='UTC'")
+    return connection
+
+
+def deduplicate(
+    connection: duckdb.DuckDBPyConnection,
+    source: str,
+    target: str,
+    key: str,
+    order: str,
+) -> None:
+    # Materialize only row IDs and sort keys in the window operator. In particular,
+    # never carry payload_json through a sort of the entire downloaded market.
+    connection.execute(f'''CREATE TEMP TABLE _build_keep_rows AS
+        SELECT rowid AS kept_rowid FROM "{source}"
+        QUALIFY row_number() OVER (PARTITION BY {key} ORDER BY {order})=1''')
+    try:
+        connection.execute(f'''CREATE OR REPLACE TABLE "{target}" AS
+            SELECT original.* FROM "{source}" original
+            SEMI JOIN _build_keep_rows kept ON original.rowid=kept.kept_rowid''')
+    finally:
+        connection.execute("DROP TABLE _build_keep_rows")
+
+
+def build_database(
+    state: State,
+    *,
+    restore_state: bool = False,
+    settings: Settings | None = None,
+) -> dict:
+    settings = settings or Settings.read(root=state.root)
     archive = RawArchive(state)
     if restore_state:
         archive.restore_state()
@@ -569,13 +630,16 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     generation = uuid.uuid4().hex
     temp = directory / (".build-" + generation + ".duckdb")
-    connection = duckdb.connect(str(temp))
-    connection.execute("SET TimeZone='UTC'")
+    connection = analytics_connection(temp, settings)
     columns_by_table = {name: {**columns, **COMMON} for name, columns in SCHEMAS.items()}
     buffer: dict[str, list[dict]] = defaultdict(list)
-    errors, quarantined, manifests, points = [], [], 0, 0
+    buffer_sizes: dict[str, int] = defaultdict(int)
+    buffered_bytes = 0
+    batch_bytes = settings.analytics_batch_mb * 1024 * 1024
+    errors, quarantined, manifests = [], [], 0
 
     def flush(table):
+        nonlocal buffered_bytes
         rows = buffer[table]
         if not rows:
             return
@@ -587,15 +651,37 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
                     row[column] = Decimal(str(row[column])).quantize(Decimal(1).scaleb(-scale))
         arrow = pa.Table.from_pylist(rows, schema=arrow_schema(columns))
         connection.register("incoming_batch", arrow)
-        connection.execute(f'INSERT INTO "{table}" SELECT * FROM incoming_batch')
-        connection.unregister("incoming_batch")
+        try:
+            connection.execute(f'INSERT INTO "{table}" SELECT * FROM incoming_batch')
+        finally:
+            connection.unregister("incoming_batch")
         buffer[table] = []
+        buffered_bytes -= buffer_sizes[table]
+        buffer_sizes[table] = 0
+
+    def append(table: str, row: dict) -> None:
+        nonlocal buffered_bytes
+        size = sys.getsizeof(row) + sum(sys.getsizeof(value) for value in row.values())
+        # Flush before adding a large row: the bound covers all table buffers together.
+        if buffered_bytes + size > batch_bytes:
+            for name in columns_by_table:
+                flush(name)
+        buffer[table].append(row)
+        buffer_sizes[table] += size
+        buffered_bytes += size
+        if len(buffer[table]) >= settings.analytics_batch_rows or buffered_bytes >= batch_bytes:
+            flush(table)
+
+    def ingest(spec: JobSpec, meta: dict) -> None:
+        # Parsed responses are released before reading the next compressed blob.
+        parsed = parse(spec, archive.read(meta))
+        normalized(spec, parsed, meta, emit=append)
 
     try:
         for table, columns in columns_by_table.items():
             fields = ",".join(f'"{column}" {sql}' for column, sql in columns.items())
             connection.execute(f'CREATE TABLE "{table}" ({fields})')
-        for meta in archive.manifests():
+        for meta in archive.manifests(ordered=False):
             manifests += 1
             spec = JobSpec.model_validate(meta["spec"])
             if meta["validation"] == "FAILED":
@@ -604,36 +690,26 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
                 quarantined.append(
                     {"raw_id": meta["id"], "dataset": spec.dataset, "error": meta.get("error")}
                 )
-                buffer["dataset_metadata"].extend(
-                    normalized(
-                        spec,
-                        Parsed(
-                            {}, status="FAILED", warnings=[meta.get("error", "Rejected response")]
-                        ),
-                        meta,
-                    )["dataset_metadata"]
+                normalized(
+                    spec,
+                    Parsed({}, status="FAILED", warnings=[meta.get("error", "Rejected response")]),
+                    meta,
+                    emit=append,
                 )
-                if len(buffer["dataset_metadata"]) >= 10000:
-                    flush("dataset_metadata")
                 continue
             if meta["http_status"] != 200 and not (
                 spec.dataset == "professions" and meta["http_status"] == 400
             ):
                 continue
             try:
-                parsed = parse(spec, archive.read(meta))
-                tables = normalized(spec, parsed, meta)
-                points += len(tables.get("price_history_ranges", []))
-                for table, rows in tables.items():
-                    buffer[table].extend(rows)
-                    if len(buffer[table]) >= 10000:
-                        flush(table)
+                ingest(spec, meta)
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 errors.append(
                     {"raw_id": meta["id"], "dataset": spec.dataset, "error": str(exc)[:2000]}
                 )
         for row in state.db.execute("SELECT * FROM jobs"):
-            buffer["download_jobs"].append(
+            append(
+                "download_jobs",
                 {
                     "job_id": row["id"],
                     "dataset": row["dataset"],
@@ -646,10 +722,8 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
                     "error": row["error"],
                     "spec_json": row["spec"],
                     "raw_id": row["raw_id"],
-                }
+                },
             )
-            if len(buffer["download_jobs"]) >= 10000:
-                flush("download_jobs")
         for table in columns_by_table:
             flush(table)
         # Keep old build if any response failed to normalize; report all failures explicitly.
@@ -660,11 +734,14 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
                     "is_placeholder ASC, CASE origin_dataset WHEN 'item' THEN 0 WHEN 'catalog' THEN 1 ELSE 2 END, "
                     + order
                 )
-            connection.execute(f'''CREATE OR REPLACE TABLE "{table}" AS
-                SELECT * FROM "{table}" QUALIFY row_number() OVER (PARTITION BY {key} ORDER BY {order})=1''')
-        connection.execute("""CREATE TABLE price_history AS SELECT * FROM price_history_ranges
-            QUALIFY row_number() OVER (PARTITION BY market,item_id,observed_at,granularity
-                ORDER BY retrieved_at DESC, CASE "range" WHEN '90d' THEN 0 ELSE 1 END)=1""")
+            deduplicate(connection, table, table, key, order)
+        deduplicate(
+            connection,
+            "price_history_ranges",
+            "price_history",
+            "market,item_id,observed_at,granularity",
+            "retrieved_at DESC, CASE \"range\" WHEN '90d' THEN 0 ELSE 1 END",
+        )
         connection.execute("""CREATE VIEW preferred_price_history AS SELECT p.* FROM price_history p
             WHERE p.granularity='scan'
             OR (p.granularity='hour' AND NOT EXISTS (SELECT 1 FROM price_history s WHERE
@@ -712,6 +789,8 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
             assert row is not None
             counts[table] = row[0]
         connection.execute("CHECKPOINT")
+        # Finish even the expensive preferred-history export before publishing the DB.
+        parquet_output = _write_parquet(connection, state.root) if not errors else None
     finally:
         connection.close()
     result = {
@@ -720,6 +799,13 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
         "counts": counts,
         "errors": errors,
         "quarantined": quarantined,
+        "resources": {
+            "memory_limit_mb": settings.analytics_memory_mb,
+            "threads": settings.analytics_threads,
+            "batch_rows": settings.analytics_batch_rows,
+            "batch_memory_mb": settings.analytics_batch_mb,
+            "spill_directory": str(temp.parent / (temp.name + ".tmp")),
+        },
     }
     atomic_json(directory / "build_result.json", result)
     if errors:
@@ -728,30 +814,52 @@ def build_database(state: State, *, restore_state: bool = False) -> dict:
             f"Rebuild has {len(errors)} invalid raw response(s); see analytics/build_result.json and {temp.name}"
         )
     os.replace(temp, directory / "ahledger.duckdb")
-    export_parquet(state)
+    assert parquet_output is not None
+    _publish_parquet(state.root, parquet_output)
     return result
 
 
-def export_parquet(state: State) -> Path:
-    directory = state.root / "parquet"
+def _write_parquet(connection: duckdb.DuckDBPyConnection, root: Path) -> Path:
+    directory = root / "parquet"
     generation = uuid.uuid4().hex
     output = directory / generation
     output.mkdir(parents=True, exist_ok=True)
-    connection = duckdb.connect(str(state.root / "analytics" / "ahledger.duckdb"), read_only=True)
+    for table in [
+        *SCHEMAS,
+        "price_history",
+        "preferred_price_history",
+        "coverage",
+        "source_availability",
+    ]:
+        file = (output / (table + ".parquet")).resolve().as_posix().replace("'", "''")
+        connection.execute(
+            f'''COPY (SELECT * FROM "{table}") TO '{file}'
+                (FORMAT PARQUET,COMPRESSION ZSTD,ROW_GROUP_SIZE 16384)'''
+        )
+    return output
+
+
+def _publish_parquet(root: Path, output: Path) -> None:
+    # Generation directories + atomic pointer prevent a mixed old/new set after Ctrl+C.
+    atomic_json(
+        root / "parquet" / "CURRENT.json",
+        {
+            "directory": output.name,
+            "generated_at": utc_now(),
+        },
+    )
+
+
+def export_parquet(state: State, *, settings: Settings | None = None) -> Path:
+    settings = settings or Settings.read(root=state.root)
+    connection = analytics_connection(
+        state.root / "analytics" / "ahledger.duckdb",
+        settings,
+        read_only=True,
+    )
     try:
-        for table in [
-            *SCHEMAS,
-            "price_history",
-            "preferred_price_history",
-            "coverage",
-            "source_availability",
-        ]:
-            file = (output / (table + ".parquet")).resolve().as_posix().replace("'", "''")
-            connection.execute(
-                f'''COPY (SELECT * FROM "{table}") TO '{file}' (FORMAT PARQUET,COMPRESSION ZSTD)'''
-            )
+        output = _write_parquet(connection, state.root)
     finally:
         connection.close()
-    # Generation directories + atomic pointer prevent a mixed old/new set after Ctrl+C.
-    atomic_json(directory / "CURRENT.json", {"directory": generation, "generated_at": utc_now()})
+    _publish_parquet(state.root, output)
     return output

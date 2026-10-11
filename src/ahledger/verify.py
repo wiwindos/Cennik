@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-import duckdb
-
+from .analytics import analytics_connection
+from .config import Settings
 from .models import JobSpec
 from .parsers import parse
 from .storage import TERMINAL, RawArchive, State
 from .util import atomic_json, utc_now
 
 
-def verify(state: State) -> dict:
+def verify(state: State, *, settings: Settings | None = None) -> dict:
+    settings = settings or Settings.read(root=state.root)
     archive = RawArchive(state)
     errors = []
     rejected_responses = []
     checked = 0
-    for meta in archive.manifests():
+    for meta in archive.manifests(ordered=False):
         try:
-            original = archive.read_sha(meta["sha256"])
-            if len(original) != meta["size"]:
+            original_size = len(archive.read_sha(meta["sha256"]))
+            if original_size != meta["size"]:
                 raise ValueError("Original response size differs from manifest")
             checked += 1
             spec = JobSpec.model_validate(meta["spec"])
@@ -34,8 +35,8 @@ def verify(state: State) -> dict:
                 or spec.dataset == "professions"
                 and meta["http_status"] == 400
             ):
-                parsed = parse(spec, archive.read(meta))
-                if "records" in meta and parsed.count != meta["records"]:
+                record_count = parse(spec, archive.read(meta)).count
+                if "records" in meta and record_count != meta["records"]:
                     raise ValueError("Manifest record count differs from reparsed raw")
             if (
                 meta["validation"] in TERMINAL
@@ -59,7 +60,7 @@ def verify(state: State) -> dict:
     db = state.root / "analytics" / "ahledger.duckdb"
     analytics = "NOT_CHECKED"
     if db.exists():
-        connection = duckdb.connect(str(db), read_only=True)
+        connection = analytics_connection(db, settings, read_only=True)
         try:
             checks = {
                 "duplicate price observations": "SELECT count(*) FROM (SELECT market,item_id,observed_at,granularity,count(*) n FROM price_history GROUP BY ALL HAVING n>1)",
