@@ -1,0 +1,1 @@
+"""Manual calculation lifecycle."""
