@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable
@@ -66,6 +67,7 @@ SCHEMAS: dict[str, dict[str, str]] = {
         "item_id": "BIGINT",
         "quantity": "BIGINT",
     },
+    "recipe_sources": {"spell_id": "BIGINT", "version_hash": "VARCHAR", "market": "VARCHAR"},
     "recipe_valuations": {
         "market": "VARCHAR",
         "spell_id": "BIGINT",
@@ -225,6 +227,7 @@ KEYS = {
     "item_versions": "item_id,version_hash",
     "recipes": "spell_id,version_hash",
     "recipe_inputs": "spell_id,version_hash,item_id",
+    "recipe_sources": "spell_id,version_hash,market,raw_id",
     "price_history_ranges": 'market,item_id,observed_at,"range"',
     "price_snapshots": "market,item_id,observed_at,source",
     "recipe_valuations": "market,spell_id,observed_at,generated_at",
@@ -393,6 +396,8 @@ def normalized(
                 "reagents": [{k: v for k, v in r.items() if k != "price"} for r in row["reagents"]],
             }
             version = digest(dumps(mechanics).encode())
+            add("recipe_sources", {"spell_id": recipe["spellId"], "version_hash": version},
+                spell_id=recipe["spellId"], version_hash=version, market=spec.market)
             add(
                 "recipes",
                 mechanics,
@@ -621,6 +626,8 @@ def build_database(
     *,
     restore_state: bool = False,
     settings: Settings | None = None,
+    base_database: Path | None = None,
+    allowed_market: str | None = None,
 ) -> dict:
     settings = settings or Settings.read(root=state.root)
     archive = RawArchive(state)
@@ -681,9 +688,30 @@ def build_database(
         for table, columns in columns_by_table.items():
             fields = ",".join(f'"{column}" {sql}' for column, sql in columns.items())
             connection.execute(f'CREATE TABLE "{table}" ({fields})')
+        if base_database is not None:
+            source = base_database.resolve().as_posix().replace("'", "''")
+            connection.execute(f"ATTACH '{source}' AS baseline (READ_ONLY)")
+            baseline_tables = {row[0] for row in connection.execute("SELECT table_name FROM information_schema.tables WHERE table_catalog='baseline'").fetchall()}
+            for table, columns in columns_by_table.items():
+                if table not in baseline_tables:
+                    if table == "recipe_sources":
+                        connection.execute("""INSERT INTO recipe_sources SELECT r.spell_id,r.version_hash,m.market,
+                            r.raw_id,r.sha256,r.retrieved_at,NULL FROM baseline.recipes r
+                            JOIN baseline.dataset_metadata m ON r.raw_id=m.raw_id AND m.dataset='crafting'""")
+                        continue
+                    raise ValueError("Baseline is missing table: " + table)
+                projection = ",".join(f'"{name}"' for name in columns)
+                connection.execute(f'INSERT INTO "{table}" SELECT {projection} FROM baseline."{table}"')
+            connection.execute("DETACH baseline")
         for meta in archive.manifests(ordered=False):
             manifests += 1
             spec = JobSpec.model_validate(meta["spec"])
+            if allowed_market is not None and spec.market != allowed_market:
+                raise ValueError("Update contains a response outside the selected market")
+            if base_database is not None and connection.execute(
+                "SELECT 1 FROM dataset_metadata WHERE raw_id=? LIMIT 1", [meta["id"]]
+            ).fetchone():
+                continue
             if meta["validation"] == "FAILED":
                 # A rejected API response is a valid archived artifact, never a price observation.
                 archive.read_sha(meta["sha256"])
@@ -722,6 +750,7 @@ def build_database(
                     "error": row["error"],
                     "spec_json": row["spec"],
                     "raw_id": row["raw_id"],
+                    "retrieved_at": row["updated_at"],
                 },
             )
         for table in columns_by_table:
@@ -735,6 +764,8 @@ def build_database(
                     + order
                 )
             deduplicate(connection, table, table, key, order)
+        if base_database is not None:
+            deduplicate(connection, "download_jobs", "download_jobs", "job_id", "retrieved_at DESC,raw_id DESC")
         deduplicate(
             connection,
             "price_history_ranges",
@@ -799,6 +830,7 @@ def build_database(
         "counts": counts,
         "errors": errors,
         "quarantined": quarantined,
+        "merged_from": str(base_database) if base_database else None,
         "resources": {
             "memory_limit_mb": settings.analytics_memory_mb,
             "threads": settings.analytics_threads,
@@ -813,7 +845,14 @@ def build_database(
         raise ValueError(
             f"Rebuild has {len(errors)} invalid raw response(s); see analytics/build_result.json and {temp.name}"
         )
-    os.replace(temp, directory / "ahledger.duckdb")
+    for attempt in range(30):
+        try:
+            os.replace(temp, directory / "ahledger.duckdb")
+            break
+        except PermissionError:
+            if attempt == 29:
+                raise
+            time.sleep(0.1)
     assert parquet_output is not None
     _publish_parquet(state.root, parquet_output)
     return result
@@ -824,6 +863,7 @@ def _write_parquet(connection: duckdb.DuckDBPyConnection, root: Path) -> Path:
     generation = uuid.uuid4().hex
     output = directory / generation
     output.mkdir(parents=True, exist_ok=True)
+    existing_tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
     for table in [
         *SCHEMAS,
         "price_history",
@@ -831,6 +871,8 @@ def _write_parquet(connection: duckdb.DuckDBPyConnection, root: Path) -> Path:
         "coverage",
         "source_availability",
     ]:
+        if table == "recipe_sources" and table not in existing_tables:
+            continue  # Imported databases built before source-provenance tracking.
         file = (output / (table + ".parquet")).resolve().as_posix().replace("'", "''")
         connection.execute(
             f'''COPY (SELECT * FROM "{table}") TO '{file}'

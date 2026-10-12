@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from decimal import Decimal
 from typing import Literal
 
@@ -7,7 +9,8 @@ from cennik.core.models import AnalyticsSettings
 from cennik.services.analytics import AnalyticsService, DataNotReady
 
 
-def analytics_router(service: AnalyticsService) -> APIRouter:
+def analytics_router(service: AnalyticsService, *, updating: Callable[[], bool] | None = None,
+                     operation_lock: AbstractContextManager | None = None) -> APIRouter:
     router = APIRouter(prefix="/analytics")
 
     @router.get("/markets")
@@ -33,14 +36,17 @@ def analytics_router(service: AnalyticsService) -> APIRouter:
 
     @router.post("/recalculate", status_code=202)
     def recalculate():
-        try:
-            return service.start()
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except DataNotReady as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        with operation_lock if operation_lock is not None else nullcontext():
+            if updating is not None and updating():
+                raise HTTPException(409, "Дождитесь завершения обновления базы перед пересчётом аналитики.")
+            try:
+                return service.start()
+            except RuntimeError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except DataNotReady as exc:
+                raise HTTPException(503, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
 
     @router.get("/opportunities")
     def opportunities(

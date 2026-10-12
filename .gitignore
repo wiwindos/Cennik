@@ -11,6 +11,8 @@ __pycache__/
 .env.*
 !.env.example
 /data/
+/*.duckdb
+/*.duckdb.wal
 research/*.body
 research/*.meta.json
 build/

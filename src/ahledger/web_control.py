@@ -10,13 +10,15 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import Settings
 from .storage import TERMINAL, job_scope
+from .update import batch_root
 from .util import atomic_json, utc_now
 
 Dataset = Literal[
@@ -46,12 +48,18 @@ DEFAULT_MARKETS = [
 
 class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["download", "discover", "build", "verify"] = "download"
+    action: Literal["download", "discover", "build", "verify", "update"] = "download"
     markets: list[MarketID] = Field(default_factory=lambda: ["forever.pvp.horde.us"], max_length=12)
     datasets: list[Dataset] = Field(default_factory=list, max_length=12)
     requests_per_second: float = Field(default=1, ge=0.01, le=5)
     tools_per_second: float = Field(default=0.5, ge=0.01, le=1)
     retry_failed: bool = False
+
+    @model_validator(mode="after")
+    def one_update_market(self):
+        if self.action == "update" and len(self.markets) != 1:
+            raise ValueError("Для обновления выберите ровно один рынок.")
+        return self
 
 
 def read_state(root: Path, settings: Settings | None = None) -> dict:
@@ -139,6 +147,15 @@ class Controller:
             }
         )
 
+    def progress_root(self) -> Path:
+        if self.info.get("action") == "update" and self.info.get("update_id"):
+            return batch_root(self.root, self.info["update_id"])
+        return self.root
+
+    def updating(self) -> bool:
+        with self.lock:
+            return self.info.get("action") == "update" and self.info.get("state") in {"running", "building", "stopping"}
+
     def save(self, **values):
         with self.lock:
             self.info.update(values)
@@ -149,7 +166,7 @@ class Controller:
             info = dict(self.info)
             settings = self.run_settings
             started, baseline = self.monotonic_start, self.baseline
-        state = read_state(self.root, settings)
+        state = read_state(self.progress_root(), settings)
         done = sum(state["jobs"].get(status, 0) for status in TERMINAL)
         remaining = sum(state["jobs"].get(status, 0) for status in ("PENDING", "RUNNING", "RETRY"))
         rate = max(0, done - baseline) / max(1, time.monotonic() - started) if started else 0
@@ -180,9 +197,15 @@ class Controller:
             if unknown and saved["active_markets"]:
                 raise ValueError("Неизвестные рынки: " + ", ".join(sorted(unknown)))
             self.run_settings = self.job_settings(request)
+            previous = dict(self.info)
+            update_id = None
+            if request.action == "update":
+                resume = previous.get("state") in {"stopped", "failed", "interrupted", "partial"} and previous.get("request", {}).get("markets") == request.markets
+                update_id = previous.get("update_id") if resume else None
+                update_id = update_id or uuid.uuid4().hex
             self.cancelled.clear()
             self.monotonic_start = time.monotonic()
-            scoped = read_state(self.root, self.run_settings)
+            scoped = read_state(batch_root(self.root, update_id) if update_id else self.root, self.run_settings)
             self.baseline = sum(scoped["jobs"].get(status, 0) for status in TERMINAL)
             self.info = {
                 "state": "running",
@@ -190,6 +213,7 @@ class Controller:
                 "started_at": utc_now(),
                 "request": request.model_dump(),
                 "error": None,
+                "update_id": update_id,
             }
             self.save()
             self.thread = threading.Thread(target=self.execute, args=(request,), daemon=True)
@@ -218,6 +242,9 @@ class Controller:
             return [[*base, "build-db"], [*base, "verify"], [*base, "report"]]
         if request.action == "verify":
             return [[*base, "verify"]]
+        if request.action == "update":
+            return [[*base, "update-fetch", "--update-id", self.info["update_id"]],
+                    [*base, "update-merge", "--update-id", self.info["update_id"]]]
         return [
             [
                 *base,
@@ -242,7 +269,7 @@ class Controller:
                         if self.cancelled.is_set():
                             break
                         self.save(
-                            state="building" if "build-db" in command else "running",
+                            state="building" if "build-db" in command or "update-merge" in command else "running",
                             command=command[-1],
                         )
                         environment = os.environ.copy()
@@ -269,7 +296,7 @@ class Controller:
                         raise RuntimeError(
                             f"Команда завершилась с кодом {exit_code}; подробности в журнале"
                         )
-            snapshot = read_state(self.root, self.run_settings)
+            snapshot = read_state(self.progress_root(), self.run_settings)
             unfinished = any(
                 snapshot["jobs"].get(status, 0)
                 for status in ("PENDING", "RETRY", "RUNNING", "FAILED")
@@ -277,7 +304,7 @@ class Controller:
             outcome = (
                 "stopped"
                 if self.cancelled.is_set()
-                else ("partial" if request.action == "download" and unfinished else "completed")
+                else ("partial" if request.action in {"download", "update"} and unfinished else "completed")
             )
             self.save(state=outcome, finished_at=utc_now())
         except Exception as exc:
@@ -299,7 +326,13 @@ class Controller:
             if self.process and self.process.poll() is None:
                 try:
                     if os.name == "nt":
-                        self.process.terminate()
+                        # The venv launcher may own a child python.exe. Stop the
+                        # entire owned job tree, so downloads cannot outlive Stop.
+                        subprocess.run(
+                            ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW, check=False,
+                        )
                     else:
                         os.killpg(self.process.pid, signal.SIGINT)  # type: ignore[attr-defined]
                 except ProcessLookupError:

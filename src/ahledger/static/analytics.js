@@ -234,5 +234,6 @@
   el("prev").addEventListener("click", () => {offset = Math.max(0, offset - 50); loadResults().catch(exc => error(exc.message));});
   el("next").addEventListener("click", () => {offset += 50; loadResults().catch(exc => error(exc.message));});
   window.addEventListener("cennik-connected", refresh);
+  window.addEventListener("cennik-data-updated", refresh);
   window.addEventListener("cennik-disconnected", () => {revision++; clearTimeout(timer); timer = null; clear(); settings = null;});
 })();

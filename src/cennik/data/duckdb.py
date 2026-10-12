@@ -91,13 +91,21 @@ class DuckDBProvider:
     def recipes(self) -> list[Recipe]:
         # Mechanics are global, but only use versions with provenance for this market.
         # Valuations have no version_hash and are intentionally never used for costs.
-        rows = self.rows("""SELECT DISTINCT r.spell_id,r.version_hash,r.result_item_id,
+        provenance = "m.raw_id=r.raw_id AND m.dataset='crafting'"
+        source_table = "dataset_metadata"
+        if self.db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='recipe_sources'").fetchone():
+            if self.db.execute("SELECT 1 FROM recipe_sources LIMIT 1").fetchone():
+                source_table = "recipe_sources"
+                provenance = "m.spell_id=r.spell_id AND m.version_hash=r.version_hash AND m.retrieved_at<=?"
+        params: list = [self.as_of] if source_table == "recipe_sources" else []
+        status = "" if source_table == "recipe_sources" else "AND m.status NOT IN ('FAILED','NOT_AVAILABLE')"
+        rows = self.rows(f"""SELECT DISTINCT r.spell_id,r.version_hash,r.result_item_id,
             r.qty_min,r.qty_max,r.name,r.profession,r.skill_required,r.acquisition,
             r.raw_id,r.payload_json,m.market AS source_market FROM recipes r
-            JOIN dataset_metadata m ON m.raw_id=r.raw_id AND m.dataset='crafting'
+            JOIN {source_table} m ON {provenance}
             WHERE (m.market=? OR m.market IS NULL) AND r.retrieved_at<=?
-            AND m.status NOT IN ('FAILED','NOT_AVAILABLE') ORDER BY r.spell_id,r.version_hash""",
-            [self.market, self.as_of])
+            {status} ORDER BY r.spell_id,r.version_hash""",
+            [*params, self.market, self.as_of])
         inputs = self.rows("""SELECT spell_id,version_hash,item_id,quantity
             FROM recipe_inputs WHERE retrieved_at<=? ORDER BY spell_id,version_hash,item_id""", [self.as_of])
         grouped: dict[tuple, list[RecipeInput]] = {}

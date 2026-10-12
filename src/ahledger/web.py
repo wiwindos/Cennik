@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import json
 import os
 import re
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import JSONResponse
 
 from cennik.api.routes import analytics_router
 from cennik.services.analytics import AnalyticsService
@@ -22,14 +25,15 @@ from .config import Settings
 from .web_control import Controller, JobRequest
 
 
-def create_app(settings: Settings | None = None, api_key: str | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, api_key: str | None = None, *, local: bool = False) -> FastAPI:
     key = api_key if api_key is not None else os.environ.get("AHL_WEB_API_KEY", "")
-    if len(key) < 32:
+    if not local and len(key) < 32:
         raise ValueError("Set AHL_WEB_API_KEY to a random secret of at least 32 characters")
     settings = settings or Settings.read(Path(os.getenv("AHL_CONFIG", "config.toml")))
     controller = Controller(settings)
     root = controller.root
     analytics = AnalyticsService(root)
+    operation_lock = threading.RLock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -50,11 +54,22 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
     header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
     def authorize(provided: str | None = Depends(header)):
+        if local:
+            return
         if not provided or not hmac.compare_digest(provided.encode(), key.encode()):
             raise HTTPException(401, "Неверный секретный ключ")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        if local:
+            try:
+                loopback = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
+            except ValueError:
+                loopback = False
+            origin = request.headers.get("origin")
+            if (not loopback or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or (origin is not None and origin != str(request.base_url).rstrip("/"))):
+                return JSONResponse({"detail": "Локальный режим доступен только с этой машины и страницы приложения."}, status_code=403)
         response = await call_next(request)
         response.headers.update(
             {
@@ -68,7 +83,10 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "downloads_autostart": False}
+        value = {"status": "ok", "downloads_autostart": False, "local_mode": local}
+        if local:
+            value["workspace"] = str(root)
+        return value
 
     static = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static), name="static")
@@ -81,10 +99,32 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
 
     @router.get("/status")
     def status():
-        return controller.snapshot()
+        value = controller.snapshot()
+        if local and analytics.path.exists():
+            value["markets"] = [{"id": m["market"], "label": m["label"]} for m in analytics.markets()]
+            if (root / "analytics/imported.json").exists() and not (root / "analytics/build_result.json").exists():
+                value["analytics_updated_at"] = json.loads((root / "analytics/imported.json").read_text("utf-8")).get("imported_at")
+        value["local_mode"] = local
+        value["imported_snapshot"] = local and (root / "analytics/imported.json").exists()
+        value["raw_available"] = (root / "raw/metadata").exists() and any((root / "raw/metadata").glob("*.json"))
+        value["market_update_available"] = analytics.path.exists()
+        return value
 
     @router.post("/jobs", status_code=202)
     def start_job(request: JobRequest):
+        with operation_lock:
+            return launch_job(request)
+
+    def launch_job(request: JobRequest):
+        if request.action == "update":
+            if analytics.lock.locked():
+                raise HTTPException(409, "Дождитесь завершения расчёта аналитики перед обновлением базы.")
+            if request.markets[0] not in {row["market"] for row in analytics.markets()}:
+                raise HTTPException(422, "Рынок отсутствует в текущей базе.")
+        if local and request.action in {"download", "build"} and (root / "analytics/imported.json").exists():
+            raise HTTPException(409, "Подключена серверная DuckDB без её raw-архива. Автоматическая пересборка из прежних локальных ответов заменила бы серверные данные. Для обновления этой базы нужен её raw-архив либо отдельное добавление новых данных.")
+        if local and request.action == "build" and not any((root / "raw/metadata").glob("*.json")):
+            raise HTTPException(409, "Подключена готовая DuckDB, но исходный raw-архив отсутствует. Пересборка невозможна; аналитика и история уже доступны.")
         try:
             return controller.start(request)
         except RuntimeError as exc:
@@ -107,11 +147,17 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
         offset: int = Query(0, ge=0, le=1000000),
     ):
         path = root / "state.sqlite"
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if local and analytics.path.exists():
+            with duckdb.connect(str(analytics.path), read_only=True) as source_db:
+                source_rows = source_db.execute("""SELECT item_id,name FROM items
+                    WHERE CAST(item_id AS VARCHAR)=? OR coalesce(name,'') ILIKE ? ESCAPE '\\'
+                    ORDER BY item_id LIMIT ? OFFSET ?""", [q, "%" + escaped + "%", limit, offset]).fetchall()
+            return {"items": [{"id": row[0], "name": row[1]} for row in source_rows], "limit": limit, "offset": offset}
         if not path.exists():
             return {"items": [], "limit": limit, "offset": offset}
         connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
         try:
-            escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = connection.execute(
                 "SELECT id,payload FROM item_candidates WHERE CAST(id AS TEXT)=? OR coalesce(json_extract(payload,'$.name'),'') LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?",
                 [q, "%" + escaped + "%", limit, offset],
@@ -191,6 +237,6 @@ def create_app(settings: Settings | None = None, api_key: str | None = None) -> 
     def openapi():
         return app.openapi()
 
-    router.include_router(analytics_router(analytics))
+    router.include_router(analytics_router(analytics, updating=controller.updating, operation_lock=operation_lock))
     app.include_router(router)
     return app

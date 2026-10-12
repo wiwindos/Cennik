@@ -1,5 +1,6 @@
 """Bounded headless Edge UI check with a fake job runner; no AHledger requests."""
 
+import argparse
 import base64
 import json
 import shutil
@@ -20,6 +21,9 @@ from ahledger.web import create_app
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--local", action="store_true", help="Check loopback-only automatic login")
+    args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
     key = "web-ui-check-only-" + "a" * 40
     edge_path = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
@@ -42,7 +46,7 @@ def main():
             history_market, history_item, history_grain = db.execute(
                 "SELECT market,item_id,granularity FROM price_history GROUP BY ALL ORDER BY count(*) DESC,item_id LIMIT 1"
             ).fetchone()
-        app = create_app(Settings(data_dir=archive), key)
+        app = create_app(Settings(data_dir=archive), key, local=args.local)
         # Widen freshness only in this isolated UI check; real old archives stay old.
         from cennik.core.models import AnalyticsConfig, AnalyticsSettings
 
@@ -132,12 +136,17 @@ def main():
 
             call("Runtime.enable")
             wait_for("!!document.getElementById('key')")
-            evaluate(
-                "sessionStorage.setItem('ahl-key', " + json.dumps(key) + "); location.reload()"
-            )
+            if not args.local:
+                evaluate(
+                    "sessionStorage.setItem('ahl-key', " + json.dumps(key) + "); location.reload()"
+                )
             wait_for(
                 "document.getElementById('dashboard') && !document.getElementById('dashboard').hidden"
             )
+            if args.local:
+                assert evaluate("document.getElementById('login').hidden && document.getElementById('logout').hidden")
+                assert evaluate("!sessionStorage.getItem('ahl-key')")
+                assert evaluate("document.getElementById('connection').textContent === 'Локально'")
             evaluate(
                 "document.getElementById('search').value='2589'; document.getElementById('search-form').requestSubmit()"
             )
@@ -186,6 +195,12 @@ def main():
             )
             evaluate("document.getElementById('stop').click()")
             wait_for("!document.getElementById('start').disabled")
+            evaluate("document.getElementById('update-market').click()")
+            wait_for("document.getElementById('update-market').disabled && !document.getElementById('stop').disabled")
+            assert received[-1]["action"] == "update"
+            assert received[-1]["markets"] == ["forever.pvp.alliance.us"]
+            evaluate("document.getElementById('stop').click()")
+            wait_for("!document.getElementById('update-market').disabled")
             call(
                 "Emulation.setDeviceMetricsOverride",
                 {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True},
