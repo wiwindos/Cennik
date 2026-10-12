@@ -8,7 +8,7 @@ from cennik.strategies.common import opportunity
 
 class SimpleCraftArbitrage:
     id = "simple_craft"
-    version = "0.1.0"
+    version = "0.2.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
         results = []

@@ -22,6 +22,8 @@ class DuckDBProvider:
         self.market, self.as_of = market, utc(as_of)
         self.db = duckdb.connect(str(path), read_only=True)
         self.db.execute("SET TimeZone='UTC'")
+        self.recipe_selection: dict[str, int | str] = {"policy": "latest_market_snapshot_as_of"}
+        self._recipes: list[Recipe] | None = None
 
     def __enter__(self):
         return self
@@ -89,31 +91,86 @@ class DuckDBProvider:
             FROM items WHERE retrieved_at<=?""", [self.as_of])}
 
     def recipes(self) -> list[Recipe]:
-        # Mechanics are global, but only use versions with provenance for this market.
-        # Valuations have no version_hash and are intentionally never used for costs.
-        provenance = "m.raw_id=r.raw_id AND m.dataset='crafting'"
-        source_table = "dataset_metadata"
-        if self.db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='recipe_sources'").fetchone():
-            if self.db.execute("SELECT 1 FROM recipe_sources LIMIT 1").fetchone():
-                source_table = "recipe_sources"
-                provenance = "m.spell_id=r.spell_id AND m.version_hash=r.version_hash AND m.retrieved_at<=?"
-        params: list = [self.as_of] if source_table == "recipe_sources" else []
-        status = "" if source_table == "recipe_sources" else "AND m.status NOT IN ('FAILED','NOT_AVAILABLE')"
-        rows = self.rows(f"""SELECT DISTINCT r.spell_id,r.version_hash,r.result_item_id,
+        if self._recipes is not None:
+            return self._recipes
+        # recipe_sources records when THIS market saw immutable mechanics. The
+        # deduplicated recipes/inputs rows may have been retrieved later elsewhere.
+        bridge = bool(self.db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='recipe_sources'").fetchone())
+        bridge = bridge and bool(self.db.execute("SELECT 1 FROM recipe_sources LIMIT 1").fetchone())
+        source = """SELECT s.spell_id,s.version_hash,s.market,s.raw_id,s.retrieved_at,
+            m.payload_json,m.params_json FROM recipe_sources s
+            JOIN dataset_metadata m ON m.raw_id=s.raw_id AND m.dataset='crafting'
+            AND m.market IS NOT DISTINCT FROM s.market
+            WHERE s.retrieved_at<=? AND m.retrieved_at<=?
+            AND m.status NOT IN ('FAILED','NOT_AVAILABLE')""" if bridge else """SELECT r.spell_id,r.version_hash,
+            m.market,m.raw_id,m.retrieved_at,m.payload_json,m.params_json FROM recipes r
+            JOIN dataset_metadata m ON m.raw_id=r.raw_id AND m.dataset='crafting'
+            WHERE m.retrieved_at<=? AND r.retrieved_at<=?
+            AND m.status NOT IN ('FAILED','NOT_AVAILABLE')"""
+        rows = self.rows(f"""WITH provenance AS ({source})
+            SELECT DISTINCT r.spell_id,r.version_hash,r.result_item_id,
             r.qty_min,r.qty_max,r.name,r.profession,r.skill_required,r.acquisition,
-            r.raw_id,r.payload_json,m.market AS source_market FROM recipes r
-            JOIN {source_table} m ON {provenance}
-            WHERE (m.market=? OR m.market IS NULL) AND r.retrieved_at<=?
-            {status} ORDER BY r.spell_id,r.version_hash""",
-            [*params, self.market, self.as_of])
+            m.raw_id,r.payload_json,m.market AS source_market,
+            m.retrieved_at AS source_retrieved_at,
+            coalesce(try_cast(json_extract_string(m.payload_json,'$.response_metadata.generatedAt') AS TIMESTAMPTZ),
+                     try_cast(json_extract_string(m.payload_json,'$.generatedAt') AS TIMESTAMPTZ),
+                     m.retrieved_at) AS source_generated_at
+            FROM recipes r JOIN provenance m USING(spell_id,version_hash)
+            WHERE m.market=? OR m.market IS NULL ORDER BY r.spell_id,r.version_hash,m.raw_id""",
+            [self.as_of, self.as_of, self.market])
+        # A new all=1 snapshot supersedes its profession's older membership, even
+        # when capped/PARTIAL. Absence never resurrects a removed old recipe.
+        snapshots = self.rows("""SELECT raw_id,market,retrieved_at,
+            json_extract_string(params_json,'$.profession') AS profession,
+            coalesce(try_cast(json_extract_string(payload_json,'$.response_metadata.generatedAt') AS TIMESTAMPTZ),
+                     try_cast(json_extract_string(payload_json,'$.generatedAt') AS TIMESTAMPTZ),
+                     retrieved_at) AS generated_at FROM dataset_metadata
+            WHERE dataset='crafting' AND (market=? OR market IS NULL) AND retrieved_at<=?
+            AND status NOT IN ('FAILED','NOT_AVAILABLE')
+            AND json_extract_string(params_json,'$.all') IN ('1','true')""", [self.market, self.as_of])
+        latest: dict[tuple, tuple[datetime, set[str]]] = {}
+        for snapshot in snapshots:
+            if snapshot['generated_at'] > self.as_of or not snapshot['profession']:
+                continue
+            key = (snapshot['market'], snapshot['profession'].casefold())
+            stamp = snapshot['generated_at']
+            old = latest.get(key)
+            if old is None or stamp > old[0]:
+                latest[key] = (stamp, {snapshot['raw_id']})
+            elif stamp == old[0]:
+                old[1].add(snapshot['raw_id'])
+        eligible: dict[int, list[dict]] = {}
+        excluded = 0
+        for row in rows:
+            profession = (row['profession'] or '').casefold()
+            scope = latest.get((self.market, profession)) or latest.get((row['source_market'], profession))
+            if row['source_generated_at'] > self.as_of or (scope and row['raw_id'] not in scope[1]):
+                excluded += 1
+                continue
+            eligible.setdefault(row['spell_id'], []).append(row)
+        selected, ambiguous, superseded = [], 0, 0
+        for candidates in eligible.values():
+            # Prefer this market over unscoped provenance; never borrow another
+            # market's latest version or break equal-time conflicts by hash/profit.
+            local = [r for r in candidates if r['source_market'] == self.market]
+            scoped = local or candidates
+            stamp = max(r['source_generated_at'] for r in scoped)
+            newest = [r for r in scoped if r['source_generated_at'] == stamp]
+            superseded += len({r['version_hash'] for r in candidates}) - len({r['version_hash'] for r in newest})
+            if len({r['version_hash'] for r in newest}) != 1:
+                ambiguous += 1
+                continue
+            selected.append(max(newest, key=lambda r: (r['source_retrieved_at'], r['raw_id'] or '')))
+        self.recipe_selection.update(selected=len(selected), ambiguous=ambiguous,
+                                     superseded_versions=superseded, outside_latest_snapshot=excluded)
         inputs = self.rows("""SELECT spell_id,version_hash,item_id,quantity
-            FROM recipe_inputs WHERE retrieved_at<=? ORDER BY spell_id,version_hash,item_id""", [self.as_of])
+            FROM recipe_inputs ORDER BY spell_id,version_hash,item_id""")
         grouped: dict[tuple, list[RecipeInput]] = {}
         for row in inputs:
             grouped.setdefault((row["spell_id"], row["version_hash"]), []).append(
                 RecipeInput(item_id=row["item_id"], quantity=row["quantity"]))
         result = []
-        for row in rows:
+        for row in selected:
             materials = grouped.get((row["spell_id"], row["version_hash"]), [])
             mechanics = json.loads(row.pop("payload_json") or "{}")
             expected = sorted((r.get("id"), r.get("qty")) for r in mechanics.get("reagents", []))
@@ -122,6 +179,7 @@ class DuckDBProvider:
             if not expected or actual != expected:
                 materials = []
             result.append(Recipe(**row, inputs=materials))
+        self._recipes = result
         return result
 
     def quality(self) -> dict[str, Any]:
@@ -132,4 +190,5 @@ class DuckDBProvider:
             for key in ("warnings_json", "gaps_json"):
                 row[key.removesuffix("_json")] = json.loads(row.pop(key) or "[]")
         return {"metadata": metadata, "raw_order_book_available": False,
-                "sales_are_source_estimates": True, "coverage_is_partial": True}
+                "sales_are_source_estimates": True, "coverage_is_partial": True,
+                "recipe_selection": self.recipe_selection}

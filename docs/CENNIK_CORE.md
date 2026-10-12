@@ -1,4 +1,4 @@
-# Cennik Core v0.1
+# Cennik Core: current recipes and CraftGraph
 
 Cennik extends the existing AHledger application. Build/download/recovery commands
 are unchanged. Open the existing web panel, choose one market in **Cennik Analytics**,
@@ -83,9 +83,25 @@ Simple Craft evaluates **one craft**, joining reagents by both `spell_id` and
 `version_hash`. It checks the complete normalized input set against the archived
 mechanics JSON; a partial join is rejected. Recipe versions require provenance from
 the selected market or a global mechanics dataset. Market-specific valuations are
-not used because their existing schema lacks a recipe version hash. Item facts and
-mechanics are only included when their retrieval time is at/before `as_of`; the
-archive cannot reconstruct discarded earlier item facts.
+not used because their existing schema lacks a recipe version hash. Item facts
+are only included when their retrieval time is at/before `as_of`; the
+archive cannot reconstruct discarded earlier item facts. Recipe provenance uses
+`recipe_sources` joined to successful `dataset_metadata`, falling back to the old
+raw-id join for old databases. Immutable mechanics and inputs may have a newer
+global retrieval timestamp: this does not invalidate an earlier market observation
+of the same hash.
+
+Trading uses one latest source-confirmed version per `spell_id` for this market
+and `as_of`. Source `generatedAt` orders mechanics snapshots (download time is only
+a fallback); future source/download records are excluded. A newer all=1 snapshot
+supersedes older membership for that market/profession, including capped/PARTIAL
+responses. Recipes missing from that response are omitted, not backfilled from
+older snapshots. This can miss valid recipes in truncated responses. Conflicting
+latest hashes at equal source time are omitted rather than arbitrarily ordered.
+Invalid/incomplete latest mechanics never fall back to an older cheaper version.
+The selected source/raw id, retrieval/generation times and hash are in each recipe;
+compact `quality.recipe_selection` counts exclusions. This is the latest evidence
+available from AHledger, not an independent confirmation of the game's build.
 
 Materials use the cheaper positive observed auction minimum or explicit
 `items.vendor_buy_copper`, preserving each source and amount. Missing materials
@@ -94,8 +110,50 @@ depth are unconfirmed. Material price age contributes to the oldest input timest
 Revenue uses the result's observed minimum times `qty_min`; a yield range is not
 averaged. Known bind-on-pickup results are rejected. Profession, skill, acquisition,
 recipe version and full reagent breakdown remain in `details`, with access warnings.
-Multiple known recipe versions remain separate indicative candidates; no guarantee
-is made that an archived version is still usable in game.
+Historical recipe versions remain in DuckDB; they no longer generate current
+trading candidates. A historical `as_of` selects only evidence available then.
+
+### CraftGraph
+
+`engines/craft_graph.py` represents each complete recipe as an edge from several
+inputs to one output. `strategies/craft_graph.py` is an independent registered
+strategy (`craft_graph`), using the same provider, economics helpers, price quality,
+Opportunity contract, ranking, SQLite publication and manual recalculation.
+No source database, downloader, dependency, service or API endpoint is added.
+
+For one execution of each final recipe, the graph recursively compares buying
+each input (cheapest known NPC/AH offer) with producing it using another selected
+recipe. If N units are needed and minimum yield is Y, it charges
+`ceil(N/Y)` whole crafts and all their inputs. Result quantity is the final
+recipe's minimum yield. Only the final sale pays the auction cut; intermediate
+production is not an auction sale. All purchased leaf quantities are aggregated
+before comparing observed supply. Their source/observation times determine age.
+An intermediate can be made without its own auction quote, but every purchased
+leaf and final sale must have usable prices. Missing leaves never cost zero.
+
+Ancestor tracking rejects cyclic production paths; actual purchases can terminate
+other valid paths. Search limits are validated module settings:
+
+```json
+{"enabled_strategies":["craft_graph"],"strategy_settings":{"craft_graph":{"max_depth":5,"max_nodes":2000,"max_crafts":10000}}}
+```
+
+Depth is 2–10 (including the final recipe), search visits 1–20000 per final recipe,
+total craft executions 1–100000. Default values are shown above. A depth/craft limit
+may leave only a purchase option or reject the path. Reaching the search-visit limit
+rejects the entire candidate; a partially searched plan is never published. The
+graph does not enumerate economically equivalent paths as separate opportunities;
+ties prefer fewer steps and deterministic recipe ordering. Paths with fewer than
+two recipe steps are left to Simple Craft.
+
+This is bounded, conservative procurement, not a globally optimal batch solver.
+Shared surplus is not reused across branches and no surplus resale is credited to
+profit. Random/disenchant/probability-based transformations are excluded: only
+recipe inputs and a positive documented minimum output are used. No profession
+bonus, proc yield or conversion is invented. Transformation cooldown/time, NPC
+stock, profession/skill/access and actual AH depth remain unconfirmed. The UI
+shows ordered steps with versions, input quantities, batches, output, surplus and
+profession requirements, alongside purchases and the fee breakdown.
 
 Money is integer copper. Ratios, discounts, volatility, fees and ranking use Decimal.
 Auction revenue is `gross - floor(gross * cut_percent / 100)`, adapted from Forever
@@ -143,13 +201,18 @@ Decimal input values may be JSON strings. A PUT replaces the full document; omit
 config fields use defaults. The web panel preserves other settings when changing a
 market, commission or discount.
 
-Defaults: all three strategies enabled; discount 15%; auction cut 5%; history window
+Defaults for new settings: all four strategies enabled; discount 15%; auction cut 5%; history window
 30 days; at least 4 covered days spanning 3 days; latest history gap <=3 days;
 current price age <=86400 seconds; relative MAD <=0.30; capped volatility <=0.50;
 temporal outlier cap 0.10; recent median decline <=15%; minimum profit 1 copper.
 Ranking defaults: profit scale 10000 copper, ROI cap 100%, risk penalty 0.08 per flag.
 All thresholds are fields of `AnalyticsConfig`, validated by Pydantic. Source sales
 and supply are optional; there are no invented substitutes.
+Existing saved enabled-strategy lists are retained. Enable CraftGraph using its
+checkbox in the panel, then click the manual recalculation button. Saving settings
+alone does not calculate. Strategy/engine versions were bumped so old cached
+results cannot satisfy a calculation using the new recipe policy; status/UI also
+report a strategy-version mismatch for previously published runs.
 
 Example after obtaining a market from `/markets`:
 
@@ -196,14 +259,15 @@ include its ID in `enabled_strategies`. The engine/API require no changes. A cus
 module may declare `settings_model`, a Pydantic model inheriting `core.models.Model`.
 Its validated defaults/parameters live under `config.strategy_settings[strategy_id]`
 and are included in run identity. Unknown parameters or settings for unregistered
-modules are rejected. Built-in strategies use the shared configuration fields above.
+modules are rejected. CraftGraph declares its own validated settings model; the
+other built-in strategies use the shared configuration fields above.
 A custom
 `MarketDataProvider` can supply later local scans using the same market/as_of contract.
-Future CraftGraph, backtesting, liquidity prediction, portfolio, journal and addon
+Future backtesting, liquidity prediction, portfolio, journal and addon
 bridge modules should build on these contracts; no empty implementations are added.
 
 v0.2 priorities: an authenticated live order book with lot depth, verified recipe
-version availability and NPC access, recorded real executions/deposit costs, and
+build validation and NPC access, recorded real executions/deposit costs, and
 then backtesting/liquidity evaluation. Current signals remain `indicative`.
 
 See [`src/cennik/THIRD_PARTY.md`](../src/cennik/THIRD_PARTY.md) for pinned sources,

@@ -15,3 +15,8 @@ installed or executed, and no new runtime dependency is needed.
 Existing local reuse: `ahledger.util` supplies JSON serialization, hashing and
 the OS writer-lock implementation. The existing DuckDB schemas, atomic builds,
 FastAPI authorization, static-file packaging and Docker volume are retained.
+
+CraftGraph reuses the existing adapted `cheapest_material`, `auction_net`, shared
+price quality and Opportunity helpers. The bounded hyperedge search is local code;
+none of the reviewed sources supplies a compatible versioned, integer-batch solver
+with AHledger provenance. No additional upstream code or dependency was imported.

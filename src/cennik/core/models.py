@@ -13,7 +13,7 @@ class Model(BaseModel):
 
 class AnalyticsConfig(Model):
     enabled_strategies: list[str] = Field(
-        default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft"]
+        default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph"]
     )
     strategy_settings: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
     discount_percent: Decimal = Field(default=Decimal("15"), ge=0, le=100)
@@ -89,6 +89,8 @@ class Recipe(Model):
     inputs: list[RecipeInput]
     source_market: str | None = None
     raw_id: str | None = None
+    source_retrieved_at: AwareDatetime | None = None
+    source_generated_at: AwareDatetime | None = None
 
 
 class Opportunity(Model):

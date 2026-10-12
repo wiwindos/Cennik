@@ -38,7 +38,7 @@ def summarize_run(run: Run, *, metadata: dict | None = None, signals: dict | Non
         "rejections": diagnostics.get("rejections", {}),
         "strategy_signals": signals if signals is not None else diagnostics.get("strategy_signals", {}),
         "quality": {name: quality[name] for name in (
-            "raw_order_book_available", "sales_are_source_estimates", "coverage_is_partial"
+            "raw_order_book_available", "sales_are_source_estimates", "coverage_is_partial", "recipe_selection"
         ) if name in quality},
     }
     summary["quality"]["metadata_summary"] = counts

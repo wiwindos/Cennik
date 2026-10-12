@@ -36,13 +36,15 @@
 <label>Активный рынок<select id="analytics-market"><option value="">Выберите рынок</option></select></label>
 <label>Историческая скидка, %<input id="analytics-discount" type="number" min="0" max="100" step="0.01" value="15" required></label>
 <label>Комиссия AH, %<input id="analytics-cut" type="number" min="0" max="99.99" step="0.01" value="5" required></label>
+<label class="check"><input id="analytics-craft-graph" type="checkbox">Многоступенчатый крафт (CraftGraph)</label>
+<label>Максимум этапов цепочки<input id="analytics-craft-depth" type="number" min="2" max="10" value="5" required></label>
 <button id="analytics-save" type="submit">Сохранить настройки</button>
 <button id="analytics-recalculate" type="button" class="primary">Пересчитать аналитику</button>
 </form>
 <p id="analytics-status" class="hint" role="status" aria-live="polite">Загрузите статус и выберите рынок.</p>
 <p id="analytics-error" class="error" role="status"></p>
 <form id="analytics-filters" class="analytics-controls">
-<label>Стратегия<select id="analytics-strategy"><option value="">Все стратегии</option><option value="vendor_arbitrage">Vendor Arbitrage</option><option value="historical_discount">Historical Discount</option><option value="simple_craft">Simple Craft Arbitrage</option></select></label>
+<label>Стратегия<select id="analytics-strategy"><option value="">Все стратегии</option><option value="vendor_arbitrage">Vendor Arbitrage</option><option value="historical_discount">Historical Discount</option><option value="simple_craft">Simple Craft Arbitrage</option><option value="craft_graph">CraftGraph · многоступенчатый крафт</option></select></label>
 <label>Сортировка<select id="analytics-sort"><option value="rating">Рейтинг</option><option value="profit">Прибыль</option><option value="roi">ROI</option><option value="freshness">Свежесть</option></select></label>
 <label>Мин. прибыль, copper<input id="analytics-min-profit" type="number" min="0" value="0"></label>
 <label>Мин. ROI, %<input id="analytics-min-roi" type="number" min="0" step="0.01" value="0"></label>

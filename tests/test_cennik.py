@@ -67,11 +67,13 @@ def analytics_root(tmp_path):
                    min_copper=1, median_copper=2, source="fixture history")
         for version, reagent, quantity in [("v1",10,2),("v2",10,20)]:
             insert(db, "recipes", spell_id=100, version_hash=version, name="Fixture craft", profession="Tailoring",
-                   skill_required=100, acquisition="trainer", result_item_id=20, qty_min=2, qty_max=3, raw_id="recipe-a",
+                   skill_required=100, acquisition="trainer", result_item_id=20, qty_min=2, qty_max=3, raw_id="recipe-a-" + version,
+                   retrieved_at=NOW - timedelta(hours=1 if version == "v1" else 2),
                    payload_json=json.dumps({"reagents":[{"id":reagent,"qty":quantity},{"id":11,"qty":1}]}))
             insert(db, "recipe_inputs", spell_id=100, version_hash=version, item_id=reagent, quantity=quantity)
             insert(db, "recipe_inputs", spell_id=100, version_hash=version, item_id=11, quantity=1)
-        insert(db, "dataset_metadata", raw_id="recipe-a", dataset="crafting", market="market-a", status="COMPLETE")
+            insert(db, "dataset_metadata", raw_id="recipe-a-" + version, dataset="crafting", market="market-a",
+                   status="COMPLETE", retrieved_at=NOW - timedelta(hours=1 if version == "v1" else 2))
     return root
 
 
@@ -160,7 +162,7 @@ def test_craft_versions_materials_npc_cut_and_quantity(analytics_root):
         assert signal.details["materials"][1]["source"] == "npc"
         assert signal.details["auction_cut_copper"] == 15
         assert signal.details["recipe"]["skill_required"] == 100
-        assert ctx.diagnostics["simple_craft"]["not_profitable_after_cut"] == 1
+        assert provider.recipe_selection["superseded_versions"] == 1
     with DuckDBProvider(analytics_root / "analytics/ahledger.duckdb", "market-b", NOW) as provider:
         assert provider.recipes() == []
 
@@ -426,7 +428,7 @@ def test_new_runs_store_compact_summary_and_retain_full_quality(analytics_root):
     assert compact.diagnostics["summary_only"] is True
     assert "metadata" not in compact.diagnostics["quality"]
     assert "metadata" in full.diagnostics["quality"]
-    assert compact.diagnostics["quality"]["metadata_summary"]["record_count"] == 1
+    assert compact.diagnostics["quality"]["metadata_summary"]["record_count"] == 2
     assert sum(compact.diagnostics["strategy_signals"].values()) == full.signal_count
     assert compact.diagnostics["rejections"] == full.diagnostics["rejections"]
 

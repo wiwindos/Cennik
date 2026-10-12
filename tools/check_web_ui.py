@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -52,6 +53,26 @@ def main():
 
         covered = [m for m in app.state.analytics.markets() if m["observed_at"]]
         chosen = max(covered, key=lambda m: m["observed_at"])["market"]
+        # Invented two-step chain exists only in this temporary UI database, so
+        # chain detail rendering is tested even when the real sample has no craft.
+        with duckdb.connect(str(analytics / "ahledger.duckdb")) as db:
+            now = datetime.now(UTC)
+
+            def fixture_row(table, **fields):
+                fields.update(retrieved_at=now, raw_id="ui-craft-fixture")
+                columns = ",".join('"' + name + '"' for name in fields)
+                db.execute(f'INSERT INTO "{table}" ({columns}) VALUES ({",".join("?" for _ in fields)})', list(fields.values()))
+
+            for item_id, name, buy in [(90000001, "Fixture ore", 10), (90000002, "Fixture bar", None), (90000003, "Fixture craft", None)]:
+                fixture_row("items", item_id=item_id, name=name, vendor_buy_copper=buy, binding="none", origin_dataset="fixture")
+            for spell, output, material, quantity in [(90000101, 90000002, 90000001, 3), (90000102, 90000003, 90000002, 2)]:
+                fixture_row("recipes", spell_id=spell, version_hash="ui-graph", name="Fixture graph step", profession="FixtureGraph",
+                            result_item_id=output, qty_min=1, qty_max=1, payload_json=json.dumps({"reagents": [{"id": material, "qty": quantity}]}))
+                fixture_row("recipe_inputs", spell_id=spell, version_hash="ui-graph", item_id=material, quantity=quantity)
+                if db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='recipe_sources'").fetchone():
+                    fixture_row("recipe_sources", spell_id=spell, version_hash="ui-graph", market=chosen)
+            fixture_row("dataset_metadata", dataset="crafting", market=chosen, status="COMPLETE")
+            fixture_row("price_snapshots", market=chosen, item_id=90000003, min_copper=1000000000, quantity=10, observed_at=now, source="isolated UI fixture")
         app.state.analytics.update_settings(AnalyticsSettings(
             active_market=chosen, config=AnalyticsConfig(max_price_age_seconds=31536000)))
         received = []
@@ -158,6 +179,16 @@ def main():
             wait_for("document.querySelectorAll('#history tr').length > 0")
             wait_for("document.getElementById('analytics-market').options.length > 1 && !document.getElementById('analytics-recalculate').disabled")
             assert app.state.analytics.thread is None  # Reading the UI never calculates.
+            assert evaluate("document.getElementById('analytics-craft-graph').checked")
+            assert evaluate("document.querySelector('#analytics-strategy option[value=craft_graph]') !== null")
+            evaluate("document.getElementById('analytics-craft-depth').value='3';document.getElementById('analytics-settings').requestSubmit()")
+            wait_for("document.getElementById('analytics-status').textContent.includes('Наблюдение:') && !document.getElementById('analytics-save').disabled")
+            deadline_settings = time.monotonic() + 10
+            while app.state.analytics.store.settings().config.strategy_settings.get("craft_graph", {}).get("max_depth") != 3:
+                if time.monotonic() >= deadline_settings:
+                    raise RuntimeError("CraftGraph settings were not saved")
+                time.sleep(0.05)
+            assert app.state.analytics.thread is None
             evaluate("document.getElementById('analytics-recalculate').click()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             wait_for("document.getElementById('analytics-diagnostics').textContent.includes('Сигналов:')")
@@ -167,6 +198,14 @@ def main():
             evaluate("document.querySelector('#analytics-results button').click()")
             wait_for("!document.getElementById('analytics-detail').hidden")
             assert evaluate("document.getElementById('analytics-inputs').textContent.includes('indicative')")
+            evaluate("document.getElementById('analytics-strategy').value='craft_graph';document.getElementById('analytics-filters').requestSubmit()")
+            wait_for("Array.from(document.querySelectorAll('#analytics-results tr')).some(r=>r.textContent.includes('Fixture craft'))")
+            evaluate("Array.from(document.querySelectorAll('#analytics-results tr')).find(r=>r.textContent.includes('Fixture craft')).querySelector('button').click()")
+            wait_for("document.querySelectorAll('#analytics-inputs ol li').length === 2")
+            assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Порядок изготовления')")
+            assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Излишки не добавлены к прибыли')")
+            evaluate("document.getElementById('analytics-strategy').value='';document.getElementById('analytics-filters').requestSubmit()")
+            wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             evaluate("document.getElementById('analytics-sort').value='roi';document.getElementById('analytics-filters').requestSubmit()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             roi_values = evaluate("Array.from(document.querySelectorAll('#analytics-results tr'),r=>Number(r.cells[4].textContent.replace('%','')))")
@@ -217,16 +256,22 @@ def main():
             print(output)
         finally:
             if ws:
+                try:
+                    ws.send(json.dumps({"id": serial + 1, "method": "Browser.close"}))
+                except (OSError, websocket.WebSocketException):
+                    pass
                 ws.close()
             app.state.controller.stop()
             server.should_exit = True
             server_thread.join(timeout=3)
             if browser:
-                browser.terminate()
                 try:
-                    browser.wait(timeout=3)
+                    browser.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    browser.kill()
+                    subprocess.run(["taskkill", "/PID", str(browser.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
+                    browser.wait(timeout=5)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   const el = id => document.getElementById("analytics-" + id);
-  const names = {vendor_arbitrage:"Vendor Arbitrage", historical_discount:"Historical Discount", simple_craft:"Simple Craft Arbitrage"};
+  const names = {vendor_arbitrage:"Vendor Arbitrage", historical_discount:"Historical Discount", simple_craft:"Simple Craft Arbitrage", craft_graph:"CraftGraph"};
   const date = value => value ? new Date(value).toLocaleString("ru-RU") : "неизвестно";
   const money = value => {
     if (value === null || value === undefined) return "неизвестно";
@@ -21,10 +21,12 @@
     insufficient_observed_material_supply:"Наблюдаемых материалов недостаточно для одного крафта",
     profession_skill_recipe_access_unconfirmed:"Нужны подходящие профессия, навык и доступный рецепт",
     material_depth_unknown:"Объём материалов по минимальной цене неизвестен",result_sale_unconfirmed:"Продажа результата крафта не подтверждена",
-    result_tradeability_unconfirmed:"Данные о привязке результата отсутствуют — возможность передачи не подтверждена"
+    result_tradeability_unconfirmed:"Данные о привязке результата отсутствуют — возможность передачи не подтверждена",
+    cooldown_and_conversion_access_unconfirmed:"Откат преобразований и доступность всей цепочки не подтверждены",
+    batch_plan_not_globally_optimized:"Партии округлены вверх; излишки не используются между ветвями цепочки"
   };
   const costs = {purchase:"Закупка",materials:"Материалы",auction_cut:"Комиссия AH",lost_deposits:"Потерянные залоги",
-    relisting_costs:"Повторные выставления",price_slippage:"Изменение цены при покупке/продаже",crafting_time:"Время крафта"};
+    relisting_costs:"Повторные выставления",price_slippage:"Изменение цены при покупке/продаже",crafting_time:"Время крафта",cooldown_time:"Время отката преобразований"};
   const rejectionNames = {
     missing_positive_buy_price:"Нет положительной цены покупки",stale_price:"Цена покупки устарела",
     no_observed_supply:"Нет наблюдаемого предложения",missing_vendor_sell_price:"Неизвестна цена продажи NPC",
@@ -34,7 +36,10 @@
     discount_below_threshold:"Скидка меньше порога",result_missing_positive_buy_price:"Нет положительной цены результата",
     result_stale_price:"Цена результата устарела",result_no_observed_supply:"Нет наблюдаемого предложения результата",
     incomplete_recipe:"Рецепт неполный",untradeable_result:"Результат нельзя передать",
-    missing_material_price_or_quantity:"Нет цены или количества материала"
+    missing_material_price_or_quantity:"Нет цены или количества материала",
+    no_complete_craft_path:"Нет полной цепочки в заданных пределах глубины и количества крафтов",
+    single_step_or_buy_is_cheaper:"Достаточно одного этапа или промежуточный материал дешевле купить",
+    craft_graph_search_limit:"Достигнут предел поиска цепочки — результат не публикуется"
   };
   function renderDiagnostics(run) {
     const target = el("diagnostics"); target.replaceChildren();
@@ -47,6 +52,10 @@
     if (run.error) note(run.error);
     if (metadata.record_count !== undefined) {
       note(`Записей об источниках: ${metadata.record_count}. С предупреждениями: ${metadata.records_with_warnings}. С пропусками: ${metadata.records_with_gaps}.`);
+    }
+    if (quality.recipe_selection) {
+      const recipes = quality.recipe_selection;
+      note(`Выбор рецептов: ${recipes.selected ?? 0} действующих по последним снимкам выбранного рынка; конфликтующих: ${recipes.ambiguous ?? 0}. Старые версии исключены.`);
     }
     const rejections = diagnostics.rejections || {}, signals = diagnostics.strategy_signals || {};
     for (const strategy of Object.keys(run.strategy_versions || {})) {
@@ -102,8 +111,20 @@
     if (recipe) {
       field("Рецепт", recipe.name); field("Профессия / навык", (recipe.profession || "неизвестно") + " / " + (recipe.skill_required ?? "неизвестно"));
       field("Получение рецепта", recipe.acquisition); field("Диапазон выхода / используемый минимум", `${recipe.qty_min}–${recipe.qty_max} / ${recipe.qty_min}`);
+      field("Версия рецепта / снимок источника", recipe.version_hash + " / " + date(recipe.source_generated_at || recipe.source_retrieved_at));
     }
     target.append(list);
+    if (detail.details.steps) {
+      const heading = document.createElement("h3"); heading.textContent = "Порядок изготовления"; target.append(heading);
+      const chain = document.createElement("ol");
+      for (const step of detail.details.steps) {
+        const row = document.createElement("li"), recipe = step.recipe;
+        row.textContent = `${recipe.name || recipe.spell_id}: крафтов ${step.batches}; выход ${step.output_quantity}, нужно ${step.required_quantity}, излишек ${step.surplus_quantity}. Профессия: ${recipe.profession || "неизвестно"}, навык: ${recipe.skill_required ?? "неизвестно"}; получение: ${recipe.acquisition || "неизвестно"}. Материалы: ${step.inputs.map(r => r.item_id + " × " + r.quantity).join(", ")}. Версия ${recipe.version_hash}; снимок ${date(recipe.source_generated_at || recipe.source_retrieved_at)}.`;
+        chain.append(row);
+      }
+      target.append(chain);
+      const note = document.createElement("p"); note.textContent = "Покупаются только материалы из таблицы ниже. Излишки не добавлены к прибыли; комиссия AH учтена при продаже конечного результата."; target.append(note);
+    }
     if (detail.details.materials) {
       const wrap = document.createElement("div"), table = document.createElement("table"), header = document.createElement("tr");
       wrap.className = "table-wrap";
@@ -128,7 +149,7 @@
   }
   function renderStatus(value) {
     status = value;
-    for (const id of ["market", "discount", "cut", "save"]) el(id).disabled = value.running;
+    for (const id of ["market", "discount", "cut", "craft-graph", "craft-depth", "save"]) el(id).disabled = value.running;
     el("recalculate").disabled = value.running || !value.ready || !value.active_market;
     const run = value.published_run;
     el("status").textContent = (value.running ? "Расчёт выполняется. " : "") +
@@ -136,6 +157,7 @@
       (value.observation_stale ? " Исходные цены устарели." : "") +
       (run && !value.result_generation_matches ? " База обновилась: для новых результатов нажмите «Пересчитать»." : "") +
       (run && !value.settings_match ? " Настройки изменены: сохранённый расчёт использовал прежнюю конфигурацию." : "");
+    if (run && value.strategy_versions_match === false) el("status").textContent += " Правила расчёта обновлены: нажмите «Пересчитать».";
     error(value.error || "");
     renderDiagnostics(value.latest_run);
     if (!value.running && timer) {clearTimeout(timer); timer = null;}
@@ -189,6 +211,8 @@
       }
       el("market").value = current.active_market || "";
       el("discount").value = current.config.discount_percent; el("cut").value = current.config.auction_cut_percent;
+      el("craft-graph").checked = current.config.enabled_strategies.includes("craft_graph");
+      el("craft-depth").value = current.config.strategy_settings.craft_graph?.max_depth ?? 5;
       renderStatus(value);
       await loadResults(token);
       if (value.running) watch();
@@ -212,8 +236,12 @@
     const token = ++revision; clear(); offset = 0;
     error("");
     try {
+      const enabled = settings.config.enabled_strategies.filter(id => id !== "craft_graph");
+      if (el("craft-graph").checked) enabled.push("craft_graph");
       const updated = await api("/analytics/settings", {method:"PUT", body:JSON.stringify({active_market:el("market").value || null,
-        config:{...settings.config, discount_percent:el("discount").value, auction_cut_percent:el("cut").value}})});
+        config:{...settings.config, discount_percent:el("discount").value, auction_cut_percent:el("cut").value,
+          enabled_strategies:enabled, strategy_settings:{...settings.config.strategy_settings,
+            craft_graph:{...settings.config.strategy_settings.craft_graph, max_depth:Number(el("craft-depth").value)}}}})});
       if (token !== revision) return false;
       settings = updated; await refresh(); return true;
     } catch (exc) {if (token === revision) {await refresh(); error(exc.message);} return false;}

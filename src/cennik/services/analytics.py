@@ -110,7 +110,7 @@ class AnalyticsService:
             versions = {s.id: s.version for s in strategies}
             identity = digest(dumps({"market": settings.active_market, "generation": generation,
                                      "config": settings.config.model_dump(mode="json"),
-                                     "strategies": versions, "engine_version": "0.1.0"}).encode())
+                                     "strategies": versions, "engine_version": "0.2.0"}).encode())
             cached = self.store.cached(identity, summary=True)
             if cached:
                 self.store.publish_cached(cached)
@@ -218,6 +218,9 @@ class AnalyticsService:
                 "opportunity_count": published.signal_count if published else 0,
                 "result_generation_matches": published.generation == generation if published else False,
                 "settings_match": published.config == settings.config if published else False,
+                "strategy_versions_match": published.strategy_versions == {
+                    s.id: s.version for s in self.registry.selected(settings.config.enabled_strategies)
+                } if published else False,
                 "error": error, "automatic_recalculation": False,
                 "attribution": "Prices from https://ahledger.com"}
 
