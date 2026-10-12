@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from cennik.core.diagnostics import empty_metadata_summary, summarize_run
 from cennik.core.models import AnalyticsSettings, Opportunity, Run
 
 
@@ -28,6 +29,8 @@ class Store:
                 CREATE INDEX IF NOT EXISTS run_opportunities ON opportunities(run_id,market);
                 CREATE TABLE IF NOT EXISTS published(market TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES runs(run_id));
             """)
+            if "summary" not in {row["name"] for row in db.execute("PRAGMA table_info(runs)")}:
+                db.execute("ALTER TABLE runs ADD COLUMN summary TEXT")
 
     @contextmanager
     def connection(self):
@@ -55,18 +58,20 @@ class Store:
                 run = Run.model_validate_json(row[0])
                 run.status, run.error = "interrupted", "Расчёт прерван перезапуском; запустите вручную."
                 run.finished_at = datetime.now(UTC)
-                db.execute("UPDATE runs SET status=?,payload=? WHERE run_id=?",
-                           [run.status, run.model_dump_json(), run.run_id])
+                db.execute("UPDATE runs SET status=?,payload=?,summary=? WHERE run_id=?",
+                           [run.status, run.model_dump_json(), summarize_run(run).model_dump_json(), run.run_id])
 
     def begin(self, run: Run, identity: str) -> None:
         with self.connection() as db:
-            db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", [run.run_id, run.market, identity,
-                       run.status, run.started_at.isoformat(), run.model_dump_json()])
+            db.execute("INSERT INTO runs(run_id,market,fingerprint,status,started_at,payload,summary) VALUES(?,?,?,?,?,?,?)",
+                       [run.run_id, run.market, identity, run.status, run.started_at.isoformat(),
+                        run.model_dump_json(), summarize_run(run).model_dump_json()])
 
-    def cached(self, identity: str) -> Run | None:
+    def cached(self, identity: str, *, summary: bool = False) -> Run | None:
         with self.connection() as db:
-            row = db.execute("SELECT payload FROM runs WHERE fingerprint=? AND status='completed' ORDER BY started_at DESC LIMIT 1", [identity]).fetchone()
-            return Run.model_validate_json(row[0]) if row else None
+            column = "run_id" if summary else "payload"
+            row = db.execute(f"SELECT {column} FROM runs WHERE fingerprint=? AND status='completed' ORDER BY started_at DESC LIMIT 1", [identity]).fetchone()
+        return self.run_summary(row[0]) if summary and row else Run.model_validate_json(row[0]) if row else None
 
     def publish_cached(self, run: Run) -> None:
         with self.connection() as db:
@@ -82,15 +87,54 @@ class Store:
                      str(o.roi_percent), str(o.rating), o.data_age_seconds, o.confidence, o.model_dump_json())
                     for o in opportunities])
                 db.execute("INSERT OR REPLACE INTO published VALUES(?,?)", [run.market, run.run_id])
-            db.execute("UPDATE runs SET status=?,payload=? WHERE run_id=?", [run.status, run.model_dump_json(), run.run_id])
+            signals = {strategy: 0 for strategy in run.strategy_versions}
+            for opportunity in opportunities:
+                signals[opportunity.strategy_id] = signals.get(opportunity.strategy_id, 0) + 1
+            db.execute("UPDATE runs SET status=?,payload=?,summary=? WHERE run_id=?", [run.status,
+                run.model_dump_json(), summarize_run(run, signals=signals).model_dump_json(), run.run_id])
 
-    def latest(self, market: str | None, *, published: bool = False) -> Run | None:
+    def run_summary(self, identity: str) -> Run | None:
+        with self.connection() as db:
+            row = db.execute("SELECT summary FROM runs WHERE run_id=?", [identity]).fetchone()
+            if row is None:
+                return None
+            if row[0] is not None:
+                return Run.model_validate_json(row[0])
+            # Backfill old runs without transferring/deserializing their potentially
+            # huge metadata arrays in Python. Existing results need no recalculation.
+            compact = db.execute("SELECT json_remove(payload,'$.diagnostics.quality.metadata') FROM runs WHERE run_id=?", [identity]).fetchone()[0]
+            counts = empty_metadata_summary()
+            for group in db.execute("""SELECT coalesce(json_extract(m.value,'$.dataset'),'unknown') dataset,
+                coalesce(json_extract(m.value,'$.status'),'unknown') status,count(*) records,
+                sum(coalesce(json_array_length(m.value,'$.warnings'),0)>0) warnings,
+                sum(coalesce(json_array_length(m.value,'$.gaps'),0)>0) gaps,
+                sum(coalesce(json_array_length(m.value,'$.gaps'),0)) gap_count
+                FROM runs r,json_each(r.payload,'$.diagnostics.quality.metadata') m
+                WHERE r.run_id=? GROUP BY dataset,status""", [identity]):
+                counts["record_count"] += group["records"]
+                counts["records_with_warnings"] += group["warnings"]
+                counts["records_with_gaps"] += group["gaps"]
+                counts["gap_count"] += group["gap_count"]
+                counts["status_counts"][group["status"]] = counts["status_counts"].get(group["status"], 0) + group["records"]
+                counts["dataset_counts"][group["dataset"]] = counts["dataset_counts"].get(group["dataset"], 0) + group["records"]
+            run = Run.model_validate_json(compact)
+            signals = {strategy: 0 for strategy in run.strategy_versions}
+            signals.update({group[0]: group[1] for group in db.execute(
+                "SELECT strategy,count(*) FROM opportunities WHERE run_id=? GROUP BY strategy", [identity])})
+            result = summarize_run(run, metadata=counts, signals=signals)
+            db.execute("UPDATE runs SET summary=? WHERE run_id=? AND summary IS NULL",
+                       [result.model_dump_json(), identity])
+            return result
+
+    def latest(self, market: str | None, *, published: bool = False, summary: bool = False) -> Run | None:
         with self.connection() as db:
             if published:
-                row = db.execute("SELECT r.payload FROM runs r JOIN published p ON p.run_id=r.run_id WHERE p.market=?", [market]).fetchone()
+                column = "r.run_id" if summary else "r.payload"
+                row = db.execute(f"SELECT {column} FROM runs r JOIN published p ON p.run_id=r.run_id WHERE p.market=?", [market]).fetchone()
             else:
-                row = db.execute("SELECT payload FROM runs WHERE market=? ORDER BY started_at DESC LIMIT 1", [market]).fetchone()
-            return Run.model_validate_json(row[0]) if row else None
+                column = "run_id" if summary else "payload"
+                row = db.execute(f"SELECT {column} FROM runs WHERE market=? ORDER BY started_at DESC LIMIT 1", [market]).fetchone()
+        return self.run_summary(row[0]) if summary and row else Run.model_validate_json(row[0]) if row else None
 
     def listing(self, market: str | None, *, strategy: str | None = None, min_profit: int = 0,
                 min_roi: str = "0", confidence: str | None = None, sort: str = "rating",
@@ -98,7 +142,7 @@ class Store:
         orders = {"rating": "rating DESC", "profit": "profit DESC", "roi": "roi DESC", "freshness": "age ASC"}
         if sort not in orders:
             raise ValueError("Invalid sort")
-        run = self.latest(market, published=True)
+        run = self.latest(market, published=True, summary=True)
         if run is None:
             return {"items": [], "total": 0, "run_id": None, "market": market, "limit": limit, "offset": offset}
         clauses = ["run_id=?", "market=?", "profit>=?", "roi>=CAST(? AS REAL)"]

@@ -132,7 +132,7 @@ remain available. No new endpoint accepts SQL, Python, shell commands or URLs.
 | GET `/api/analytics/markets` | Actual DuckDB markets, labels and latest observation times |
 | GET `/api/analytics/settings` | Saved active market and full configuration |
 | PUT `/api/analytics/settings` | Replace validated settings; unknown markets/strategies return 422 |
-| GET `/api/analytics/status` | Ready state, active market, source hash/age, latest/published runs, count, errors |
+| GET `/api/analytics/status` | Ready state, active market, source hash/age, compact latest/published run summaries, count, errors |
 | POST `/api/analytics/recalculate` | 202 with run metadata; `reused` indicates an identical successful run |
 | GET `/api/analytics/opportunities` | Published active-market results and total/limit/offset |
 | GET `/api/analytics/opportunities/{id}` | Full active-market calculation; another market's ID returns 404 |
@@ -158,10 +158,19 @@ Example after obtaining a market from `/markets`:
 ```
 
 The UI shows gold/silver/copper, timestamps, manual progress, filters, pagination,
-profit/ROI/rating/freshness sorting, explanations and complete diagnostics. Source
+profit/ROI/rating/freshness sorting, explanations and compact diagnostics. Source
 observations and estimates are labeled separately. It polls status only while a
 manually requested calculation is running. AHledger's existing downloader status
 poll is unchanged and does not trigger analytics.
+
+Run diagnostics in status responses contain rejection counters by strategy, signal
+counts and source-quality totals (`quality.metadata_summary`), not the full
+`quality.metadata` array. The full run remains in `runs.payload` in Cennik SQLite;
+`runs.summary` stores the compact polling payload. Existing databases receive the
+nullable summary column automatically, and older runs get their summaries on first
+read using SQLite JSON queries without loading source metadata into Python or
+recalculating signals. Subsequent status, result-list and cached-run reads use that
+stored summary. The UI shows reason/count tables and never prints the full run JSON.
 
 ## Verification and future modules
 

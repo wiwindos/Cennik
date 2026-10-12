@@ -111,7 +111,7 @@ class AnalyticsService:
             identity = digest(dumps({"market": settings.active_market, "generation": generation,
                                      "config": settings.config.model_dump(mode="json"),
                                      "strategies": versions, "engine_version": "0.1.0"}).encode())
-            cached = self.store.cached(identity)
+            cached = self.store.cached(identity, summary=True)
             if cached:
                 self.store.publish_cached(cached)
                 stack.close()
@@ -204,8 +204,8 @@ class AnalyticsService:
                 error = "Для выбранного рынка нет наблюдаемых цен."
         except (ValueError, OSError, duckdb.Error) as exc:
             error = str(exc)
-        latest = self.store.latest(settings.active_market)
-        published = self.store.latest(settings.active_market, published=True)
+        latest = self.store.latest(settings.active_market, summary=True)
+        published = self.store.latest(settings.active_market, published=True, summary=True)
         if latest and latest.error and latest.config == settings.config and latest.generation == generation:
             error = latest.error
         age = max(0, int((datetime.now(UTC) - observed).total_seconds())) if observed else None

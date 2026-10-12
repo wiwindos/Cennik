@@ -151,6 +151,10 @@ def main():
             assert app.state.analytics.thread is None  # Reading the UI never calculates.
             evaluate("document.getElementById('analytics-recalculate').click()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
+            wait_for("document.getElementById('analytics-diagnostics').textContent.includes('Сигналов:')")
+            assert evaluate("document.getElementById('analytics-diagnostics').textContent.includes('Причина отсева')")
+            assert evaluate("document.getElementById('analytics-diagnostics').textContent.length < 12000")
+            assert not evaluate("document.getElementById('analytics-diagnostics').textContent.includes('payload_json')")
             evaluate("document.querySelector('#analytics-results button').click()")
             wait_for("!document.getElementById('analytics-detail').hidden")
             assert evaluate("document.getElementById('analytics-inputs').textContent.includes('indicative')")

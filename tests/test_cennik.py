@@ -415,3 +415,65 @@ def test_settings_validation():
         AnalyticsConfig(auction_cut_percent=100)
     with pytest.raises(ValueError):
         AnalyticsConfig(enabled_strategies=["vendor_arbitrage","vendor_arbitrage"])
+
+
+def test_new_runs_store_compact_summary_and_retain_full_quality(analytics_root):
+    service = configured(analytics_root)
+    run = service.start(background=False, as_of=NOW)["run"]
+    compact = service.store.latest("market-a", summary=True)
+    full = service.store.latest("market-a")
+    assert compact.run_id == run["run_id"] == full.run_id
+    assert compact.diagnostics["summary_only"] is True
+    assert "metadata" not in compact.diagnostics["quality"]
+    assert "metadata" in full.diagnostics["quality"]
+    assert compact.diagnostics["quality"]["metadata_summary"]["record_count"] == 1
+    assert sum(compact.diagnostics["strategy_signals"].values()) == full.signal_count
+    assert compact.diagnostics["rejections"] == full.diagnostics["rejections"]
+
+
+def test_large_legacy_diagnostics_migrate_without_full_deserialization(analytics_root, monkeypatch):
+    service = configured(analytics_root)
+    original = service.start(background=False, as_of=NOW)["run"]
+    run = Run.model_validate(original)
+    # Reproduce approximately 28 MB of archived metadata, rather than only hiding
+    # a small fixture in the DOM. Tests must cover status, list and cached response.
+    run.diagnostics["quality"]["metadata"] = [{
+        "dataset": "history", "item_id": 2, "status": "PARTIAL", "raw_id": "archive",
+        "warnings": ["x" * 1260], "gaps": [{"missing_buckets": 1}, {"missing_buckets": 2}],
+    }] * 20000
+    payload = run.model_dump_json()
+    assert len(payload) > 27_000_000
+    with service.store.connection() as db:
+        db.execute("UPDATE runs SET payload=? WHERE run_id=?", [payload, run.run_id])
+        # Simulate the original six-column runs schema on a deployed server.
+        db.execute("ALTER TABLE runs DROP COLUMN summary")
+    del payload
+    validate = Run.model_validate_json
+
+    def small_payload_only(cls, value, *args, **kwargs):
+        assert len(value) < 100_000, "A UI read deserialized full archived diagnostics"
+        return validate(value, *args, **kwargs)
+
+    monkeypatch.setattr(Run, "model_validate_json", classmethod(small_payload_only))
+    with TestClient(create_app(Settings(data_dir=analytics_root), KEY)) as client:
+        response = client.get("/api/analytics/status", headers=HEADERS)
+        assert response.status_code == 200 and len(response.content) < 20_000
+        value = response.json()
+        counts = value["published_run"]["diagnostics"]["quality"]["metadata_summary"]
+        assert counts == {"record_count": 20000, "records_with_warnings": 20000,
+                          "records_with_gaps": 20000, "gap_count": 40000,
+                          "status_counts": {"PARTIAL": 20000}, "dataset_counts": {"history": 20000}}
+        assert "metadata" not in value["latest_run"]["diagnostics"]["quality"]
+        assert value["opportunity_count"] == original["signal_count"]
+        listing = client.get("/api/analytics/opportunities", headers=HEADERS)
+        assert listing.status_code == 200 and listing.json()["total"] == original["signal_count"]
+        cached = client.post("/api/analytics/recalculate", headers=HEADERS)
+        assert cached.status_code == 202 and cached.json()["reused"]
+        assert len(cached.content) < 10_000
+        assert cached.json()["run"]["signal_count"] == original["signal_count"]
+        assert len(client.get("/api/analytics/status", headers=HEADERS).content) < 20_000
+        with client.app.state.analytics.store.connection() as db:
+            stored = db.execute("SELECT length(payload),length(summary) FROM runs WHERE run_id=?", [run.run_id]).fetchone()
+            assert stored[0] > 27_000_000 and stored[1] < 10_000
+        client.put("/api/analytics/settings", json={"active_market": "market-b"}, headers=HEADERS)
+        assert client.get("/api/analytics/status", headers=HEADERS).json()["latest_run"] is None

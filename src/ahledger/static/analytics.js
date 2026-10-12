@@ -25,6 +25,49 @@
   };
   const costs = {purchase:"Закупка",materials:"Материалы",auction_cut:"Комиссия AH",lost_deposits:"Потерянные залоги",
     relisting_costs:"Повторные выставления",price_slippage:"Изменение цены при покупке/продаже",crafting_time:"Время крафта"};
+  const rejectionNames = {
+    missing_positive_buy_price:"Нет положительной цены покупки",stale_price:"Цена покупки устарела",
+    no_observed_supply:"Нет наблюдаемого предложения",missing_vendor_sell_price:"Неизвестна цена продажи NPC",
+    not_profitable:"Нет прибыли",not_profitable_after_cut:"Нет прибыли после комиссии AH",
+    insufficient_history:"Недостаточно истории",stale_history:"История устарела",
+    unstable_history:"Историческая цена нестабильна",recent_price_decline:"Недавнее снижение цены",
+    discount_below_threshold:"Скидка меньше порога",result_missing_positive_buy_price:"Нет положительной цены результата",
+    result_stale_price:"Цена результата устарела",result_no_observed_supply:"Нет наблюдаемого предложения результата",
+    incomplete_recipe:"Рецепт неполный",untradeable_result:"Результат нельзя передать",
+    missing_material_price_or_quantity:"Нет цены или количества материала"
+  };
+  function renderDiagnostics(run) {
+    const target = el("diagnostics"); target.replaceChildren();
+    const note = text => {const p = document.createElement("p"); p.textContent = text; target.append(p);};
+    if (!run) {note("Ещё не запускался."); return;}
+    const diagnostics = run.diagnostics || {}, quality = diagnostics.quality || {};
+    const metadata = quality.metadata_summary || {};
+    const states = {running:"выполняется",completed:"завершён",failed:"ошибка",interrupted:"прерван"};
+    note(`Расчёт ${states[run.status] || run.status}. Сигналов: ${run.signal_count}. Предметов с наблюдаемыми ценами: ${diagnostics.observed_items ?? 0}.`);
+    if (run.error) note(run.error);
+    if (metadata.record_count !== undefined) {
+      note(`Записей об источниках: ${metadata.record_count}. С предупреждениями: ${metadata.records_with_warnings}. С пропусками: ${metadata.records_with_gaps}.`);
+    }
+    const rejections = diagnostics.rejections || {}, signals = diagnostics.strategy_signals || {};
+    for (const strategy of Object.keys(run.strategy_versions || {})) {
+      const heading = document.createElement("h3");
+      heading.textContent = `${names[strategy] || strategy} · сигналов: ${signals[strategy] ?? "ещё не рассчитано"}`;
+      target.append(heading);
+      const reasons = Object.entries(rejections[strategy] || {}).sort((a, b) => b[1] - a[1]);
+      if (!reasons.length) {note("Причины отсева не зарегистрированы."); continue;}
+      const wrap = document.createElement("div"), table = document.createElement("table"); wrap.className = "table-wrap";
+      const header = document.createElement("tr");
+      for (const text of ["Причина отсева", "Количество"]) {const th = document.createElement("th"); th.textContent = text; header.append(th);}
+      table.append(header);
+      for (const [reason, count] of reasons) {
+        const row = document.createElement("tr"), label = document.createElement("td"), number = document.createElement("td");
+        label.textContent = rejectionNames[reason] || reason; number.textContent = count;
+        row.append(label, number); table.append(row);
+      }
+      wrap.append(table); target.append(wrap);
+    }
+    note("Отсутствие цен ограничивает оценку возможностей. Полная диагностика сохранена на сервере.");
+  }
   function showDetail(detail) {
     el("reason").textContent = detail.reason;
     const target = el("inputs"); target.replaceChildren();
@@ -94,7 +137,7 @@
       (run && !value.result_generation_matches ? " База обновилась: для новых результатов нажмите «Пересчитать»." : "") +
       (run && !value.settings_match ? " Настройки изменены: сохранённый расчёт использовал прежнюю конфигурацию." : "");
     error(value.error || "");
-    el("diagnostics").textContent = value.latest_run ? JSON.stringify(value.latest_run, null, 2) : "Ещё не запускался.";
+    renderDiagnostics(value.latest_run);
     if (!value.running && timer) {clearTimeout(timer); timer = null;}
   }
   async function loadResults(token = revision) {
