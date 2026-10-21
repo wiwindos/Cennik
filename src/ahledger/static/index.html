@@ -19,7 +19,7 @@
 <button type="submit" id="start" class="primary wide">Запустить / продолжить</button>
 <button type="button" id="stop" class="danger wide" disabled>Остановить и сохранить прогресс</button>
 </form>
-<div class="tools"><button data-action="discover">Обновить справочники</button><button data-action="build">Построить базу из скачанного</button><button data-action="verify">Проверить целостность</button></div>
+<div class="tools"><button data-action="discover">Обновить справочники</button><button data-action="build">Построить базу из скачанного</button><button data-action="verify">Полная проверка целостности</button><button data-action="export">Экспортировать Parquet</button></div><p id="parquet-note" class="hint"></p>
 </section>
 <div class="right">
 <section class="card progress-card"><div class="section-head"><h2>Прогресс загрузки</h2><span id="run-state" class="pill">Ожидание</span></div>
@@ -38,9 +38,17 @@
 <label>Комиссия AH, %<input id="analytics-cut" type="number" min="0" max="99.99" step="0.01" value="5" required></label>
 <label class="check"><input id="analytics-craft-graph" type="checkbox">Многоступенчатый крафт (CraftGraph)</label>
 <label>Максимум этапов цепочки<input id="analytics-craft-depth" type="number" min="2" max="10" value="5" required></label>
+<label class="check"><input id="analytics-craft-liquid" type="checkbox">Крафт: только прошедшие фильтр ликвидности</label>
+<label>Мин. оценка продаж в сутки<input id="analytics-craft-sales" type="number" min="0.01" max="1000000" step="0.01" value="10" required></label>
+<label>Макс. предложение / продажи в сутки<input id="analytics-craft-supply" type="number" min="0.01" max="365" step="0.01" value="1" required></label>
+<label>Макс. партия, % дневных продаж<input id="analytics-craft-batch" type="number" min="0.01" max="100" step="0.01" value="10" required></label>
+<label>История оценок, дней<input id="analytics-craft-window" type="number" min="2" max="30" value="3" required></label>
+<label>Мин. дней с оценкой<input id="analytics-craft-days" type="number" min="2" max="30" value="2" required></label>
+<label>Макс. возраст оценки, часов<input id="analytics-craft-age" type="number" min="0.01" max="168" step="0.01" value="24" required></label>
 <button id="analytics-save" type="submit">Сохранить настройки</button>
 <button id="analytics-recalculate" type="button" class="primary">Пересчитать аналитику</button>
 </form>
+<p class="hint">Фильтр применяется к Simple Craft и CraftGraph при ручном пересчёте. Берётся наименьшая оценка продаж за выбранный период, по одному снимку на день UTC. Неизвестные и устаревшие оценки исключаются. Отношение предложения к продажам — показатель конкуренции, не срок продажи. Быстрая продажа не гарантирована.</p>
 <p id="analytics-status" class="hint" role="status" aria-live="polite">Загрузите статус и выберите рынок.</p>
 <p id="analytics-error" class="error" role="status"></p>
 <form id="analytics-filters" class="analytics-controls">
@@ -52,9 +60,14 @@
 <button type="submit">Показать</button>
 </form>
 <p class="hint">Наблюдаемый минимум — цена источника. Ориентир, прибыль и ROI — вычисленные оценки. Прибыль за одну единицу или один крафт; доступный объём по минимальной цене неизвестен.</p>
-<div class="table-wrap"><table><thead><tr><th>Предмет / стратегия</th><th>Закупка / материалы</th><th>Ориентир выручки</th><th>Потенц. прибыль</th><th>ROI</th><th>Рейтинг</th><th>Расчёт</th></tr></thead><tbody id="analytics-results"></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Предмет / стратегия</th><th>Закупка / материалы</th><th>Ориентир выручки</th><th>Потенц. прибыль</th><th>ROI</th><th>Рейтинг</th><th>Продажи/сутки · оценка источника</th><th>Расчёт</th><th>В аддон</th></tr></thead><tbody id="analytics-results"></tbody></table></div>
 <p id="analytics-result-note" class="hint" aria-live="polite"></p>
 <div class="analytics-pages"><button id="analytics-prev" type="button" disabled>Назад</button><span id="analytics-page"></span><button id="analytics-next" type="button" disabled>Далее</button></div>
+<div class="analytics-pages"><button id="analytics-export" type="button" disabled>Передать в аддон</button><span id="analytics-selected">Выбрано: 0</span><button id="analytics-renew-packages" type="button">Продлить пакеты на 30 минут</button><button id="analytics-game-history" type="button">История исполнения</button></div>
+<p id="analytics-export-block-reason" class="hint" role="status" aria-live="polite">Обновите статус аналитики.</p>
+<form id="analytics-export-form" hidden><p><strong>Создание пакета для аддона</strong> — проверьте пределы и нажмите кнопку внизу формы. NPC-материалы не попадут в очередь AH. Новые цены проверяются в игре; продажа остаётся неподтверждённой.</p><div id="analytics-export-limits" class="analytics-controls"></div><label>Общий максимальный бюджет, copper<input id="analytics-export-budget" type="number" min="1" max="9007199254740991" required></label><button type="submit">Создать пакет для аддона</button></form>
+<p id="analytics-export-note" class="hint" role="status"></p><div id="analytics-game-events"></div>
+<div id="analytics-local-sync-controls" hidden><button id="analytics-local-sync" type="button" disabled>Синхронизировать с игрой</button><p id="analytics-local-sync-note" class="hint" role="status" aria-live="polite"></p></div>
 <details id="analytics-detail" hidden><summary>Входные данные и объяснение</summary><p id="analytics-reason"></p><div id="analytics-inputs"></div></details>
 <details><summary>Диагностика последнего запуска</summary><div id="analytics-diagnostics">Ещё не запускался.</div></details>
 </section>

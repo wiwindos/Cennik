@@ -30,7 +30,8 @@ function setMarkets(markets){
 function render(value){
   setMarkets(value.markets);
   const active=["running","building","stopping"].includes(value.run.state);
-  byId("run-state").textContent=stateNames[value.run.state]||value.run.state;byId("run-state").classList.toggle("active",active);
+  byId("run-state").textContent=value.run.state==="building"&&value.run.action==="update"?"Применение обновления":stateNames[value.run.state]||value.run.state;byId("run-state").classList.toggle("active",active);
+  byId("parquet-note").textContent=value.parquet?.stale?"Parquet устарел после обновления базы. При необходимости нажмите «Экспортировать Parquet». Аналитика использует текущую DuckDB.":value.parquet?.ready?"Экспорт Parquet соответствует текущей базе.":"Parquet можно создать отдельной кнопкой. Обновление рынка не запускает полный экспорт.";
   byId("done").textContent=number(value.done);byId("remaining").textContent=number(value.remaining);byId("records").textContent=number(value.records);byId("raw").textContent=(value.raw_bytes/1048576).toFixed(1)+" МБ";
   byId("progress-fill").style.width=(value.total?Math.min(100,value.done/value.total*100):0)+"%";
   byId("progress-note").textContent=value.total?`${number(value.done)} из ${number(value.total)} заданий в выбранной очереди. Очередь может расти.`:"Очередь появится после первого запуска.";

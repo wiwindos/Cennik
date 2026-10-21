@@ -11,7 +11,7 @@ dependencies = ["httpx>=0.28,<1", "pydantic>=2.10,<3", "duckdb>=1.2,<2", "pyarro
 
 [project.optional-dependencies]
 web = ["fastapi>=0.143,<0.144", "uvicorn>=0.54,<0.55"]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1", "mypy>=1.14,<2"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1", "mypy>=1.14,<2", "lupa>=2,<3"]
 
 [project.scripts]
 ahledger = "ahledger.cli:app"

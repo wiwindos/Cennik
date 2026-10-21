@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import shutil
-import time
 from pathlib import Path
 
 import httpx
@@ -14,11 +10,12 @@ import httpx
 from .analytics import analytics_connection, build_database
 from .config import API, Settings
 from .http import RateLimiter
+from .incremental import apply_delta
 from .models import JobSpec
 from .parsers import parse
 from .runner import Downloader
 from .storage import RawArchive, State, job_key
-from .util import atomic_json, exclusive_lock, utc_now
+from .util import atomic_json, digest, dumps, utc_now
 from .verify import verify
 
 
@@ -159,59 +156,24 @@ def merge_update(settings: Settings, identity: str) -> dict:
     market = selected_market(settings)
     root = batch_root(settings.data_dir, identity)
     state = State(root)
-    destination = settings.data_dir / "analytics/ahledger.duckdb"
     try:
         if state.get("target_market") != market:
             raise ValueError("Пакет обновления относится к другому рынку.")
         if any(state.counts().get(key) for key in ("PENDING", "RETRY", "RUNNING", "FAILED")):
             raise ValueError("Загрузка не завершена; текущая база сохранена.")
-        checked = verify(state, settings=settings)
+        checked = verify(state, settings=settings, check_analytics=False)
         if checked["integrity"] != "COMPLETE":
             raise ValueError("Повреждён пакет обновления; текущая база сохранена.")
-        base_stat = destination.stat()
-        result = build_database(
-            state, settings=settings, base_database=destination, allowed_market=market
-        )
+        manifests = list(RawArchive(state).manifests())
+        batch_digest = digest(dumps(manifests).encode())
+        delta = build_database(state, settings=settings, allowed_market=market, write_parquet=False)
         checked = verify(state, settings=settings)
         if checked["integrity"] != "COMPLETE":
-            raise ValueError("Проверка новой базы не пройдена; текущая база сохранена.")
-        if (destination.stat().st_size, destination.stat().st_mtime_ns) != (
-            base_stat.st_size,
-            base_stat.st_mtime_ns,
-        ):
-            raise ValueError("База изменилась во время обновления. Повторите объединение.")
-        staged = root / "analytics/ahledger.duckdb"
-        # Export already succeeded. Move its generation on the same archive volume.
-        pointer = json.loads((root / "parquet/CURRENT.json").read_text("utf-8"))
-        generation = pointer["directory"]
-        if not re.fullmatch(r"[0-9a-f]{32}", generation):
-            raise ValueError("Invalid Parquet generation")
-        parquet = (settings.data_dir / "parquet" / generation).resolve()
-        staged_parquet = (root / "parquet" / generation).resolve()
-        archive_root = settings.data_dir.resolve()
-        if not parquet.is_relative_to(archive_root) or not staged_parquet.is_relative_to(
-            archive_root
-        ):
-            raise ValueError("Parquet move would leave the archive directory")
-        parquet.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged_parquet), str(parquet))
-        with exclusive_lock(settings.data_dir):
-            if (destination.stat().st_size, destination.stat().st_mtime_ns) != (
-                base_stat.st_size,
-                base_stat.st_mtime_ns,
-            ):
-                raise ValueError("База изменилась до публикации обновления.")
-            for attempt in range(50):
-                try:
-                    os.replace(staged, destination)
-                    break
-                except PermissionError:
-                    if attempt == 49:
-                        raise
-                    time.sleep(0.1)
-            atomic_json(settings.data_dir / "parquet/CURRENT.json", pointer)
-            result.update(update_id=identity, updated_market=market, updated_at=utc_now())
-            atomic_json(settings.data_dir / "analytics/build_result.json", result)
+            raise ValueError("Проверка пакета не пройдена; текущая база сохранена.")
+        result = apply_delta(settings, root / "analytics/ahledger.duckdb", identity,
+                             batch_digest, market, delta["counts"],
+                             state.get("market_status", {}).get(market))
+        atomic_json(settings.data_dir / "analytics/build_result.json", result)
         atomic_json(root / "result.json", result)
         return result
     finally:

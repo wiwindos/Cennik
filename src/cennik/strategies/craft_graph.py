@@ -7,6 +7,7 @@ from cennik.core.interfaces import EvaluationContext
 from cennik.core.models import Model, Opportunity
 from cennik.engines.craft_graph import CraftGraph, MaterialOffer, SearchLimit, complete
 from cennik.engines.economics import auction_net, cheapest_material
+from cennik.engines.liquidity import CraftLiquidity
 from cennik.strategies.common import opportunity
 
 
@@ -18,7 +19,7 @@ class CraftGraphSettings(Model):
 
 class CraftGraphArbitrage:
     id = "craft_graph"
-    version = "0.2.0"
+    version = "0.3.0"
     settings_model = CraftGraphSettings
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
@@ -33,6 +34,7 @@ class CraftGraphArbitrage:
                 offers[item_id] = MaterialOffer(item_id, *quote)
         graph = CraftGraph(recipes, offers, **settings.model_dump())
         results = []
+        liquidity = CraftLiquidity(context)
         for recipe in recipes:
             if not complete(recipe):
                 context.reject(self.id, "incomplete_recipe")
@@ -47,6 +49,11 @@ class CraftGraphArbitrage:
                 "bop", "bind on pickup", "bind_on_pickup", "on_pickup", "1", "soulbound"
             }:
                 context.reject(self.id, "untradeable_result")
+                continue
+            assert output is not None and recipe.qty_min is not None
+            evidence, problem = liquidity.check(output, recipe.qty_min)
+            if problem:
+                context.reject(self.id, problem)
                 continue
             try:
                 plan = graph.plan(recipe)
@@ -112,5 +119,5 @@ class CraftGraphArbitrage:
                     "result_unit_price_copper": output.min_copper,
                     "scope": "one final craft; intermediate crafts use integer batches; surplus has no credited value",
                     "search": {**settings.model_dump(), "nodes": graph.nodes, "cycles_blocked": graph.cycles_blocked},
-                    "surplus_value_copper": 0}))
+                    "surplus_value_copper": 0, "liquidity": evidence}))
         return results

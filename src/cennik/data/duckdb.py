@@ -12,9 +12,16 @@ from cennik.core.models import Item, PriceObservation, Recipe, RecipeInput, utc
 
 
 def fingerprint(path: Path) -> str:
-    """Identity of the actual atomic DuckDB file, independent of Parquet pointers."""
+    """Identity of DuckDB including a recovery WAL, independent of Parquet pointers."""
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        result = hashlib.file_digest(stream, "sha256")
+    wal = Path(str(path) + ".wal")
+    if wal.is_file():
+        result.update(b"\0DuckDB-WAL\0")
+        with wal.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                result.update(chunk)
+    return result.hexdigest()
 
 
 class DuckDBProvider:
@@ -62,7 +69,7 @@ class DuckDBProvider:
             priority,source,raw_id)=1""", [self.market, self.as_of, self.market, self.as_of])
         # Sales are source estimates, with their own observation timestamp. Never infer
         # them from supply changes and never backfill a missing field with zero.
-        sales = {r["item_id"]: r for r in self.rows("""SELECT item_id,observed_at,sales_estimated_per_day
+        sales = {r["item_id"]: r for r in self.rows("""SELECT item_id,observed_at,sales_estimated_per_day,source
             FROM price_snapshots WHERE market=? AND observed_at<=?
             AND sales_estimated_per_day IS NOT NULL
             QUALIFY row_number() OVER (PARTITION BY item_id ORDER BY observed_at DESC,source,raw_id)=1""",
@@ -72,13 +79,27 @@ class DuckDBProvider:
             sale = sales.get(row["item_id"])
             if sale:
                 row.update(sales_estimated_per_day=sale["sales_estimated_per_day"],
-                           sales_observed_at=sale["observed_at"])
+                           sales_observed_at=sale["observed_at"], sales_source=sale["source"])
             result[row["item_id"]] = self.observation(row)
         return result
 
     def historical_prices(self, days: int) -> dict[int, list[PriceObservation]]:
         rows = self.rows("""SELECT * FROM price_history WHERE market=?
             AND observed_at>=? AND observed_at<=? ORDER BY item_id,observed_at,granularity""",
+            [self.market, self.as_of - timedelta(days=days), self.as_of])
+        result: dict[int, list[PriceObservation]] = {}
+        for row in rows:
+            result.setdefault(row["item_id"], []).append(self.observation(row))
+        return result
+
+    def sales_history(self, days: int) -> dict[int, list[PriceObservation]]:
+        # One latest source snapshot per UTC day, not a sum of repeated daily estimates.
+        rows = self.rows("""SELECT *, 'scan' AS granularity FROM price_snapshots
+            WHERE market=? AND observed_at>=? AND observed_at<=?
+            AND sales_estimated_per_day IS NOT NULL
+            QUALIFY row_number() OVER (PARTITION BY item_id,date_trunc('day',observed_at)
+                ORDER BY observed_at DESC,source,raw_id)=1
+            ORDER BY item_id,observed_at""",
             [self.market, self.as_of - timedelta(days=days), self.as_of])
         result: dict[int, list[PriceObservation]] = {}
         for row in rows:

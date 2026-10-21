@@ -89,6 +89,11 @@ def prepare_local(settings: Settings, source: Path | None = None) -> dict:
         if source is not None:
             return import_database(source, settings)
         if destination.is_file():
+            if Path(str(destination) + ".wal").exists():
+                if destination.stat().st_nlink > 1:
+                    raise ValueError("У общей с оригиналом базы есть WAL; сначала восстановите отдельную рабочую копию.")
+                with analytics_connection(destination, settings) as db:
+                    db.execute("CHECKPOINT")
             return {"database": str(destination.resolve()), "method": "existing"}
         return {"database": None, "method": "empty"}
 

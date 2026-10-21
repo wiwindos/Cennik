@@ -48,7 +48,7 @@ DEFAULT_MARKETS = [
 
 class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["download", "discover", "build", "verify", "update"] = "download"
+    action: Literal["download", "discover", "build", "verify", "export", "update"] = "download"
     markets: list[MarketID] = Field(default_factory=lambda: ["forever.pvp.horde.us"], max_length=12)
     datasets: list[Dataset] = Field(default_factory=list, max_length=12)
     requests_per_second: float = Field(default=1, ge=0.01, le=5)
@@ -242,6 +242,8 @@ class Controller:
             return [[*base, "build-db"], [*base, "verify"], [*base, "report"]]
         if request.action == "verify":
             return [[*base, "verify"]]
+        if request.action == "export":
+            return [[*base, "export"]]
         if request.action == "update":
             return [[*base, "update-fetch", "--update-id", self.info["update_id"]],
                     [*base, "update-merge", "--update-id", self.info["update_id"]]]

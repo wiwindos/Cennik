@@ -57,7 +57,7 @@ class AnalyticsService:
         self.registry = registry or default_registry()
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
-        self._identity: tuple[int, int, str] | None = None
+        self._identity: tuple[int, int, int, int, str] | None = None
         try:
             with exclusive_lock(self.directory):
                 self.store.recover()
@@ -68,9 +68,12 @@ class AnalyticsService:
         if not self.path.is_file():
             raise DataNotReady("Готовая DuckDB отсутствует. Постройте базу существующей кнопкой AHledger.")
         stat = self.path.stat()
-        if refresh or self._identity is None or self._identity[:2] != (stat.st_mtime_ns, stat.st_size):
-            self._identity = (stat.st_mtime_ns, stat.st_size, fingerprint(self.path))
-        return self._identity[2]
+        wal = Path(str(self.path) + ".wal")
+        wal_stat = wal.stat() if wal.is_file() else None
+        identity = (stat.st_mtime_ns, stat.st_size, wal_stat.st_mtime_ns if wal_stat else 0, wal_stat.st_size if wal_stat else 0)
+        if refresh or self._identity is None or self._identity[:4] != identity:
+            self._identity = (*identity, fingerprint(self.path))
+        return self._identity[4]
 
     def markets(self) -> list[dict]:
         if not self.path.is_file():

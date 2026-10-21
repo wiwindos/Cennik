@@ -9,6 +9,61 @@
     return `${copper / 10000n} з ${copper % 10000n / 100n} с ${copper % 100n} м`;
   };
   let settings = null, status = null, offset = 0, revision = 0, listRevision = 0, timer = null;
+  const selected = new Map(); let selectedRun = null, selectedMarket = null;
+  let localBridge = null, syncPending = null;
+  function renderLocalBridge(value) {
+    localBridge = value;
+    el("local-sync-controls").hidden = !value.available;
+    el("local-sync").disabled = !value.ready || Boolean(syncPending);
+    el("local-sync-note").textContent = value.ready ?
+      `Аддон: ${value.addon_dir}. Для передачи отчётов сначала выполните /reload в игре, затем нажмите синхронизацию; после неё — /reload для загрузки пакетов и подтверждений.` : value.error || "";
+  }
+  async function synchronize() {
+    if (syncPending) return syncPending;
+    el("local-sync").disabled = true;
+    el("local-sync-note").textContent = "Синхронизация…";
+    syncPending = api("/addon/local-sync", {method:"POST"});
+    try {
+      const result = await syncPending;
+      el("local-sync-note").textContent = `Пакетов записано: ${result.packages}. Подтверждено событий за всё время: ${result.acknowledged_events}. Выполните /reload в игре.`;
+      return result;
+    } catch (exc) {
+      el("local-sync-note").textContent = "Синхронизация не завершена: " + exc.message;
+      throw exc;
+    } finally {
+      syncPending = null;
+      el("local-sync").disabled = !localBridge?.ready;
+    }
+  }
+  async function deliverPackage(note) {
+    if (!localBridge?.ready) {
+      el("export-note").textContent = note + " Запустите Bridge, затем /reload в игре.";
+      return;
+    }
+    el("export-note").textContent = note + " Передаём в установленный аддон…";
+    try {
+      await synchronize();
+      el("export-note").textContent = note + " Записано в аддон. Выполните /reload в игре.";
+    } catch (exc) {
+      el("export-note").textContent = note + " Передача не завершена. Нажмите «Синхронизировать с игрой» для повторной попытки. " + exc.message;
+    }
+  }
+  el("local-sync").addEventListener("click", () => synchronize().catch(exc => error(exc.message)));
+  function selectionChanged() {
+    el("selected").textContent = `Выбрано: ${selected.size}`;
+    const ready = status && status.published_run && !status.running && status.result_generation_matches && status.settings_match && status.strategy_versions_match && !status.observation_stale;
+    el("export").disabled = !ready || !selected.size;
+    let reason = "";
+    if (!status) reason = "Обновите статус аналитики.";
+    else if (status.running) reason = "Идёт пересчёт — дождитесь завершения.";
+    else if (!status.published_run) reason = "Сначала нажмите «Пересчитать аналитику».";
+    else if (status.observation_stale) reason = "Цены устарели: обновите данные и пересчитайте аналитику.";
+    else if (!ready) reason = "Сохранённый расчёт не соответствует текущей базе, настройкам или правилам. Нажмите «Пересчитать аналитику».";
+    else if (!selected.size) reason = "Отметьте нужную строку в столбце «В аддон».";
+    el("export-block-reason").textContent = reason;
+    el("export").title = reason || "Создать пакет из выбранных возможностей";
+    el("export-form").hidden = true;
+  }
   const clear = () => {el("results").replaceChildren(); el("detail").hidden = true; el("result-note").textContent = "";};
   const error = value => {el("error").textContent = value;};
   const riskNames = {
@@ -39,7 +94,14 @@
     missing_material_price_or_quantity:"Нет цены или количества материала",
     no_complete_craft_path:"Нет полной цепочки в заданных пределах глубины и количества крафтов",
     single_step_or_buy_is_cheaper:"Достаточно одного этапа или промежуточный материал дешевле купить",
-    craft_graph_search_limit:"Достигнут предел поиска цепочки — результат не публикуется"
+    craft_graph_search_limit:"Достигнут предел поиска цепочки — результат не публикуется",
+    liquidity_unknown_sales:"Ликвидность: оценка продаж или её дата отсутствуют",
+    liquidity_stale_sales:"Ликвидность: оценка продаж устарела",
+    liquidity_insufficient_sales_history:"Ликвидность: недостаточно дней с оценками продаж",
+    liquidity_low_sales:"Ликвидность: дневные продажи ниже порога",
+    liquidity_unknown_supply:"Ликвидность: предложение неизвестно",
+    liquidity_high_supply:"Ликвидность: слишком много предложения относительно продаж",
+    liquidity_large_batch:"Ликвидность: выход крафта слишком велик относительно продаж"
   };
   function renderDiagnostics(run) {
     const target = el("diagnostics"); target.replaceChildren();
@@ -94,6 +156,19 @@
     field("Наблюдаемый объём / аукционы", (price.quantity ?? "неизвестно") + " / " + (price.auctions ?? "неизвестно"));
     field("Дневные продажи — оценка источника", price.sales_estimated_per_day);
     if (price.sales_observed_at) field("Дата оценки продаж", date(price.sales_observed_at));
+    field("Источник оценки продаж", price.sales_source || price.source);
+    field("Оценка спроса", "Данные источника, не подтверждённые сделки; срок и вероятность продажи неизвестны.");
+    const liquidity = detail.details.liquidity;
+    if (liquidity) {
+      field("Фильтр ликвидности крафта", liquidity.enabled ? (liquidity.passed ? "Пройден" : "Не пройден") : "Выключен при расчёте");
+      if (liquidity.enabled) {
+        field("Консервативная оценка продаж/сутки", liquidity.conservative_sales_per_day);
+        field("Дней с оценкой / окно", `${liquidity.covered_days} / ${liquidity.window_days}`);
+        field("Предложение / дневные продажи (не срок продажи)", liquidity.supply_to_daily_sales);
+        field("Выход крафта / дневные продажи, %", liquidity.batch_daily_sales_percent);
+        field("Пороги отбора", `Продажи ≥ ${liquidity.thresholds.min_sales_per_day}/сутки; предложение/продажи ≤ ${liquidity.thresholds.max_supply_days}; партия ≤ ${liquidity.thresholds.max_batch_sales_percent}%; дней ≥ ${liquidity.thresholds.min_sales_days}; возраст ≤ ${liquidity.thresholds.max_sales_age_seconds / 3600} ч.`);
+      }
+    }
     field("Выход / количество", detail.quantity);
     field("Учитываемые затраты", detail.costs_included.map(c => costs[c] || c).join(", "));
     field("Не учтено в прибыли", detail.costs_excluded.map(c => costs[c] || c).join(", ") || "Нет дополнительных затрат в этом расчёте");
@@ -149,7 +224,7 @@
   }
   function renderStatus(value) {
     status = value;
-    for (const id of ["market", "discount", "cut", "craft-graph", "craft-depth", "save"]) el(id).disabled = value.running;
+    for (const id of ["market", "discount", "cut", "craft-graph", "craft-depth", "craft-liquid", "craft-sales", "craft-supply", "craft-batch", "craft-window", "craft-days", "craft-age", "save"]) el(id).disabled = value.running;
     el("recalculate").disabled = value.running || !value.ready || !value.active_market;
     const run = value.published_run;
     el("status").textContent = (value.running ? "Расчёт выполняется. " : "") +
@@ -160,6 +235,7 @@
     if (run && value.strategy_versions_match === false) el("status").textContent += " Правила расчёта обновлены: нажмите «Пересчитать».";
     error(value.error || "");
     renderDiagnostics(value.latest_run);
+    selectionChanged();
     if (!value.running && timer) {clearTimeout(timer); timer = null;}
   }
   async function loadResults(token = revision) {
@@ -171,11 +247,15 @@
     if (el("confidence").value) params.set("confidence", el("confidence").value);
     const value = await api("/analytics/opportunities?" + params);
     if (token !== revision || request !== listRevision || !settings || value.market !== settings.active_market) return;
+    if (selectedRun !== value.run_id || selectedMarket !== value.market) {
+      selected.clear(); selectedRun = value.run_id; selectedMarket = value.market; selectionChanged();
+    }
     clear();
     for (const item of value.items) {
       const row = document.createElement("tr");
       const text = [`${item.item_name} · ${names[item.strategy_id] || item.strategy_id}`, money(item.required_capital_copper),
-        money(item.reference_price_copper), money(item.potential_profit_copper), `${item.roi_percent}%`, item.rating];
+        money(item.reference_price_copper), money(item.potential_profit_copper), `${item.roi_percent}%`, item.rating,
+        `${item.details.price.sales_estimated_per_day ?? "неизвестно"} · ${date(item.details.price.sales_observed_at)}${item.risk_flags.includes("stale_sales_estimate") ? " · устарела" : ""}`];
       for (const value of text) {const cell = document.createElement("td"); cell.textContent = value; row.append(cell);}
       const cell = document.createElement("td"), button = document.createElement("button");
       button.type = "button"; button.textContent = "Подробнее";
@@ -187,7 +267,11 @@
           showDetail(detail);
         } catch (exc) {if (detailToken === revision) error(exc.message);}
       });
-      cell.append(button); row.append(cell); el("results").append(row);
+      cell.append(button); row.append(cell);
+      const choice = document.createElement("td"), checkbox = document.createElement("input"); checkbox.type = "checkbox";
+      checkbox.setAttribute("aria-label", "Передать в аддон: " + item.item_name); checkbox.checked = selected.has(item.id);
+      checkbox.addEventListener("change", () => {if (checkbox.checked) selected.set(item.id,item); else selected.delete(item.id); selectionChanged();});
+      choice.append(checkbox); row.append(choice); el("results").append(row);
     }
     el("result-note").textContent = value.run_id ?
       `${value.total} возможностей по фильтру. Покрытие частичное; сделки и продажи не подтверждены.` :
@@ -198,9 +282,10 @@
   async function refresh() {
     const token = ++revision;
     try {
-      const [markets, current, value] = await Promise.all([api("/analytics/markets"), api("/analytics/settings"), api("/analytics/status")]);
+      const [markets, current, value, bridge] = await Promise.all([api("/analytics/markets"), api("/analytics/settings"), api("/analytics/status"), api("/addon/local-sync/status")]);
       if (token !== revision) return;
       settings = current;
+      renderLocalBridge(bridge);
       el("market").replaceChildren();
       const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Выберите рынок"; el("market").append(placeholder);
       for (const market of markets.markets) {
@@ -213,6 +298,13 @@
       el("discount").value = current.config.discount_percent; el("cut").value = current.config.auction_cut_percent;
       el("craft-graph").checked = current.config.enabled_strategies.includes("craft_graph");
       el("craft-depth").value = current.config.strategy_settings.craft_graph?.max_depth ?? 5;
+      el("craft-liquid").checked = current.config.craft_liquidity_enabled;
+      el("craft-sales").value = current.config.craft_min_sales_per_day;
+      el("craft-supply").value = current.config.craft_max_supply_days;
+      el("craft-batch").value = current.config.craft_max_batch_sales_percent;
+      el("craft-window").value = current.config.craft_sales_window_days;
+      el("craft-days").value = current.config.craft_min_sales_days;
+      el("craft-age").value = current.config.craft_sales_max_age_seconds / 3600;
       renderStatus(value);
       await loadResults(token);
       if (value.running) watch();
@@ -240,6 +332,10 @@
       if (el("craft-graph").checked) enabled.push("craft_graph");
       const updated = await api("/analytics/settings", {method:"PUT", body:JSON.stringify({active_market:el("market").value || null,
         config:{...settings.config, discount_percent:el("discount").value, auction_cut_percent:el("cut").value,
+          craft_liquidity_enabled:el("craft-liquid").checked, craft_min_sales_per_day:el("craft-sales").value,
+          craft_max_supply_days:el("craft-supply").value, craft_max_batch_sales_percent:el("craft-batch").value,
+          craft_sales_window_days:Number(el("craft-window").value), craft_min_sales_days:Number(el("craft-days").value),
+          craft_sales_max_age_seconds:Math.round(Number(el("craft-age").value) * 3600),
           enabled_strategies:enabled, strategy_settings:{...settings.config.strategy_settings,
             craft_graph:{...settings.config.strategy_settings.craft_graph, max_depth:Number(el("craft-depth").value)}}}})});
       if (token !== revision) return false;
@@ -261,7 +357,58 @@
   el("filters").addEventListener("submit", event => {event.preventDefault(); offset = 0; loadResults().catch(exc => error(exc.message));});
   el("prev").addEventListener("click", () => {offset = Math.max(0, offset - 50); loadResults().catch(exc => error(exc.message));});
   el("next").addEventListener("click", () => {offset += 50; loadResults().catch(exc => error(exc.message));});
+  el("export").addEventListener("click", () => {
+    const target = el("export-limits"); target.replaceChildren();
+    const limits = new Map(); let budget = 0;
+    for (const item of selected.values()) {
+      budget += item.required_capital_copper;
+      const lines = ["simple_craft", "craft_graph"].includes(item.strategy_id) ? item.details.materials :
+        [{item_id:item.item_id,item_name:item.item_name,source:"auction",unit_price_copper:item.buy_price_copper}];
+      for (const line of lines) if (line.source === "auction") {
+        const old = limits.get(line.item_id);
+        if (!old || line.unit_price_copper < old.price) limits.set(line.item_id,{name:line.item_name || String(line.item_id),price:line.unit_price_copper});
+      }
+    }
+    for (const [id, line] of limits) {
+      const label = document.createElement("label"), input = document.createElement("input");
+      label.textContent = `${line.name}: максимум за единицу, copper`; input.type = "number"; input.min = "1"; input.max = "9007199254740991";
+      input.required = true; input.value = line.price; input.dataset.itemId = String(id); label.append(input); target.append(label);
+    }
+    el("export-budget").value = budget; el("export-form").hidden = false;
+    el("export-note").textContent = "Пакет ещё не создан. Проверьте цены и бюджет в открытой форме, затем нажмите «Создать пакет для аддона».";
+    el("export-form").scrollIntoView({behavior:"smooth",block:"start"});
+  });
+  el("export-form").addEventListener("submit", async event => {
+    event.preventDefault(); error("");
+    const submit = el("export-form").querySelector("button[type='submit']");
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const limits = {};
+    for (const input of el("export-limits").querySelectorAll("input")) limits[input.dataset.itemId] = Number(input.value);
+    try {
+      const result = await api("/addon/exports", {method:"POST",body:JSON.stringify({request_id:crypto.randomUUID(),
+        opportunity_ids:Array.from(selected.keys()),unit_limits:limits,max_budget_copper:Number(el("export-budget").value)})});
+      await deliverPackage(`Пакет создан: ${result.tasks.length} заданий. Срок пакета: ${date(result.expires_at)}.`);
+      selected.clear(); selectionChanged(); await loadResults();
+    } catch (exc) {error(exc.message);} finally {submit.disabled = false;}
+  });
+  el("game-history").addEventListener("click", async () => {
+    try {
+      const value = await api("/addon/history"); const target = el("game-events"); target.replaceChildren();
+      for (const event of value.events) {
+        const p = document.createElement("p"); p.textContent = `${date(event.observed_at)} · ${event.kind}/${event.state} · ${event.item_id || "задание"} × ${event.quantity} · ${money(event.cost_copper)}`; target.append(p);
+      }
+      if (!value.events.length) target.textContent = "Игровые отчёты ещё не синхронизированы для активного рынка.";
+    } catch (exc) {error(exc.message);}
+  });
+  el("renew-packages").addEventListener("click", async () => {
+    try {
+      const current = await api("/addon/packages?include_expired=true&market=" + encodeURIComponent(settings.active_market));
+      for (const p of current.packages) await api("/addon/packages/" + p.package_id + "/renew", {method:"POST"});
+      await deliverPackage(`Продлено пакетов: ${current.packages.length}. Купленные количества и идентификаторы заданий сохраняются.`);
+    } catch (exc) {error(exc.message);}
+  });
   window.addEventListener("cennik-connected", refresh);
   window.addEventListener("cennik-data-updated", refresh);
-  window.addEventListener("cennik-disconnected", () => {revision++; clearTimeout(timer); timer = null; clear(); settings = null;});
+  window.addEventListener("cennik-disconnected", () => {revision++; clearTimeout(timer); timer = null; clear(); settings = null; selected.clear(); selectionChanged(); renderLocalBridge({available:false});});
 })();

@@ -628,6 +628,7 @@ def build_database(
     settings: Settings | None = None,
     base_database: Path | None = None,
     allowed_market: str | None = None,
+    write_parquet: bool = True,
 ) -> dict:
     settings = settings or Settings.read(root=state.root)
     archive = RawArchive(state)
@@ -821,7 +822,7 @@ def build_database(
             counts[table] = row[0]
         connection.execute("CHECKPOINT")
         # Finish even the expensive preferred-history export before publishing the DB.
-        parquet_output = _write_parquet(connection, state.root) if not errors else None
+        parquet_output = _write_parquet(connection, state.root) if write_parquet and not errors else None
     finally:
         connection.close()
     result = {
@@ -853,9 +854,16 @@ def build_database(
             if attempt == 29:
                 raise
             time.sleep(0.1)
-    assert parquet_output is not None
-    _publish_parquet(state.root, parquet_output)
+    if parquet_output is not None:
+        _publish_parquet(state.root, parquet_output)
     return result
+
+
+def database_update_id(connection: duckdb.DuckDBPyConnection) -> str | None:
+    if not connection.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_applied_updates'").fetchone():
+        return None
+    row = connection.execute("SELECT update_id FROM _applied_updates ORDER BY applied_at DESC, rowid DESC LIMIT 1").fetchone()
+    return row[0] if row else None
 
 
 def _write_parquet(connection: duckdb.DuckDBPyConnection, root: Path) -> Path:
@@ -881,13 +889,14 @@ def _write_parquet(connection: duckdb.DuckDBPyConnection, root: Path) -> Path:
     return output
 
 
-def _publish_parquet(root: Path, output: Path) -> None:
+def _publish_parquet(root: Path, output: Path, *, update_id: str | None = None) -> None:
     # Generation directories + atomic pointer prevent a mixed old/new set after Ctrl+C.
     atomic_json(
         root / "parquet" / "CURRENT.json",
         {
             "directory": output.name,
             "generated_at": utc_now(),
+            "database_update_id": update_id,
         },
     )
 
@@ -901,7 +910,8 @@ def export_parquet(state: State, *, settings: Settings | None = None) -> Path:
     )
     try:
         output = _write_parquet(connection, state.root)
+        update_id = database_update_id(connection)
     finally:
         connection.close()
-    _publish_parquet(state.root, output)
+    _publish_parquet(state.root, output, update_id=update_id)
     return output

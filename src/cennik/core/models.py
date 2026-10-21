@@ -31,11 +31,20 @@ class AnalyticsConfig(Model):
     ranking_profit_scale_copper: int = Field(default=10000, ge=1)
     ranking_roi_cap_percent: Decimal = Field(default=Decimal("100"), gt=0)
     ranking_risk_penalty: Decimal = Field(default=Decimal("0.08"), ge=0, le=1)
+    craft_liquidity_enabled: bool = False
+    craft_min_sales_per_day: Decimal = Field(default=Decimal("10"), gt=0, le=1000000)
+    craft_max_supply_days: Decimal = Field(default=Decimal("1"), gt=0, le=365)
+    craft_max_batch_sales_percent: Decimal = Field(default=Decimal("10"), gt=0, le=100)
+    craft_sales_window_days: int = Field(default=3, ge=2, le=30)
+    craft_min_sales_days: int = Field(default=2, ge=2, le=30)
+    craft_sales_max_age_seconds: int = Field(default=86400, ge=1, le=604800)
 
     @model_validator(mode="after")
     def valid_window(self):
         if self.min_history_days > self.history_days:
             raise ValueError("min_history_days exceeds history_days")
+        if self.craft_min_sales_days > self.craft_sales_window_days:
+            raise ValueError("craft_min_sales_days exceeds craft_sales_window_days")
         if len(self.enabled_strategies) != len(set(self.enabled_strategies)):
             raise ValueError("Duplicate enabled strategies")
         return self
@@ -66,6 +75,7 @@ class PriceObservation(Model):
     auctions: int | None = None
     sales_estimated_per_day: Decimal | None = None
     sales_observed_at: AwareDatetime | None = None
+    sales_source: str | None = None
     source: str
     raw_id: str | None = None
     sha256: str | None = None

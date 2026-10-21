@@ -1,6 +1,9 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 
 import duckdb
@@ -8,14 +11,17 @@ import httpx
 import pytest
 from conftest import MARKET, store_response
 
-from ahledger.analytics import build_database
+from ahledger.analytics import SCHEMAS, build_database, export_parquet
 from ahledger.config import API, Settings
+from ahledger.incremental import parquet_status
 from ahledger.models import JobSpec
 from ahledger.storage import State
 from ahledger.update import batch_root, fetch_update, merge_update
+from ahledger.util import exclusive_lock
 from ahledger.web import create_app
 from ahledger.web_control import Controller, JobRequest
 from cennik.data.duckdb import DuckDBProvider
+from cennik.services.analytics import AnalyticsService
 
 IDENTITY = "a" * 32
 OTHER = "forever.normal.alliance.us"
@@ -130,6 +136,168 @@ def test_merge_preserves_history_other_market_and_recipe_provenance_and_is_idemp
     again = merge_update(settings, IDENTITY)
     assert again["counts"] == result["counts"]
     assert json.loads((state.root / "parquet/CURRENT.json").read_text())["directory"]
+    assert result["mode"] == "incremental" and again["reused"]
+    assert parquet_status(state.root, settings)["stale"]
+
+
+def table_contents(path):
+    with duckdb.connect(str(path), read_only=True) as db:
+        existing = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
+        return {table: sorted(db.execute(f'SELECT * FROM "{table}"').fetchall(), key=repr)
+                for table in [*SCHEMAS, "price_history", "preferred_price_history", "coverage"] if table in existing}
+
+
+def test_incremental_matches_full_build_with_key_collisions_and_new_recipe(state, spec, history, tmp_path):
+    database = base_database(state, spec, history)
+    stage_update(state)
+    stage = State(batch_root(state.root, IDENTITY))
+    changed = crafting(MARKET)
+    changed["recipes"][0]["reagents"][0]["qty"] = 3
+    changed["generatedAt"] = "2026-10-13T09:00:00Z"
+    store_response(stage, JobSpec(dataset="crafting", url=f"{API}/v1/crafting/{MARKET}", market=MARKET), changed)
+    stage.set("market_status", {MARKET: "scanned"})
+    # Two observations collide on the same key; latest retrieval must win.
+    store_response(stage, JobSpec(dataset="pricetable", url=f"{API}/v1/pricetable/{MARKET}", market=MARKET),
+                   f"AHL1|{MARKET}|1791795600|1\n2589:9:8:90:9:9:8:10:10".encode())
+    stage.close()
+    reference = tmp_path / "reference"
+    shutil.copytree(batch_root(state.root, IDENTITY), reference)
+    full = State(reference)
+    try:
+        build_database(full, settings=Settings(data_dir=state.root), base_database=database,
+                       allowed_market=MARKET)
+    finally:
+        full.close()
+    settings = Settings(data_dir=state.root, markets=[MARKET])
+    merge_update(settings, IDENTITY)
+    assert table_contents(database) == table_contents(reference / "analytics/ahledger.duckdb")
+    with DuckDBProvider(database, MARKET, datetime.now(UTC) + timedelta(days=1)) as provider:
+        assert provider.recipes()[0].inputs[0].quantity == 3
+
+
+def test_failed_validation_rolls_back_every_changed_table_and_schema(state, spec, history, monkeypatch):
+    database = base_database(state, spec, history)
+    before = table_contents(database)
+    stage_update(state)
+    import ahledger.incremental as incremental
+
+    def fail(db, tables, market):
+        assert "price_snapshots" in tables
+        assert db.execute("SELECT count(*) FROM recipe_sources").fetchone()[0] == 2
+        raise ValueError("injected post-write validation failure")
+
+    monkeypatch.setattr(incremental, "check_touched", fail)
+    with pytest.raises(ValueError, match="injected"):
+        merge_update(Settings(data_dir=state.root, markets=[MARKET]), IDENTITY)
+    assert table_contents(database) == before
+    with duckdb.connect(str(database), read_only=True) as db:
+        assert not db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_applied_updates'").fetchone()
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_process_crash_recovers_atomic_update_and_retry(state, spec, history, after_commit):
+    database = base_database(state, spec, history)
+    before = table_contents(database)
+    analytics = AnalyticsService(state.root)
+    previous_generation = analytics.generation()
+    stage_update(state)
+    script = '''
+import os,sys
+from pathlib import Path
+import ahledger.incremental as inc
+from ahledger.config import Settings
+from ahledger.update import merge_update
+if sys.argv[4] == 'True':
+    real = inc.analytics_connection
+    class CrashConnection:
+        def __init__(self, db): self.db=db
+        def __getattr__(self, name): return getattr(self.db,name)
+        def execute(self, sql, *args):
+            result=self.db.execute(sql,*args)
+            if sql == 'COMMIT': os._exit(23)
+            return result
+    inc.analytics_connection=lambda *args,**kwargs: CrashConnection(real(*args,**kwargs))
+else:
+    real=inc.check_touched
+    def crash(*args):
+        real(*args)
+        os._exit(23)
+    inc.check_touched=crash
+merge_update(Settings(data_dir=Path(sys.argv[1]),markets=[sys.argv[2]]),sys.argv[3])
+'''
+    process = subprocess.run([sys.executable, "-c", script, str(state.root), MARKET, IDENTITY, str(after_commit)],
+                             capture_output=True, text=True, timeout=40)
+    assert process.returncode == 23, process.stdout + process.stderr
+    if after_commit:
+        assert analytics.generation() != previous_generation
+    # Opening a writer performs DuckDB's WAL recovery after the killed process.
+    with duckdb.connect(str(database)) as db:
+        db.execute("CHECKPOINT")
+    assert not os.path.exists(str(database) + ".wal")
+    analytics.generation(refresh=True)
+    if not after_commit:
+        assert table_contents(database) == before
+    result = merge_update(Settings(data_dir=state.root, markets=[MARKET]), IDENTITY)
+    assert result["reused"] is after_commit
+    with duckdb.connect(str(database), read_only=True) as db:
+        assert db.execute("SELECT count(*) FROM _applied_updates").fetchone() == (1,)
+    assert table_contents(database)["price_history"] == before["price_history"]
+
+
+def test_changed_batch_id_is_rejected_and_corrupt_raw_does_not_write(state, spec, history):
+    database = base_database(state, spec, history)
+    stage_update(state)
+    settings = Settings(data_dir=state.root, markets=[MARKET])
+    merge_update(settings, IDENTITY)
+    before = table_contents(database)
+    stage = State(batch_root(state.root, IDENTITY))
+    store_response(stage, JobSpec(dataset="pricetable", url=f"{API}/v1/pricetable/{MARKET}", market=MARKET),
+                   f"AHL1|{MARKET}|1791795600|1\n2589:7:6:90:7:7:6:8:10".encode())
+    stage.close()
+    with pytest.raises(ValueError, match="different contents"):
+        merge_update(settings, IDENTITY)
+    assert table_contents(database) == before
+    blob = next((batch_root(state.root, IDENTITY) / "raw/blobs").glob("*/*.zst"))
+    blob.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="Повреждён"):
+        merge_update(settings, IDENTITY)
+    assert table_contents(database) == before
+
+
+@pytest.mark.parametrize("lock_dir", ["", "cennik"])
+def test_incremental_respects_writer_and_calculation_locks(state, spec, history, lock_dir):
+    database = base_database(state, spec, history)
+    stage_update(state)
+    before = table_contents(database)
+    with exclusive_lock(state.root / lock_dir), pytest.raises(RuntimeError, match="Another writer"):
+        merge_update(Settings(data_dir=state.root, markets=[MARKET]), IDENTITY)
+    assert table_contents(database) == before
+
+
+def test_manual_export_restores_current_parquet_and_api_hides_old_export(state, spec, history):
+    from fastapi.testclient import TestClient
+
+    database = base_database(state, spec, history)
+    stage_update(state)
+    settings = Settings(data_dir=state.root, markets=[MARKET])
+    old_pointer = (state.root / "parquet/CURRENT.json").read_bytes()
+    merge_update(settings, IDENTITY)
+    assert (state.root / "parquet/CURRENT.json").read_bytes() == old_pointer
+    app = create_app(settings, "a" * 40)
+    headers = {"X-API-Key": "a" * 40}
+    with TestClient(app) as client:
+        assert client.get("/api/status", headers=headers).json()["parquet"]["stale"]
+        names = [f["name"] for f in client.get("/api/files", headers=headers).json()["files"]]
+        assert "ahledger.duckdb" in names and not any(n.endswith(".parquet") for n in names)
+        assert client.get("/api/files/price_history.parquet", headers=headers).status_code == 404
+        app.state.controller.info = {"action": "update", "state": "building"}
+        assert client.get("/api/analytics/markets", headers=headers).status_code == 409
+        assert client.get("/api/status", headers=headers).status_code == 200
+        app.state.controller.info = {"state": "idle"}
+        export_parquet(state, settings=settings)
+        assert client.get("/api/status", headers=headers).json()["parquet"]["ready"]
+        assert client.get("/api/files/price_history.parquet", headers=headers).status_code == 200
+    assert database.is_file()
 
 
 def test_merge_rejects_foreign_market_without_changing_published_db(state, spec, history):

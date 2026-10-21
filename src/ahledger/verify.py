@@ -8,7 +8,7 @@ from .storage import TERMINAL, RawArchive, State
 from .util import atomic_json, utc_now
 
 
-def verify(state: State, *, settings: Settings | None = None) -> dict:
+def verify(state: State, *, settings: Settings | None = None, check_analytics: bool = True) -> dict:
     settings = settings or Settings.read(root=state.root)
     archive = RawArchive(state)
     errors = []
@@ -59,7 +59,7 @@ def verify(state: State, *, settings: Settings | None = None) -> dict:
         errors.append({"error": "SQLite integrity: " + integrity})
     db = state.root / "analytics" / "ahledger.duckdb"
     analytics = "NOT_CHECKED"
-    if db.exists():
+    if check_analytics and db.exists():
         connection = analytics_connection(db, settings, read_only=True)
         try:
             checks = {

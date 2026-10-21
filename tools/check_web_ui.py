@@ -48,6 +48,14 @@ def main():
                 "SELECT market,item_id,granularity FROM price_history GROUP BY ALL ORDER BY count(*) DESC,item_id LIMIT 1"
             ).fetchone()
         app = create_app(Settings(data_dir=archive), key, local=args.local)
+        if args.local:
+            game = directory / "Game with spaces"
+            addon = game / "Interface/AddOns/CennikAddon"
+            addon.mkdir(parents=True)
+            (addon / "CennikAddon.toc").write_text("ImportedData.lua")
+            config = archive / "bridge/local.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({"game_root": str(game), "account": "ui-fixture#5"}))
         # Widen freshness only in this isolated UI check; real old archives stay old.
         from cennik.core.models import AnalyticsConfig, AnalyticsSettings
 
@@ -72,7 +80,12 @@ def main():
                 if db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='recipe_sources'").fetchone():
                     fixture_row("recipe_sources", spell_id=spell, version_hash="ui-graph", market=chosen)
             fixture_row("dataset_metadata", dataset="crafting", market=chosen, status="COMPLETE")
-            fixture_row("price_snapshots", market=chosen, item_id=90000003, min_copper=1000000000, quantity=10, observed_at=now, source="isolated UI fixture")
+            from datetime import timedelta
+
+            for day in range(3):
+                fixture_row("price_snapshots", market=chosen, item_id=90000003, min_copper=1000000000,
+                            quantity=10, observed_at=now-timedelta(days=day),
+                            sales_estimated_per_day=20, source="isolated UI fixture")
         app.state.analytics.update_settings(AnalyticsSettings(
             active_market=chosen, config=AnalyticsConfig(max_price_age_seconds=31536000)))
         received = []
@@ -167,7 +180,7 @@ def main():
             if args.local:
                 assert evaluate("document.getElementById('login').hidden && document.getElementById('logout').hidden")
                 assert evaluate("!sessionStorage.getItem('ahl-key')")
-                assert evaluate("document.getElementById('connection').textContent === 'Локально'")
+                wait_for("document.getElementById('connection').textContent === 'Локально'")
             evaluate(
                 "document.getElementById('search').value='2589'; document.getElementById('search-form').requestSubmit()"
             )
@@ -179,16 +192,20 @@ def main():
             wait_for("document.querySelectorAll('#history tr').length > 0")
             wait_for("document.getElementById('analytics-market').options.length > 1 && !document.getElementById('analytics-recalculate').disabled")
             assert app.state.analytics.thread is None  # Reading the UI never calculates.
+            assert evaluate("document.getElementById('analytics-export').disabled")
+            assert evaluate("document.getElementById('analytics-export-block-reason').textContent.length > 0")
             assert evaluate("document.getElementById('analytics-craft-graph').checked")
             assert evaluate("document.querySelector('#analytics-strategy option[value=craft_graph]') !== null")
-            evaluate("document.getElementById('analytics-craft-depth').value='3';document.getElementById('analytics-settings').requestSubmit()")
+            evaluate("document.getElementById('analytics-craft-depth').value='3';document.getElementById('analytics-craft-liquid').checked=true;document.getElementById('analytics-craft-sales').value='15';document.getElementById('analytics-settings').requestSubmit()")
             wait_for("document.getElementById('analytics-status').textContent.includes('Наблюдение:') && !document.getElementById('analytics-save').disabled")
             deadline_settings = time.monotonic() + 10
-            while app.state.analytics.store.settings().config.strategy_settings.get("craft_graph", {}).get("max_depth") != 3:
+            while (app.state.analytics.store.settings().config.strategy_settings.get("craft_graph", {}).get("max_depth") != 3
+                   or not app.state.analytics.store.settings().config.craft_liquidity_enabled):
                 if time.monotonic() >= deadline_settings:
                     raise RuntimeError("CraftGraph settings were not saved")
                 time.sleep(0.05)
             assert app.state.analytics.thread is None
+            assert app.state.analytics.store.settings().config.craft_min_sales_per_day == 15
             evaluate("document.getElementById('analytics-recalculate').click()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             wait_for("document.getElementById('analytics-diagnostics').textContent.includes('Сигналов:')")
@@ -202,8 +219,27 @@ def main():
             wait_for("Array.from(document.querySelectorAll('#analytics-results tr')).some(r=>r.textContent.includes('Fixture craft'))")
             evaluate("Array.from(document.querySelectorAll('#analytics-results tr')).find(r=>r.textContent.includes('Fixture craft')).querySelector('button').click()")
             wait_for("document.querySelectorAll('#analytics-inputs ol li').length === 2")
+            assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Консервативная оценка продаж/сутки')")
+            assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Пройден')")
+            assert evaluate("document.querySelector('#analytics-results tr').cells[6].textContent.includes('20')")
             assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Порядок изготовления')")
             assert evaluate("document.getElementById('analytics-inputs').textContent.includes('Излишки не добавлены к прибыли')")
+            evaluate("document.querySelector('#analytics-results input[type=checkbox]').click()")
+            wait_for("!document.getElementById('analytics-export').disabled")
+            assert evaluate("document.getElementById('analytics-export-block-reason').textContent === ''")
+            evaluate("document.getElementById('analytics-export').click()")
+            assert evaluate("!document.getElementById('analytics-export-form').hidden")
+            assert evaluate("document.getElementById('analytics-export-note').textContent.includes('Пакет ещё не создан')")
+            assert evaluate("document.querySelector('#analytics-export-form button').textContent === 'Создать пакет для аддона'")
+            evaluate("document.getElementById('analytics-export-form').requestSubmit()")
+            wait_for("document.getElementById('analytics-export-note').textContent.includes('Пакет создан:')")
+            assert len(app.state.addon.packages(chosen))==1
+            if args.local:
+                wait_for("document.getElementById('analytics-export-note').textContent.includes('Записано в аддон')")
+                assert (addon / "ImportedData.lua").is_file()
+                assert "CennikImport =" in (addon / "ImportedData.lua").read_text(encoding="utf-8")
+                evaluate("document.getElementById('analytics-local-sync').click()")
+                wait_for("document.getElementById('analytics-local-sync-note').textContent.includes('Пакетов записано: 1')")
             evaluate("document.getElementById('analytics-strategy').value='';document.getElementById('analytics-filters').requestSubmit()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             evaluate("document.getElementById('analytics-sort').value='roi';document.getElementById('analytics-filters').requestSubmit()")

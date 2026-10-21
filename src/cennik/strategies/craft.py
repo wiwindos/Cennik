@@ -3,15 +3,17 @@ from typing import Any
 from cennik.core.interfaces import EvaluationContext
 from cennik.core.models import Opportunity
 from cennik.engines.economics import auction_net, cheapest_material
+from cennik.engines.liquidity import CraftLiquidity
 from cennik.strategies.common import opportunity
 
 
 class SimpleCraftArbitrage:
     id = "simple_craft"
-    version = "0.2.0"
+    version = "0.3.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
         results = []
+        liquidity = CraftLiquidity(context)
         for recipe in context.provider.recipes():
             output = context.prices.current.get(recipe.result_item_id) if recipe.result_item_id is not None else None
             problem = context.prices.usable(output)
@@ -27,6 +29,11 @@ class SimpleCraftArbitrage:
                 "bop", "bind on pickup", "bind_on_pickup", "on_pickup", "1", "soulbound"
             }:
                 context.reject(self.id, "untradeable_result")
+                continue
+            assert output is not None
+            evidence, problem = liquidity.check(output, recipe.qty_min)
+            if problem:
+                context.reject(self.id, problem)
                 continue
             materials, flags, timestamps = [], [], []
             if binding is None or binding.binding is None:
@@ -84,5 +91,5 @@ class SimpleCraftArbitrage:
                     "gross_revenue_copper": gross, "net_revenue_copper": net,
                     "auction_cut_copper": gross - net,
                     "auction_cut_percent": str(context.config.auction_cut_percent),
-                    "result_unit_price_copper": output.min_copper}))
+                    "result_unit_price_copper": output.min_copper, "liquidity": evidence}))
         return results

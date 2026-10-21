@@ -13,15 +13,20 @@ from pathlib import Path
 
 import duckdb
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse
 
+from cennik.addon.api import addon_router
+from cennik.addon.local_sync import LocalBridge
+from cennik.addon.service import AddonExchange
 from cennik.api.routes import analytics_router
 from cennik.services.analytics import AnalyticsService
 
 from .config import Settings
+from .incremental import parquet_status
+from .util import exclusive_lock
 from .web_control import Controller, JobRequest
 
 
@@ -51,6 +56,10 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
     )
     app.state.controller = controller
     app.state.analytics = analytics
+    exchange = AddonExchange(analytics)
+    app.state.addon = exchange
+    local_bridge = LocalBridge(root, exchange) if local else None
+    app.state.local_bridge = local_bridge
     header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
     def authorize(provided: str | None = Depends(header)):
@@ -70,6 +79,9 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
             if (not loopback or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}
                 or (origin is not None and origin != str(request.base_url).rstrip("/"))):
                 return JSONResponse({"detail": "Локальный режим доступен только с этой машины и страницы приложения."}, status_code=403)
+        writing = controller.info.get("action") == "update" and controller.info.get("state") in {"building", "stopping"}
+        if writing and request.url.path.startswith("/api/") and request.url.path not in {"/api/status", "/api/logs", "/api/jobs/stop"}:
+            return JSONResponse({"detail": "Применяется пакет обновления. Дождитесь завершения записи базы."}, status_code=409)
         response = await call_next(request)
         response.headers.update(
             {
@@ -100,7 +112,8 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
     @router.get("/status")
     def status():
         value = controller.snapshot()
-        if local and analytics.path.exists():
+        writing = value["run"].get("action") == "update" and value["run"].get("state") in {"building", "stopping"}
+        if local and analytics.path.exists() and not writing:
             value["markets"] = [{"id": m["market"], "label": m["label"]} for m in analytics.markets()]
             if (root / "analytics/imported.json").exists() and not (root / "analytics/build_result.json").exists():
                 value["analytics_updated_at"] = json.loads((root / "analytics/imported.json").read_text("utf-8")).get("imported_at")
@@ -108,6 +121,7 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
         value["imported_snapshot"] = local and (root / "analytics/imported.json").exists()
         value["raw_available"] = (root / "raw/metadata").exists() and any((root / "raw/metadata").glob("*.json"))
         value["market_update_available"] = analytics.path.exists()
+        value["parquet"] = {"ready": False, "stale": False} if writing or not analytics.path.exists() else parquet_status(root, settings)
         return value
 
     @router.post("/jobs", status_code=202)
@@ -211,11 +225,11 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
         }
         current = root / "parquet/CURRENT.json"
         if current.exists():
-            generation = json.loads(current.read_text("utf-8")).get("directory", "")
+            generation = json.loads(current.read_text("utf-8")).get("directory", "") if parquet_status(root, settings)["ready"] else ""
             if re.fullmatch(r"[0-9a-f]{32}", generation):
                 for path in (root / "parquet" / generation).glob("*.parquet"):
                     files[path.name] = path
-        return {name: path for name, path in files.items() if path.is_file()}
+        return {name: path for name, path in files.items() if path.is_file() and not (name == "ahledger.duckdb" and Path(str(path) + ".wal").exists())}
 
     @router.get("/files")
     def files():
@@ -231,6 +245,15 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
         path = available_files().get(name)
         if path is None:
             raise HTTPException(404, "Файл не найден")
+        if name == "ahledger.duckdb":
+            def stream_database():
+                with exclusive_lock(root), path.open("rb") as source:
+                    if Path(str(path) + ".wal").exists():
+                        raise RuntimeError("Database recovery must finish before downloading a snapshot")
+                    while chunk := source.read(1024 * 1024):
+                        yield chunk
+            return StreamingResponse(stream_database(), media_type="application/octet-stream",
+                                     headers={"Content-Disposition": 'attachment; filename="ahledger.duckdb"'})
         return FileResponse(path, filename=name)
 
     @router.get("/openapi.json")
@@ -238,5 +261,6 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
         return app.openapi()
 
     router.include_router(analytics_router(analytics, updating=controller.updating, operation_lock=operation_lock))
+    router.include_router(addon_router(exchange,operation_lock,controller.updating,local_bridge))
     app.include_router(router)
     return app
