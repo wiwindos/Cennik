@@ -9,7 +9,7 @@ from cennik.core.models import PriceObservation
 class CraftLiquidity:
     def __init__(self, context: EvaluationContext):
         self.context = context
-        self.history = (context.provider.sales_history(context.config.craft_sales_window_days)
+        self.history = (context.prices.sales_history(context.config.craft_sales_window_days)
                         if context.config.craft_liquidity_enabled else {})
 
     def check(self, price: PriceObservation, quantity: int) -> tuple[dict[str, Any], str | None]:

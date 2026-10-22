@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections.abc import Iterable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -10,8 +11,9 @@ from pathlib import Path
 import duckdb
 
 from ahledger.util import digest, dumps, exclusive_lock
-from cennik.core.interfaces import EvaluationContext
+from cennik.core.interfaces import EvaluationContext, Strategy
 from cennik.core.models import AnalyticsSettings, Opportunity, Run
+from cennik.core.performance import Performance
 from cennik.data.duckdb import DuckDBProvider, fingerprint
 from cennik.engines.prices import PriceEngine
 from cennik.storage.sqlite import Store
@@ -58,6 +60,7 @@ class AnalyticsService:
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
         self._identity: tuple[int, int, int, int, str] | None = None
+        self._performance: Performance | None = None
         try:
             with exclusive_lock(self.directory):
                 self.store.recover()
@@ -97,6 +100,7 @@ class AnalyticsService:
     def start(self, *, background: bool = True, as_of: datetime | None = None) -> dict:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("Аналитика уже выполняется.")
+        self._performance = Performance()
         stack = ExitStack()
         try:
             stack.enter_context(exclusive_lock(self.directory))
@@ -106,8 +110,11 @@ class AnalyticsService:
             settings.config = self.registry.normalize_config(settings.config)
             if settings.active_market is None:
                 raise ValueError("Выберите один активный рынок.")
-            generation = self.generation(refresh=True)
-            if settings.active_market not in {m["market"] for m in self.markets()}:
+            with self._performance.measure("initial_fingerprint"):
+                generation = self.generation(refresh=True)
+            with self._performance.measure("market_check"):
+                markets = self.markets()
+            if settings.active_market not in {m["market"] for m in markets}:
                 raise DataNotReady("Выбранный рынок отсутствует в текущем поколении DuckDB.")
             strategies = self.registry.selected(settings.config.enabled_strategies)
             versions = {s.id: s.version for s in strategies}
@@ -117,6 +124,7 @@ class AnalyticsService:
             cached = self.store.cached(identity, summary=True)
             if cached:
                 self.store.publish_cached(cached)
+                self._performance.stop()
                 stack.close()
                 self.lock.release()
                 return {"run": cached.model_dump(mode="json"), "reused": True}
@@ -126,6 +134,7 @@ class AnalyticsService:
                       strategy_versions=versions)
             self.store.begin(run, identity)
         except Exception:
+            self._performance.stop()
             stack.close()
             self.lock.release()
             raise
@@ -143,6 +152,7 @@ class AnalyticsService:
             try:
                 self.thread.start()
             except Exception as exc:
+                self._performance.stop()
                 run.status, run.error, run.finished_at = "failed", str(exc), datetime.now(UTC)
                 self.store.finish(run, [])
                 stack.close()
@@ -155,39 +165,57 @@ class AnalyticsService:
 
     def calculate(self, run: Run) -> None:
         opportunities: list[Opportunity] = []
+        performance = self._performance or Performance()
+        self._performance = performance
         try:
             with DuckDBProvider(self.path, run.market, run.as_of) as provider:
-                prices = PriceEngine(provider, run.config)
+                prices = PriceEngine(provider, run.config, performance.measure)
                 run.diagnostics["quality"] = prices.quality
                 run.diagnostics["observed_items"] = len(prices.current)
                 if not any(p.min_copper is not None and p.min_copper > 0 for p in prices.current.values()):
                     raise DataNotReady("Для выбранного рынка нет наблюдаемых цен. Это отсутствие данных, а не отсутствие прибыльных возможностей.")
-                context = EvaluationContext(provider, run.config, run.run_id, run.started_at,
-                                            prices, provider.items())
+                with performance.measure("items"):
+                    items = provider.items()
+                context = EvaluationContext(provider, run.config, run.run_id, run.started_at, prices, items)
                 run.diagnostics["rejections"] = context.diagnostics
                 unique: dict[tuple, Opportunity] = {}
                 for strategy in self.registry.selected(run.config.enabled_strategies):
-                    for value in strategy.evaluate(context):
-                        # All plugins obey the same scope and integer-money contract.
-                        candidate = Opportunity.model_validate(value.model_dump())
-                        if (candidate.market != run.market or candidate.run_id != run.run_id
-                            or candidate.strategy_id != strategy.id or candidate.strategy_version != strategy.version
-                            or candidate.observed_at > run.as_of):
-                            raise ValueError("Strategy returned an opportunity outside its run context")
-                        key = (candidate.strategy_id, candidate.item_id, candidate.action,
-                               candidate.details.get("spell_id"), candidate.details.get("version_hash"))
-                        if key not in unique:
-                            unique[key] = rank(candidate, context)
+                    with performance.measure("strategy_" + strategy.id):
+                        values = strategy.evaluate(context)
+                    with performance.measure("ranking"):
+                        self._rank_candidates(values, strategy, context, unique, run)
                 opportunities = sorted(unique.values(), key=lambda o: (-o.rating, o.id))
-            if fingerprint(self.path) != run.generation:
+            with performance.measure("final_fingerprint"):
+                final_generation = fingerprint(self.path)
+            if final_generation != run.generation:
                 raise DataNotReady("Поколение DuckDB изменилось во время расчёта; запустите пересчёт вручную.")
             run.status, run.signal_count = "completed", len(opportunities)
             run.finished_at = datetime.now(UTC)
-            self.store.finish(run, opportunities)
+            run.diagnostics["performance"] = performance.snapshot()
+            with performance.measure("save_results"):
+                self.store.finish(run, opportunities)
         except Exception as exc:
             run.status, run.error, run.finished_at = "failed", str(exc)[:2000], datetime.now(UTC)
             run.signal_count = 0
+            run.diagnostics["performance"] = performance.snapshot()
             self.store.finish(run, [])
+        finally:
+            performance.stop()
+
+    @staticmethod
+    def _rank_candidates(values: Iterable[Opportunity], strategy: Strategy, context: EvaluationContext,
+                         unique: dict[tuple, Opportunity], run: Run) -> None:
+        for value in values:
+            # All plugins obey the same scope and integer-money contract.
+            candidate = Opportunity.model_validate(value.model_dump())
+            if (candidate.market != run.market or candidate.run_id != run.run_id
+                or candidate.strategy_id != strategy.id or candidate.strategy_version != strategy.version
+                or candidate.observed_at > run.as_of):
+                raise ValueError("Strategy returned an opportunity outside its run context")
+            key = (candidate.strategy_id, candidate.item_id, candidate.action,
+                   candidate.details.get("spell_id"), candidate.details.get("version_hash"))
+            if key not in unique:
+                unique[key] = rank(candidate, context)
 
     def status(self) -> dict:
         settings = self.store.settings()
@@ -216,6 +244,7 @@ class AnalyticsService:
                 "observed_at": observed, "data_age_seconds": age,
                 "observation_stale": age is not None and age > settings.config.max_price_age_seconds,
                 "running": self.lock.locked() or (latest is not None and latest.status == "running"),
+                "progress": self._performance.snapshot() if self._performance else None,
                 "latest_run": latest.model_dump(mode="json") if latest else None,
                 "published_run": published.model_dump(mode="json") if published else None,
                 "opportunity_count": published.signal_count if published else 0,

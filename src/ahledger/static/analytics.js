@@ -2,6 +2,12 @@
 (() => {
   const el = id => document.getElementById("analytics-" + id);
   const names = {vendor_arbitrage:"Vendor Arbitrage", historical_discount:"Historical Discount", simple_craft:"Simple Craft Arbitrage", craft_graph:"CraftGraph"};
+  const phases = {initial_fingerprint:"проверка контрольной суммы базы",market_check:"проверка рынка",
+    current_prices:"загрузка текущих цен",source_quality:"подготовка рисков источников",items:"загрузка предметов",
+    historical_prices:"загрузка истории цен",sales_history:"загрузка оценок продаж",ranking:"проверка и ранжирование результатов",
+    final_fingerprint:"повторная проверка базы",save_results:"сохранение результатов",
+    strategy_vendor_arbitrage:"торговля с NPC",strategy_historical_discount:"историческая скидка",
+    strategy_simple_craft:"обычный крафт",strategy_craft_graph:"поиск цепочек крафта"};
   const date = value => value ? new Date(value).toLocaleString("ru-RU") : "неизвестно";
   const money = value => {
     if (value === null || value === undefined) return "неизвестно";
@@ -112,6 +118,10 @@
     const states = {running:"выполняется",completed:"завершён",failed:"ошибка",interrupted:"прерван"};
     note(`Расчёт ${states[run.status] || run.status}. Сигналов: ${run.signal_count}. Предметов с наблюдаемыми ценами: ${diagnostics.observed_items ?? 0}.`);
     if (run.error) note(run.error);
+    const performance = diagnostics.performance;
+    if (performance?.timings_seconds) {
+      note("Замеры этапов: " + Object.entries(performance.timings_seconds).map(([name, seconds]) => `${phases[name] || name}: ${seconds.toFixed(2)} с`).join("; ") + ". Вложенные этапы входят во время стратегии и не суммируются.");
+    }
     if (metadata.record_count !== undefined) {
       note(`Записей об источниках: ${metadata.record_count}. С предупреждениями: ${metadata.records_with_warnings}. С пропусками: ${metadata.records_with_gaps}.`);
     }
@@ -224,6 +234,10 @@
   }
   function renderStatus(value) {
     status = value;
+    const progress = value.progress;
+    el("progress").textContent = value.running ?
+      `Этап: ${phases[progress?.stage] || "подготовка расчёта"}. Прошло: ${Math.floor(progress?.elapsed_seconds || 0)} с.` :
+      (progress && progress.stage === null ? `Последняя операция: ${progress.elapsed_seconds.toFixed(1)} с.` : "");
     for (const id of ["market", "discount", "cut", "craft-graph", "craft-depth", "craft-liquid", "craft-sales", "craft-supply", "craft-batch", "craft-window", "craft-days", "craft-age", "save"]) el(id).disabled = value.running;
     el("recalculate").disabled = value.running || !value.ready || !value.active_market;
     const run = value.published_run;
@@ -350,6 +364,8 @@
     try {
       if (!await save()) return;
       if (!settings || settings.active_market !== el("market").value) return;
+      el("progress").textContent = "Подготовка расчёта…";
+      watch();
       await api("/analytics/recalculate", {method:"POST"});
       await refresh();
     } catch (exc) {error(exc.message); el("recalculate").disabled = Boolean(status && status.running);}

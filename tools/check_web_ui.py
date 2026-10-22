@@ -209,6 +209,8 @@ def main():
             evaluate("document.getElementById('analytics-recalculate').click()")
             wait_for("document.querySelectorAll('#analytics-results tr').length > 0")
             wait_for("document.getElementById('analytics-diagnostics').textContent.includes('Сигналов:')")
+            wait_for("document.getElementById('analytics-progress').textContent.includes('Последняя операция:')")
+            assert evaluate("document.getElementById('analytics-diagnostics').textContent.includes('Замеры этапов:')")
             assert evaluate("document.getElementById('analytics-diagnostics').textContent.includes('Причина отсева')")
             assert evaluate("document.getElementById('analytics-diagnostics').textContent.length < 12000")
             assert not evaluate("document.getElementById('analytics-diagnostics').textContent.includes('payload_json')")

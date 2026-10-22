@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -26,11 +28,37 @@ class HistoricalReference:
 
 
 class PriceEngine:
-    def __init__(self, provider: MarketDataProvider, config: AnalyticsConfig):
+    def __init__(self, provider: MarketDataProvider, config: AnalyticsConfig,
+                 measure: Callable[[str], AbstractContextManager] | None = None):
         self.provider, self.config = provider, config
-        self.current = provider.current_prices()
-        self.history = provider.historical_prices(config.history_days)
-        self.quality = provider.quality()
+        self.measure = measure or (lambda _: nullcontext())
+        with self.measure("current_prices"):
+            self.current = provider.current_prices()
+        self._history: dict[int, list[PriceObservation]] | None = None
+        self._sales_history: dict[int, dict[int, list[PriceObservation]]] = {}
+        with self.measure("source_quality"):
+            self.quality = provider.quality()
+            self._global_flags: set[str] = set()
+            self._item_flags: dict[int, set[str]] = defaultdict(set)
+            for row in self.quality.get("metadata", []):
+                target = self._global_flags if row.get("item_id") is None else self._item_flags[row["item_id"]]
+                if row.get("status") in {"FAILED", "NOT_AVAILABLE", "NO_SCANS"}:
+                    target.add("incomplete_source_coverage")
+                if row.get("warnings") or row.get("gaps"):
+                    target.add("source_quality_warnings")
+
+    @property
+    def history(self) -> dict[int, list[PriceObservation]]:
+        if self._history is None:
+            with self.measure("historical_prices"):
+                self._history = self.provider.historical_prices(self.config.history_days)
+        return self._history
+
+    def sales_history(self, days: int) -> dict[int, list[PriceObservation]]:
+        if days not in self._sales_history:
+            with self.measure("sales_history"):
+                self._sales_history[days] = self.provider.sales_history(days)
+        return self._sales_history[days]
 
     def age(self, price: PriceObservation) -> int:
         return max(0, int((self.provider.as_of - price.observed_at).total_seconds()))
@@ -51,13 +79,8 @@ class PriceEngine:
             self.provider.as_of - price.sales_observed_at
         ).total_seconds() > self.config.max_price_age_seconds:
             result.append("stale_sales_estimate")
-        for row in self.quality.get("metadata", []):
-            if row.get("item_id") not in (None, price.item_id):
-                continue
-            if row.get("status") in {"FAILED", "NOT_AVAILABLE", "NO_SCANS"}:
-                result.append("incomplete_source_coverage")
-            if row.get("warnings") or row.get("gaps"):
-                result.append("source_quality_warnings")
+        result.extend(self._global_flags)
+        result.extend(self._item_flags.get(price.item_id, ()))
         return sorted(set(result))
 
     def usable(self, price: PriceObservation | None) -> str | None:

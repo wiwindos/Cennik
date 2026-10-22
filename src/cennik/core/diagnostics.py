@@ -34,6 +34,7 @@ def summarize_run(run: Run, *, metadata: dict | None = None, signals: dict | Non
         counts = metadata_summary(quality.get("metadata", []))
     summary: dict = {
         "summary_only": True,
+        "performance": diagnostics.get("performance", {}),
         "observed_items": diagnostics.get("observed_items", 0),
         "rejections": diagnostics.get("rejections", {}),
         "strategy_signals": signals if signals is not None else diagnostics.get("strategy_signals", {}),
