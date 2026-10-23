@@ -14,7 +14,7 @@ function S:Key(key)
 end
 function S:Remaining(rule) return math.max(0,rule.goal-(rule.bought or 0)) end
 function S:Notice(text)
-  self.message=text
+  self.message=text; self.message_at=C:Now()
   if self.RenderOverlay then self:RenderOverlay() end
 end
 function S:Emit(kind,fields)
@@ -73,6 +73,7 @@ function S:Add(def,quiet)
   rule.goal=math.max(0,valid.quantity-rule.stock)
   rule.keys=valid.item_level~=nil and {{itemID=valid.item_id,itemLevel=valid.item_level,itemSuffix=valid.item_suffix,battlePetSpeciesID=valid.pet_id}} or nil
   self.alerts[valid.id]=nil
+  if self.ResetFindings and not self.staging then self:ResetFindings(valid.id) end
   if not quiet then self:Emit("rule_update",{rule=valid}) end
   return true,rule
 end
@@ -110,7 +111,7 @@ function S:Initialize()
     for _,name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","SearchForItemKeys","RequestMoreBrowseResults","RequestMoreItemSearchResults","RequestMoreCommoditySearchResults","ReplicateItems","PlaceBid","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PostItem","PostCommodity","CancelAuction"}) do
       if C_AuctionHouse[name] then hooksecurefunc(C_AuctionHouse,name,function()
         S.window[#S.window+1]=GetTime(); S.lastSend=GetTime()
-        if not C.Adapter.sending then S:CancelSearch("Другая операция аукциона") end
+        if not C.Adapter.sending then S:HoldForManualSearch("Ручной поиск или другая операция аукциона") end
       end) end
     end
   end
@@ -150,16 +151,19 @@ function S:Apply(preview)
   -- Stage the whole merge first: one invalid rule must never leave a partial import.
   local originals=C.db.sniper.rules; local alerts=self.alerts
   C.db.sniper.rules=C:Clone(originals); self.alerts=C:Clone(alerts)
+  self.staging=true
   for _,def in ipairs(preview.rules) do
     local ok,reason=self:Add(def,true)
-    if not ok then C.db.sniper.rules=originals; self.alerts=alerts; return false,reason end
+    if not ok then self.staging=nil; C.db.sniper.rules=originals; self.alerts=alerts; return false,reason end
   end
+  self.staging=nil
   local staged=C.db.sniper.rules; C.db.sniper.rules=originals; self.alerts=alerts
   for _,def in ipairs(preview.rules) do
     local rule=originals[def.id]
     if rule then for key in pairs(rule) do rule[key]=nil end; for key,value in pairs(staged[def.id]) do rule[key]=value end
     else originals[def.id]=staged[def.id] end
     originals[def.id].removed=nil; self.alerts[def.id]=nil
+    self:ResetFindings(def.id)
     self:Emit("rule_update",{rule=def})
   end
   C.db.sniper.budget_copper=preview.budget
@@ -187,18 +191,35 @@ function S:CancelSearch(reason)
   for _,entry in ipairs(self.details) do entry.rule.refreshing=false end
   if self.current and self.current.kind=="lookup" and self.editor and self.editor:IsShown() then self.editor.itemInfo:SetText(reason) end
   self.token=self.token+1; self.current=nil; self.details={}; self.pauseUntil=GetTime()+1
-  self:Notice(reason)
+  self.searchStatus=reason
 end
 function S:Pause()
   for _,rule in pairs(C.db.sniper.rules) do rule.enabled=false end
   self:CancelSearch("Снайпер приостановлен")
+  self:Notice("Снайпер приостановлен")
+end
+function S:HoldForManualSearch(reason)
+  -- A timeout cannot tell us that the player has finished reading search results.
+  if not self.manualHold then self:CancelSearch(reason) end
+  self.manualHold=reason
+end
+function S:ResumeSearch()
+  if C.db.pending then self:Notice("Сначала завершите или уточните покупку"); return false end
+  if not C.Adapter:Open() then self:Notice("Откройте аукцион"); return false end
+  if not C:MarketBindingMatches(C.db.current_market) then self:Notice("Подтвердите рынок"); return false end
+  -- Explicitly leave the manual results before allowing background queries again.
+  C.UI:Attach(); C.UI:Show(); C.UI:SelectSection("Sniper")
+  if not C.UI.frame or not C.UI.frame:IsShown() then return false end
+  self.manualHold=nil; self.foreignTab=false
+  self:Notice("Поиск продолжен во вкладке Cennik")
+  return true
 end
 function S:Traffic()
   local recent={}; for _,at in ipairs(self.window) do if GetTime()-at<60 then recent[#recent+1]=at end end
   self.window=recent; return #recent
 end
 function S:CanSend()
-  return C.Adapter:Ready("sniper") and not C.db.pending and not C.Scanner.active
+  return not self.manualHold and not self.foreignTab and C.Adapter:Ready("sniper") and not C.db.pending and not C.Scanner.active
     and not (C.MarketCollector and (C.MarketCollector.requested_at or C.MarketCollector.packing))
     and GetTime()>=(self.pauseUntil or 0) and GetTime()-(self.lastSend or -100)>=self.interval
     and self:Traffic()<48
@@ -238,12 +259,14 @@ function S:Begin(rule)
       self.current={kind="discover",rule=rule,name=info.name,started=GetTime(),sent=false,pages=0}; return
     end
   end
+  self:PrimeFindings(rule,rule.keys)
   if not self.batchDisabled and C_AuctionHouse.SearchForItemKeys and C_AuctionHouse.GetBrowseResults then
     local keys,mapping,seen={},{},{}
     local candidates=self:Rules(); local ordered={rule}
     for _,candidate in ipairs(candidates) do if candidate~=rule then ordered[#ordered+1]=candidate end end
     for _,candidate in ipairs(ordered) do
       if candidate.enabled and self:Remaining(candidate)>0 and candidate.keys and self:Limit(candidate) and GetTime()>=(candidate.snooze or 0) and GetTime()-(candidate.checked_at or -100)>=5/weights[candidate.definition.priority] then
+        self:PrimeFindings(candidate,candidate.keys)
         for _,key in ipairs(candidate.keys) do
           local identity=self:Key(key)
           if not seen[identity] and #keys<100 then keys[#keys+1]=key; seen[identity]=true end
@@ -255,33 +278,6 @@ function S:Begin(rule)
   end
   rule.key_index=((rule.key_index or 0)%#rule.keys)+1
   self:BeginDetail(rule,rule.keys[rule.key_index])
-end
-function S:AcceptRows(rule,rows)
-  if not rule.enabled or rule.removed or self:Remaining(rule)==0 then self.alerts[rule.definition.id]=nil; return end
-  rule.checked_at=GetTime(); rule.last_check_epoch=C:Now(); rule.reason="Подходящих лотов нет"; rule.refreshing=false; rule.last_match=false
-  rule.last_result=C:Clone(C.Adapter.resultDiagnostic)
-  if #rows==0 and rule.last_result and rule.last_result.item_id==rule.definition.item_id and rule.last_result.quantity_warning then rule.reason=rule.last_result.quantity_warning end
-  self.alerts[rule.definition.id]=nil
-  local limit=self:Limit(rule)
-  for _,row in ipairs(rows) do
-    if limit and row.ownership_known and not row.owned and C:Integer(row.quantity) and C:Integer(row.unit_price) and row.unit_price<=limit then
-      local quantity=row.commodity and math.min(self:Remaining(rule),row.quantity) or row.quantity
-      local cost=row.commodity and row.unit_price*quantity or row.total_price
-      if C:Integer(cost) then
-        local lot={rule_id=rule.definition.id,item_id=row.item_id,key=C:Clone(row.item_key),commodity=row.commodity,
-          auction_id=row.auction_id,quantity=quantity,cost=cost,unit_price=row.unit_price,limit=limit,at=C:Now()}
-        self.alerts[rule.definition.id]=lot; rule.last_finding=C:Clone(lot); rule.last_match=true; rule.reason="Найдено предложение" .. (cost>GetMoney() and "; на этом персонаже недостаточно золота для покупки" or "")
-        local fingerprint=tostring(lot.auction_id or "commodity") .. ":" .. cost .. ":" .. quantity
-        if fingerprint~=rule.last_alarm and GetTime()-(rule.alarm_at or -100)>10 then
-          rule.last_alarm=fingerprint; rule.alarm_at=GetTime()
-          if PlaySound then PlaySound(8959,"Master") end
-          if not self.selected then self.selected=rule.definition.id end
-        end
-        break
-      else rule.reason="Клиент сообщил некорректную стоимость" end
-    end
-  end
-  self:Notice(rule.reason)
 end
 function S:OnSearchEvent(event,ref)
   local p=self.current
@@ -308,23 +304,24 @@ function S:OnSearchEvent(event,ref)
         if key and key.itemID==p.rule.definition.item_id and not seen[self:Key(key)] then keys[#keys+1]=C:Clone(key); seen[self:Key(key)]=true end
       end
       p.rule.checked_at=GetTime(); p.rule.last_check_epoch=C:Now()
-      if #keys>0 then p.rule.keys=keys; p.rule.keys_at=GetTime(); self:BeginDetail(p.rule,keys[1])
-      else p.rule.reason="Предмет не выставлен" end
+      if #keys>0 then p.rule.keys=keys; p.rule.keys_at=GetTime(); self:PrimeFindings(p.rule,keys); self:BeginDetail(p.rule,keys[1])
+      else self:MissingFindings(p.rule) end
     else
       local seen={}
       local matching={}
       for _,row in ipairs(results) do
         if row.itemKey and row.minPrice and row.minPrice>0 then
           for _,rule in ipairs(p.mapping[self:Key(row.itemKey)] or {}) do
-            if not seen[rule.definition.id] and row.minPrice<=(self:Limit(rule) or 0) then self.details[#self.details+1]={rule=rule,key=C:Clone(row.itemKey)}; seen[rule.definition.id]=true; matching[rule.definition.id]=true; rule.refreshing=true end
+            local identity=self:Key(row.itemKey) .. ":" .. rule.definition.id
+            if not seen[identity] and row.minPrice<=(self:Limit(rule) or 0) then self.details[#self.details+1]={rule=rule,key=C:Clone(row.itemKey)}; seen[identity]=true; matching[identity]=true; rule.refreshing=true end
           end
         end
       end
       for _,key in ipairs(p.keys) do for _,rule in ipairs(p.mapping[self:Key(key)] or {}) do
         rule.checked_at=GetTime(); rule.last_check_epoch=C:Now()
-        if not matching[rule.definition.id] then rule.refreshing=false; rule.last_match=false; rule.reason="Предложение больше не доступно"; self.alerts[rule.definition.id]=nil end
+        if not matching[self:Key(key) .. ":" .. rule.definition.id] then self:MissingFindings(rule,key) end
       end end
-      self:Notice("Пакет ключей проверен: " .. #p.keys)
+      self.searchStatus="Пакет ключей проверен: " .. #p.keys
     end
     return
   end
@@ -336,7 +333,7 @@ function S:OnSearchEvent(event,ref)
   self.current=nil
   self.clean=(self.clean or 0)+1
   if self.clean>=20 then self.interval=math.max(self.minimumInterval,self.interval*0.9); self.clean=0 end
-  self:AcceptRows(p.rule,C.Adapter:Results(p.rule.definition.item_id,p.key,commodity))
+  self:AcceptRows(p.rule,C.Adapter:Results(p.rule.definition.item_id,p.key,commodity),p.key)
 end
 function S:Tick(elapsed)
   self.elapsed=self.elapsed+elapsed; if self.elapsed<0.1 then return end; self.elapsed=0

@@ -1,6 +1,6 @@
 ## Interface: 16001, 38000, 120100, 50504
 ## Title: Cennik
-## Version: 0.4.1
+## Version: 0.6.2
 ## Notes: Аналитика, сканы рынка и снайпер Cennik через Auctionator
 ## Dependencies: Auctionator
 ## SavedVariables: CennikAddonDB
@@ -11,6 +11,7 @@ ImportExport.lua
 Compatibility\Auctionator.lua
 MarketCollector.lua
 Sniper.lua
+SniperFindings.lua
 SniperCatalog.lua
 SniperPurchase.lua
 Validator.lua

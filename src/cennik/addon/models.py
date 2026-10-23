@@ -49,7 +49,7 @@ class Task(Model):
     created_at: AwareDatetime
     expires_at: AwareDatetime
     expires_at_epoch: int
-    allow_overbuy: bool = False
+    allow_overbuy: bool = False  # Legacy package field; ignored by Forever's unit-based planner.
 
 
 class Package(Model):

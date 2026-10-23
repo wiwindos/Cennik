@@ -181,7 +181,7 @@ function U:Details(task)
     table.insert(text,"Скан " .. C.Items:Name(item) .. " (#" .. item .. "); " .. scan.observed_at .. "; полный: " .. tostring(scan.complete) .. "; лотов: " .. #scan.rows)
     for index,row in ipairs(scan.rows) do
       if index>25 then table.insert(text,"… дополнительные лоты сохранены в скане"); break end
-      table.insert(text,"  " .. row.quantity .. " × " .. money(row.unit_price) .. "; полный лот " .. money(row.total_price) .. "; AuctionID " .. tostring(row.auction_id or "commodity") .. (row.vendor_known and ("; продажа NPC/шт. " .. money(row.vendor_sell_copper) .. "; " .. row.vendor_source) or ""))
+      table.insert(text,"  доступно " .. (row.available_quantity or row.quantity) .. " шт. × " .. money(row.unit_price) .. "/шт." .. (row.commodity and "; нужное количество через котировку" or "; одна покупка = 1 шт.") .. (row.vendor_known and ("; продажа NPC/шт. " .. money(row.vendor_sell_copper) .. "; " .. row.vendor_source) or ""))
     end
   end
   return table.concat(text,"\n")
@@ -245,15 +245,26 @@ function U:Opportunities()
   local actionY=listHeight+40
   local scroll=U:Widget("ScrollFrame",self.body,"UIPanelScrollFrameTemplate","opportunity-list")
   scroll:SetSize(630,listHeight); scroll:SetPoint("TOPLEFT",0,-30)
-  local list=U:Widget("Frame",scroll,nil,"opportunity-list"); list:SetSize(630,math.max(listHeight,#rows*28))
+  local list=U:Widget("Frame",scroll,nil,"opportunity-list"); list:SetSize(630,listHeight)
   self.opportunityScroll,self.opportunityList,self.opportunityRows=scroll,list,{}
+  local y=0
   for index,task in ipairs(rows) do
-    local check=U:Widget("CheckButton",list,"UICheckButtonTemplate"); check:SetPoint("TOPLEFT",0,-(index-1)*28); check:SetChecked(self.selected[task.task_id])
+    local check=U:Widget("CheckButton",list,"UICheckButtonTemplate"); check:SetPoint("TOPLEFT",0,y-4); check:SetChecked(self.selected[task.task_id])
     check:SetScript("OnClick",function() U.selected[task.task_id]=check:GetChecked() or nil end)
     local live=U:Live(task)
-    local row=button(list,C.Items:Label(task.item_id) .. " | " .. (strategies[task.strategy_id] or task.strategy_id) .. " | " .. (live and money(live.profit_copper) or "нет текущей оценки") .. " | " .. (states[task.state] or task.state),
-      32,-(index-1)*28,502,function() U.focus=task.task_id; U:Refresh() end)
-    button(list,"Скрыть",540,-(index-1)*28,85,function()
+    local summary=(strategies[task.strategy_id] or task.strategy_id) .. " · " .. (live and ("Прибыль: " .. money(live.profit_copper)) or "нет текущей оценки") .. " · " .. (states[task.state] or task.state)
+    local row=button(list,"",32,y,502,function() U.focus=task.task_id; U:Refresh() end)
+    local title=U:Widget("FontString",row,"GameFontHighlight","opportunity-title")
+    title:SetPoint("TOPLEFT",10,-5); title:SetWidth(482); title:SetHeight(0)
+    title:SetJustifyH("LEFT"); title:SetWordWrap(true); title:SetNonSpaceWrap(true); title:SetText(C.Items:Label(task.item_id))
+    local titleHeight=math.max(18,title:GetStringHeight()); title:SetHeight(titleHeight)
+    local detail=U:Widget("FontString",row,"GameFontHighlightSmall","opportunity-summary")
+    detail:SetPoint("TOPLEFT",10,-titleHeight-8); detail:SetWidth(482); detail:SetHeight(0)
+    detail:SetJustifyH("LEFT"); detail:SetWordWrap(true); detail:SetNonSpaceWrap(true); detail:SetText(summary)
+    local detailHeight=detail:GetStringHeight(); detail:SetHeight(detailHeight)
+    local rowHeight=math.max(46,titleHeight+detailHeight+14); row:SetHeight(rowHeight)
+    row.cennikTitle,row.cennikSummary=title,detail
+    button(list,"Скрыть",540,y-4,85,function()
       local ok,reason=C:HideTask(task)
       if ok then U.selected[task.task_id]=nil; if U.focus==task.task_id then U.focus=nil end end
       U.notice=ok and "Задание перенесено в скрытые" or reason; U:Refresh()
@@ -261,10 +272,18 @@ function U:Opportunities()
     self.opportunityRows[#self.opportunityRows+1]=row
     row:SetScript("OnEnter",function(self)
       local info=C.Items:Get(task.item_id)
-      if GameTooltip and info and info.link then GameTooltip:SetOwner(self,"ANCHOR_RIGHT"); GameTooltip:SetHyperlink(info.link); GameTooltip:Show() end
+      if GameTooltip then
+        GameTooltip:SetOwner(self,"ANCHOR_RIGHT")
+        if info and info.link then GameTooltip:SetHyperlink(info.link) else GameTooltip:SetText(C.Items:Name(task.item_id)) end
+        GameTooltip:AddLine(summary,1,1,1,true)
+        if task.reason and task.reason~="" then GameTooltip:AddLine(task.reason,1,0.82,0,true) end
+        GameTooltip:Show()
+      end
     end)
     row:SetScript("OnLeave",function() if GameTooltip then GameTooltip:Hide() end end)
+    y=y-rowHeight-6
   end
+  list:SetHeight(math.max(listHeight,-y))
   if #rows==0 then label(list,"Нет заданий для текущего рынка и расчёта. Синхронизируйте пакет на странице и выполните /reload.",8,-12,600) end
   self:AttachScrollChild(scroll,list)
   scroll:Show()
@@ -338,9 +357,6 @@ function U:Queue()
       local value=tonumber(budget:GetText())
       if not C.db.pending and C:Integer(value) and value>=package.spent then package.budget=value; C:Emit(task,"limit_change","budget_changed",{budget=value}); U:Refresh() end
     end)
-    local overflow=U:Widget("CheckButton",self.body,"UICheckButtonTemplate"); overflow:SetPoint("TOPLEFT",350,-146); overflow:SetChecked(task.allow_overbuy)
-    label(self.body,"Разрешаю лишний полный стек",380,-151,270)
-    overflow:SetScript("OnClick",function() if not C.db.pending then task.allow_overbuy=overflow:GetChecked(); C.BuyQueue.ticket=nil; C:Emit(task,"limit_change","overbuy_changed",{allowed=task.allow_overbuy}); U:Refresh() end end)
     self:Text(self:Details(task),0,-184,625,math.max(40,self.body:GetHeight()-196))
   else label(self.body,"Очередь пустая. Добавьте проверенное задание из «Возможностей».",0,-130) end
 end
@@ -353,7 +369,7 @@ function U:Limits()
   scroll:SetPoint("TOPLEFT",0,-24); scroll:SetSize(625,self.body:GetHeight()-36); scroll:SetClipsChildren(true)
   local parent=U:Widget("Frame",scroll,nil,"limits-inputs")
   parent:SetSize(625,(#task.lines+#(task.vendor_keys or {})+5)*32+50)
-  if not self.limitDraft or self.limitDraft.task_id~=task.task_id then self.limitDraft={task_id=task.task_id,fields={},allow_overbuy=not not task.allow_overbuy} end
+  if not self.limitDraft or self.limitDraft.task_id~=task.task_id then self.limitDraft={task_id=task.task_id,fields={}} end
   local draft=self.limitDraft
   local function field(name,x,y,width,value)
     if draft.fields[name]==nil then draft.fields[name]=tostring(value or "") end
@@ -392,10 +408,7 @@ function U:Limits()
   local total=field("total",390,-(row+1)*32,140,self.limitUseCurrent and live and live.cost_copper or task.max_total_cost_copper)
   label(parent,"Общий бюджет пакета (включая NPC)",0,-(row+2)*32,370)
   local budget=field("budget",390,-(row+2)*32,140,package and package.budget)
-  local overbuy=U:Widget("CheckButton",parent,"UICheckButtonTemplate"); overbuy:SetPoint("TOPLEFT",0,-(row+3)*32); overbuy:SetChecked(draft.allow_overbuy)
-  overbuy:SetScript("OnClick",function(self) draft.allow_overbuy=not not self:GetChecked() end)
-  label(parent,"Разрешаю полные стеки с лишними единицами",32,-(row+3)*32-6,560)
-  button(parent,"Сохранить пределы и подтверждённые цены NPC",0,-(row+4)*32,405,function()
+  button(parent,"Сохранить пределы и подтверждённые цены NPC",0,-(row+3)*32,405,function()
     if C.db.pending or C.Scanner.active then U.notice="Сначала завершите текущую операцию"; U:Refresh(); return end
     local totalValue,budgetValue=tonumber(total:GetText()),tonumber(budget:GetText())
     if not package or not C:Integer(totalValue) or totalValue<(task.spent or 0) or not C:Integer(budgetValue) or budgetValue<package.spent then U.notice="Неверный общий предел или бюджет"; U:Refresh(); return end
@@ -412,7 +425,7 @@ function U:Limits()
       else entry.line.unit_limit_copper=value end
     end
     for _,entry in ipairs(vendorInputs) do C.NPC:ManualVendor(task,entry.key,tonumber(entry.edit:GetText())) end
-    task.max_total_cost_copper=totalValue; package.budget=budgetValue; task.allow_overbuy=overbuy:GetChecked()
+    task.max_total_cost_copper=totalValue; package.budget=budgetValue; task.allow_overbuy=false
     task.validation=nil; task.scans={}
     C.BuyQueue.ticket=nil
     C:Emit(task,"limit_change","unit_limits_changed",{lines=task.lines,npc_prices=task.npc_prices,vendor_prices=task.vendor_prices,max_total_cost_copper=totalValue,budget=budgetValue,allow_overbuy=task.allow_overbuy})

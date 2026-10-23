@@ -211,16 +211,16 @@ def test_zero_gold_keeps_scan_economics_but_cannot_queue_or_buy(exchange):
     assert lua.eval("t.spent") == 0
 
 
-def test_normal_item_full_stack_price_revalidation_and_purchase_completion(exchange):
+def test_item_group_plans_depth_but_revalidates_and_buys_one_id_at_a_time(exchange):
     lua = runtime(exported(exchange, "simple_craft", unit_limits={10: 45}))
     lua.execute(
-        "t.allow_overbuy=true; Game.items[10]={{quantity=3,buyoutAmount=90,auctionID=77,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)}}"
+        "Game.items[10]={{quantity=3,buyoutAmount=30,auctionID=77,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)}}"
     )
     lua.execute(
         'Cennik.Scanner:Start(t); Game.event("COMMODITY_SEARCH_RESULTS_UPDATED",20); Game.event("ITEM_SEARCH_RESULTS_UPDATED",C_AuctionHouse.MakeItemKey(10))'
     )
     assert lua.eval("t.state") == "ready_to_buy"
-    assert lua.eval("t.validation.cost_copper") == 95
+    assert lua.eval("t.validation.cost_copper") == 65
     lua.execute(
         'Cennik.BuyQueue:Add(t); Cennik.BuyQueue:Prepare(); Game.event("COMMODITY_SEARCH_RESULTS_UPDATED",20); Game.event("ITEM_SEARCH_RESULTS_UPDATED",C_AuctionHouse.MakeItemKey(10))'
     )
@@ -229,7 +229,11 @@ def test_normal_item_full_stack_price_revalidation_and_purchase_completion(excha
     lua.execute('Game.event("AUCTION_HOUSE_NEW_BID_RECEIVED",77)')
     assert lua.eval("t.spent") == 0
     lua.execute('Game.event("AUCTION_HOUSE_PURCHASE_COMPLETED",77)')
-    assert lua.eval("t.spent") == 90 and lua.eval("t.bought[10]") == 3
+    assert lua.eval("t.spent") == 30 and lua.eval("t.bought[10]") == 1
+    lua.execute('Game.items[10][1].auctionID=78; Game.items[10][1].quantity=2; Cennik.BuyQueue:Prepare(); Game.event("COMMODITY_SEARCH_RESULTS_UPDATED",20); Game.event("ITEM_SEARCH_RESULTS_UPDATED",C_AuctionHouse.MakeItemKey(10))')
+    assert click(lua, "Start")
+    lua.execute('Game.event("AUCTION_HOUSE_PURCHASE_COMPLETED",78)')
+    assert lua.eval("t.spent") == 60 and lua.eval("t.bought[10]") == 2
 
 
 def test_variant_unknown_partial_results_throttle_and_scan_timeout(exchange):
@@ -512,6 +516,31 @@ def test_first_tab_show_and_reclick_relayout_visible_rows_without_history_workar
     lua.execute('Cennik.UI.opportunityScroll:SetVerticalScroll(600); Cennik.UI.tabs.Opportunities:GetScript("OnClick")(); Game.advance(0)')
     assert lua.eval("Cennik.UI.opportunityScroll:GetVerticalScroll()") == 0
     assert lua.eval("Cennik.UI.opportunityRows[1]:IsVisible()")
+
+
+def test_opportunity_wrapped_title_and_summary_grow_row_and_remain_in_tooltip(exchange):
+    lua = runtime(exported(exchange, "vendor_arbitrage"))
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI:Show(); Game.advance(0)
+      local first=Cennik.UI.opportunityRows[1]
+      -- Use the height a client font reports after wrapping a long name.
+      first.cennikTitle.GetStringHeight=function() return 126 end
+      first.cennikSummary.GetStringHeight=function() return 42 end
+      Game.localized[t.item_id]=string.rep('Очень длинное название предмета ',12)
+      t.reason='Полное пояснение состояния'
+      Cennik.UI:Refresh()
+      local row=Cennik.UI.opportunityRows[1]
+      assert(row.cennikTitle:GetText():find(Game.localized[t.item_id],1,true))
+      assert(row.cennikSummary:GetText():find('Торговля с NPC',1,true))
+      assert(row:GetHeight()>=182 and Cennik.UI.opportunityScroll:GetVerticalScrollRange()>0)
+      assert(row.cennikTitle.parent==row and row.cennikSummary.parent==row)
+      GameTooltip={SetOwner=function() end,SetHyperlink=function(_,link) Game.tooltipLink=link end,
+        AddLine=function(_,line) Game.tooltipLines=Game.tooltipLines or {}; table.insert(Game.tooltipLines,line) end,
+        Show=function() end,Hide=function() end}
+      row:GetScript('OnEnter')(row)
+      assert(Game.tooltipLink:find(Game.localized[t.item_id],1,true))
+      assert(Game.tooltipLines[1]==row.cennikSummary:GetText() and Game.tooltipLines[2]==t.reason)
+    """)
 
 
 def test_list_does_not_reuse_history_scroll_and_repeated_tab_clicks_keep_pool_bounded(exchange):

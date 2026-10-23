@@ -41,27 +41,57 @@ def test_missing_quantity_never_invents_full_profit_and_expiry_removes_current_r
     assert "Полная текущая экономика неизвестна" in lua.eval("Cennik.UI:Details(t)")
 
 
-def test_full_lots_choose_lowest_total_cash_cost_and_overbuy_requires_explicit_permission(exchange):
+def test_item_price_groups_plan_exact_units_with_all_available_depth(exchange):
     lua=runtime(exported(exchange,"simple_craft"))
     lua.execute('''
       t.lines[1].quantity=7
       Game.items[10]={
-        {quantity=10,buyoutAmount=100,auctionID=1,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)},
-        {quantity=7,buyoutAmount=84,auctionID=2,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)}}
+        {quantity=10,buyoutAmount=10,auctionID=1,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)},
+        {quantity=7,buyoutAmount=12,auctionID=2,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)}}
       Cennik.Scanner:Start(t); Game.event("COMMODITY_SEARCH_RESULTS_UPDATED",20); Game.event("ITEM_SEARCH_RESULTS_UPDATED",C_AuctionHouse.MakeItemKey(10))
     ''')
-    assert lua.eval("t.validation.plans[1].cost") == 84
-    assert lua.eval("t.validation.plans[1].lots[1].auction_id") == 2
+    assert lua.eval("t.validation.plans[1].cost") == 70
+    assert lua.eval("t.validation.plans[1].lots[1].auction_id") == 1
+    assert lua.eval("t.validation.plans[1].lots[1].quantity") == 1
     lua.execute('''
       t.lines[1].quantity=2; t.max_total_cost_copper=200
       Game.items[10]={{quantity=3,buyoutAmount=30,auctionID=3,containsOwnerItem=false,itemKey=C_AuctionHouse.MakeItemKey(10)}}
       Cennik.Scanner:Start(t); Game.event("COMMODITY_SEARCH_RESULTS_UPDATED",20); Game.event("ITEM_SEARCH_RESULTS_UPDATED",C_AuctionHouse.MakeItemKey(10))
     ''')
-    assert lua.eval("t.validation.cost_copper") == 35
-    assert lua.eval("t.validation.plans[1].extra_quantity") == 1
-    assert lua.eval("t.state") == "limits_exceeded"
+    assert lua.eval("t.validation.cost_copper") == 65
+    assert lua.eval("t.validation.plans[1].extra_quantity") == 0
+    assert lua.eval("t.state") == "ready_to_buy"
     lua.execute('t.allow_overbuy=true; t.validation=Cennik.Validator:Validate(t)')
     assert lua.eval("t.validation.state") == "ready_to_buy"
+
+
+def test_repeated_representative_id_never_doubles_available_depth(exchange):
+    lua=runtime(exported(exchange,"simple_craft"))
+    lua.execute('''
+      local key=C_AuctionHouse.MakeItemKey(10)
+      Game.items[10]={{quantity=12,buyoutAmount=25000,auctionID=1,containsOwnerItem=false,itemKey=key},
+        {quantity=12,buyoutAmount=25000,auctionID=1,containsOwnerItem=false,itemKey=key}}
+      local rows=Cennik.Adapter:Results(10,key,false)
+      plan,state,reason=Cennik.Validator:PlanScan(t,t.lines[1],20,true,{complete=true,observed_at=Game.now,key=key,commodity=false,rows=rows})
+    ''')
+    assert lua.eval("plan") is None
+    assert lua.eval("state") == "insufficient_supply"
+    assert "доступно 12" in lua.eval("reason")
+
+
+def test_upgrade_discards_old_estimates_and_blocks_legacy_plans_without_losing_spend(exchange):
+    lua=runtime(exported(exchange,"simple_craft"))
+    lua.execute('''
+      t.spent=30; t.bought[10]=1; t.validation={complete=true}; t.scans={old=true}
+      t.opportunity.details.workspace_plan_id='old-plan'
+      Cennik.db.quantity_model=nil
+      Cennik:Initialize()
+      assert(t.spent==30 and t.bought[10]==1 and t.validation==nil and next(t.scans)==nil)
+      local ok,reason=Cennik:CheckTask(t)
+      assert(not ok and reason:find('прежнюю модель количества',1,true))
+      t.opportunity.details.quantity_model='forever_units_v1'
+      assert(Cennik:CheckTask(t))
+    ''')
 
 
 def test_accept_prices_is_a_review_form_then_explicit_save_without_purchase(exchange):

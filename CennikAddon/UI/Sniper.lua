@@ -43,10 +43,24 @@ end
 function S:WatchAuctionTabs()
   if not self.libTabHook then
     local lib=LibStub and LibStub("LibAHTab-1-0",true)
-    if lib and lib.SetSelected then hooksecurefunc(lib,"SetSelected",function() S:ClosePopups() end); self.libTabHook=true end
+    if lib and lib.SetSelected then
+      hooksecurefunc(lib,"SetSelected",function(_,id)
+        S:ClosePopups(); S.foreignTab=id~="Cennik"
+        if S.foreignTab then S:HoldForManualSearch("Открыта другая вкладка аукциона") end
+      end)
+      self.libTabHook=true
+    end
   end
   if not self.nativeTabHook and AuctionHouseFrame and AuctionHouseFrame.SetDisplayMode then
-    hooksecurefunc(AuctionHouseFrame,"SetDisplayMode",function() S:ClosePopups() end); self.nativeTabHook=true
+    local function selected(_,mode)
+      S:ClosePopups()
+      -- LibAHTab calls SetDisplayMode({}) while selecting an addon tab.
+      if (type(mode)=="table" or type(mode)=="string") and #mode>0 then
+        S.foreignTab=true; S:HoldForManualSearch("Открыта обычная вкладка аукциона")
+      end
+    end
+    hooksecurefunc(AuctionHouseFrame,"SetDisplayMode",selected); self.nativeTabHook=true
+    selected(AuctionHouseFrame,AuctionHouseFrame.displayMode)
   end
 end
 function S:ShowEditor(item,existing,preset)
@@ -89,38 +103,63 @@ function S:ShowEditor(item,existing,preset)
   local bags=CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); bags:SetPoint("TOPLEFT",165,-143); bags:SetSize(26,26); bags:SetChecked(def.use_bags)
   text(p,"Вычесть сумки один раз",195,-151,285)
   local priceLabel=text(p,"",18,-223,470)
-  local price=input(p,0,22,-245,180)
+  local price=input(p,0,22,-245,180) -- discount only
+  local gold=input(p,0,22,-245,70); local silver=input(p,0,124,-245,48); local copper=input(p,0,202,-245,48)
+  local coinLabels={text(p,"з",98,-252,20),text(p,"с",178,-252,20),text(p,"м",256,-252,20)}
+  p.priceGold,p.priceSilver,p.priceCopper=gold,silver,copper
+  p.quantityInput=qty
+  local note
+  local function readMoney()
+    local g,s,c=tonumber(gold:GetText()=="" and "0" or gold:GetText()),tonumber(silver:GetText()=="" and "0" or silver:GetText()),tonumber(copper:GetText()=="" and "0" or copper:GetText())
+    if not C:Integer(g,true) or not C:Integer(s,true) or not C:Integer(c,true) or s>99 or c>99 or g>math.floor(C.MAX_INTEGER/10000) then return nil end
+    local rest=s*100+c
+    if g*10000>C.MAX_INTEGER-rest then return nil end
+    return g*10000+rest
+  end
+  local function saveMode()
+    if def.mode=="limit" then
+      local amount=readMoney()
+      if amount==nil then note:SetText("Цена: целое золото; серебро и медь — от 0 до 99"); return false end
+      def.unit_limit_copper=amount
+    elseif def.mode=="median3d" then
+      local amount=tonumber((price:GetText():gsub(",",".")))
+      if not amount or amount<0 or amount>100 then note:SetText("Скидка должна быть от 0 до 100%"); return false end
+      def.discount_bps=math.floor(amount*100+0.5)
+    end
+    return true
+  end
   local modeButtons={}
   local function refreshMode()
     for name,b in pairs(modeButtons) do b:SetText((def.mode==name and "✓ " or "") .. ({any="Любая цена",limit="Не дороже / шт.",median3d="Скидка, 3 дня"})[name]) end
-    if def.mode=="any" then price:Hide(); priceLabel:SetText("Любая цена: сигнал о появлении, независимо от золота персонажа")
-    else price:Show(); priceLabel:SetText(def.mode=="limit" and "Максимальная цена за штуку, золото" or "Скидка к медиане трёх завершённых дней, %") end
-    price:SetText(tostring(def.mode=="median3d" and def.discount_bps/100 or def.unit_limit_copper/10000))
+    if def.mode=="median3d" then price:Show() else price:Hide() end
+    for _,field in ipairs({gold,silver,copper,unpack(coinLabels)}) do if def.mode=="limit" then field:Show() else field:Hide() end end
+    priceLabel:SetText(def.mode=="any" and "Любая цена: сигнал независимо от золота персонажа" or def.mode=="limit" and "Не дороже за штуку: золото / серебро / медь" or "Скидка к медиане трёх завершённых дней, %")
+    gold:SetText(tostring(math.floor(def.unit_limit_copper/10000))); silver:SetText(tostring(math.floor(def.unit_limit_copper%10000/100))); copper:SetText(tostring(def.unit_limit_copper%100))
+    price:SetText(tostring(def.discount_bps/100))
   end
   for index,name in ipairs({"any","limit","median3d"}) do
     modeButtons[name]=button(p,"",18+(index-1)*160,-185,155,function()
-      local amount=tonumber((price:GetText():gsub(",","."))) or 0
-      if def.mode=="limit" then def.unit_limit_copper=math.floor(amount*10000+0.5)
-      elseif def.mode=="median3d" then def.discount_bps=math.floor(amount*100+0.5) end
+      if not saveMode() then return end
       def.mode=name; refreshMode()
     end)
   end
   refreshMode(); p.modeButtons=modeButtons; p.priceInput=price
-  local priority=button(p,priorities[def.priority],255,-245,235,function(self)
+  local priority=button(p,priorities[def.priority],292,-245,198,function(self)
     def.priority=def.priority=="normal" and "high" or def.priority=="high" and "low" or "normal"; self:SetText(priorities[def.priority])
   end)
   priority:SetText(priorities[def.priority])
   local exact=CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); exact:SetPoint("TOPLEFT",15,-280); exact:SetSize(26,26); exact:SetChecked(def.item_level~=nil)
   text(p,"Точный вариант из поиска Auctionator",45,-287,440)
-  local note=text(p,"0.125 з = 12 с 50 м. Скидка 50%: медиана 2 з → порог 1 з.\nБез истории режим скидки недоступен. Сумки вычитаются один раз.",18,-317,475)
+  note=text(p,"Пример цены: 5 з / 48 с / 98 м. Предел — за одну штуку.\nСкидка 50%: медиана 2 з → порог 1 з. Сумки вычитаются один раз.",18,-317,475)
   button(p,"Сохранить цель",18,-380,220,function()
     local value=entry:GetText(); local id=tonumber(value) or tonumber(value:match("item:(%d+)"))
-    local amount=def.mode=="any" and 0 or tonumber((price:GetText():gsub(",","."))); local quantity=tonumber(qty:GetText())
-    if not id or not quantity or not amount or amount<0 then note:SetText("Проверьте ID, количество и цену/скидку"); return end
+    local quantity=tonumber(qty:GetText())
+    if not id or not quantity then note:SetText("Проверьте ID и количество"); return end
+    if not saveMode() then return end
     if not existing then def.id=S:NewDefinition(id).id end
     def.market=C.db.current_market; def.item_id=id; def.quantity=quantity; def.use_bags=bags:GetChecked()==true
-    def.unit_limit_copper=def.mode=="limit" and math.floor(amount*10000+0.5) or 0
-    def.discount_bps=def.mode=="median3d" and math.floor(amount*100+0.5) or 5000
+    def.unit_limit_copper=def.mode=="limit" and def.unit_limit_copper or 0
+    def.discount_bps=def.mode=="median3d" and def.discount_bps or 5000
     if exact:GetChecked() then
       local key=C.lastSelectedKey
       if def.item_level==nil and (not key or key.itemID~=id) then note:SetText("Сначала выберите вариант в поиске Auctionator"); return end
@@ -188,7 +227,7 @@ function S:RowText(rule)
   local def=rule.definition; local limit=self:Limit(rule)
   return C.Items:Label(def.item_id) .. "\n" .. priorities[def.priority] .. " · " .. modeNames[def.mode] .. (def.mode~="any" and (" ≤ " .. money(limit) .. "/шт.") or "") ..
     "; цель " .. rule.goal .. ", куплено " .. rule.bought .. ", осталось " .. self:Remaining(rule) ..
-    "\n" .. (rule.enabled and (rule.reason or "В поиске") or "Пауза")
+    "\n" .. self:FindingState(rule)
 end
 function U:SniperPanel()
   local parent=self.body
@@ -199,12 +238,14 @@ function U:SniperPanel()
   b("Добавить предмет",0,0,155,function() S:ShowEditor() end)
   b("Запустить все",163,0,145,function()
     if not C:MarketBindingMatches(C.db.current_market) then S:Notice("Подтвердите рынок"); return end
-    for _,rule in ipairs(S:Rules()) do rule.enabled=S:Remaining(rule)>0 end; S:Notice("Поиск включён"); C:Refresh()
+    for _,rule in ipairs(S:Rules()) do rule.enabled=S:Remaining(rule)>0 end
+    S:ResumeSearch(); C:Refresh()
   end)
   b("Пауза",316,0,100,function() S:Pause(); C:Refresh() end)
   b("Импорт / экспорт",424,0,180,function() S:ShowTransfer() end)
-  local status=pooled("FontString","GameFontHighlightSmall"); status:SetPoint("TOPLEFT",0,-32); status:SetWidth(630); status:SetJustifyH("LEFT")
-  status:SetText("Поиск и сигналы не зависят от золота. Цена в правилах — за штуку."); self.sniperStatus=status
+  local status=pooled("FontString","GameFontHighlightSmall"); status:SetPoint("TOPLEFT",0,-32); status:SetWidth(S.manualHold and 430 or 630); status:SetJustifyH("LEFT")
+  status:SetText(S.manualHold and "Поиск на паузе после ручной работы в аукционе." or "Поиск и сигналы не зависят от золота. Цена в правилах — за штуку."); self.sniperStatus=status
+  if S.manualHold then b("Продолжить поиск",440,-28,190,function() S:ResumeSearch(); C:Refresh() end) end
   b("Находки",0,-52,100,function() S:ShowFindings() end)
   b("Из выбранного задания",110,-52,220,function()
     local task=U:Task()
@@ -235,13 +276,13 @@ function U:SniperPanel()
     local function rowButton(caption,x,w,fn)
       local f=self:Widget("Button",body,"UIPanelButtonTemplate","sniper-row-button"); f:Enable(); f:SetPoint("TOPLEFT",x,y); f:SetSize(w,24); f:SetText(caption); f:SetScript("OnClick",fn)
     end
-    rowButton(rule.enabled and "Пауза" or "Пуск",390,75,function() rule.enabled=not rule.enabled; if not rule.enabled then S:CancelSearch("Цель приостановлена") end; C:Refresh() end)
-    rowButton("Правка",470,75,function() S:ShowEditor(def.item_id,rule) end)
-    rowButton("×",550,35,function()
-      if C.db.pending then S:Notice("Сначала завершите покупку"); return end
-      if #C.db.sniper.events>=1900 then S:Notice("Сначала синхронизируйте журнал"); return end
-      rule.enabled=false; rule.removed=true; S.alerts[def.id]=nil; S:Emit("rule_remove",{rule_id=def.id}); C:Refresh()
+    rowButton(rule.enabled and "Пауза" or "Пуск",390,75,function()
+      rule.enabled=not rule.enabled
+      if rule.enabled then S:ResumeSearch() else S:CancelSearch("Цель приостановлена") end
+      C:Refresh()
     end)
+    rowButton("Правка",470,75,function() S:ShowEditor(def.item_id,rule) end)
+    rowButton("×",550,35,function() S:RemoveGoal(rule) end)
     local manual=self:Widget("Button",body,"UIPanelButtonTemplate","sniper-row-button"); manual:Enable(); manual:SetPoint("TOPLEFT",390,y-29); manual:SetSize(155,24); manual:SetText("Отметить купленное"); manual:SetScript("OnClick",function() S:ShowManualBought(def.id) end)
     y=y-80
   end

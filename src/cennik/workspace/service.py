@@ -379,12 +379,12 @@ class Workspace:
                     problems.append("Устарел собственный снимок: " + str(entry["item_id"]))
                     break
                 if offer["divisible"] is None or not offer["variant"]:
-                    problems.append("Неизвестен вариант/тип стека: " + str(entry["item_id"]))
+                    problems.append("Неизвестен вариант/тип торговли: " + str(entry["item_id"]))
                     break
-                if not offer["divisible"] and offer["quantity"] > remaining and not request.allow_overbuy:
-                    continue
-                quantity = min(offer["quantity"], remaining) if offer["divisible"] else offer["quantity"]
-                price = (offer["buyout"] * quantity + offer["quantity"] - 1) // offer["quantity"] if offer["divisible"] else offer["buyout"]
+                quantity = min(offer["quantity"], remaining)
+                # Replicate stores the total value of the raw row. It describes
+                # observed depth, not a mandatory bundle the buyer must take.
+                price = (offer["buyout"] * quantity + offer["quantity"] - 1) // offer["quantity"]
                 selected.append({**offer, "purchased_quantity": quantity, "cost_copper": price})
                 cost += price
                 remaining -= quantity
@@ -416,7 +416,7 @@ class Workspace:
         profit = net - total if not problems else None
         result = {"id": uuid4().hex, "opportunity_id": opportunity.id, "generation": self.analytics.generation(),
             "created_at": now(), "depth_observed_at": own_at, "warnings": warnings,
-            "batches": request.batches, "allow_overbuy": request.allow_overbuy,
+            "batches": request.batches, "allow_overbuy": False, "quantity_model": "forever_units_v1",
             "cost_copper": total if not problems else None, "observed_partial_cost_copper": total,
             "gross_revenue_copper": gross if not problems else None, "net_revenue_copper": net if not problems else None,
             "profit_copper": profit, "roi_percent": str(Decimal(profit) * 100 / total) if profit is not None and total else None,
@@ -434,14 +434,16 @@ class Workspace:
         with self.store.connection() as db:
             existing = db.execute("SELECT payload FROM addon_packages WHERE request_id=?", ["plan-" + identity]).fetchone()
             row = db.execute("SELECT payload FROM workspace_plans WHERE id=?", [identity]).fetchone()
+        if not row:
+            raise ValueError("План не найден")
+        plan = json.loads(row[0])
+        if plan.get("quantity_model") != "forever_units_v1":
+            raise RuntimeError("План использует прежнюю модель количества; пересчитайте партию")
         if existing:
             package = Package.model_validate_json(existing[0])
             if package.generation != self.analytics.generation() or package.expires_at <= datetime.now(UTC):
                 raise RuntimeError("Пакет устарел; рассчитайте новый план")
             return {"package_id": package.package_id, "reused": True, "sync": self.synchronize(include_scans=False)}
-        if not row:
-            raise ValueError("План не найден")
-        plan = json.loads(row[0])
         status = self.exchange.ready()
         if plan["generation"] != status["generation"]:
             raise RuntimeError("План относится к прежним данным; пересчитайте партию")
@@ -452,6 +454,8 @@ class Workspace:
         with self.store.connection() as db:
             duplicate = db.execute("""SELECT t.id FROM addon_tasks t JOIN addon_packages p ON p.id=t.package_id
                 WHERE p.expires_at>? AND (t.opportunity_id=? OR json_extract(t.payload,'$.opportunity.details.original_opportunity_id')=?)
+                AND (json_extract(t.payload,'$.opportunity.details.workspace_plan_id') IS NULL
+                    OR json_extract(t.payload,'$.opportunity.details.quantity_model')='forever_units_v1')
                 AND NOT EXISTS(SELECT 1 FROM addon_events e WHERE e.task_id=t.id
                     AND json_extract(e.payload,'$.state') IN ('completed','cancelled')) LIMIT 1""",
                 [now(), original.id, original.id]).fetchone()
@@ -468,7 +472,7 @@ class Workspace:
             materials.append({"item_id": line["item_id"], "item_name": line.get("item_name", str(line["item_id"])),
                 "quantity": quantity, "unit_price_copper": unit, "source": line["source"], "cost_copper": line["cost_copper"]})
         details = {**original.details, "materials": materials, "workspace_plan_id": identity,
-                   "original_opportunity_id": original.id}
+                   "original_opportunity_id": original.id, "quantity_model": "forever_units_v1"}
         if details.get("steps"):
             details["steps"] = [{**step, **{key: step[key] * plan["batches"] for key in
                 ("batches", "required_quantity", "output_quantity", "surplus_quantity") if key in step},

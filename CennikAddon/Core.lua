@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.4.1"
+C.VERSION = "0.6.2"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -66,6 +66,10 @@ function C:MarketBindingMatches(market)
 end
 function C:CheckTask(task, ownPending)
   if task.hidden then return false,"Задание скрыто игроком" end
+  local details=task.opportunity and task.opportunity.details
+  if details and details.workspace_plan_id and details.quantity_model~="forever_units_v1" then
+    return false,"План использует прежнюю модель количества. Пересчитайте партию в вебе и передайте новое задание"
+  end
   if not self:MarketBindingMatches(task.market) then
     return false,"Подтвердите рынок для этого персонажа: /cennik market <market>"
   end
@@ -92,6 +96,10 @@ function C:Initialize()
     if task and not self.db.pending.sniper then self:State(task,"requires_manual_check","Покупка прервана загрузкой аддона; проверьте почту/историю до продолжения") end
   end
   self:Import()
+  if self.db.quantity_model~="forever_units_v1" then
+    for _,task in pairs(self.db.tasks) do task.scans={}; task.validation=nil; task.allow_overbuy=false end
+    self.db.quantity_model="forever_units_v1"
+  end
   self.Adapter:Initialize()
   if self.MarketCollector then self.MarketCollector:Initialize() end
   if self.Sniper then self.Sniper:Initialize() end

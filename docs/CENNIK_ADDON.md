@@ -196,9 +196,10 @@ These are imported estimates, not confirmed transactions or sale-time prediction
 Craft liquidity evidence remains frozen with the exported opportunity.
 
 The validator prices the required amount across real rows, excluding known own
-offers, rejecting unknown ownership and respecting per-unit caps. Normal item lots
-are indivisible: full stack cost is charged. Extra units are disallowed unless the
-player explicitly permits them; extra output value is never credited to profit.
+offers, rejecting unknown ownership and respecting per-unit caps. On Forever,
+item search groups describe available depth at a per-item price. Each PlaceBid
+buys one representative AuctionID; it never buys the group as a whole. Commodity
+purchases request the needed quantity and require a separate server quote.
 Current result scans only change the sale *reference*, never establish a sale.
 Historical discount uses the exported historical median/threshold, vendor uses the
 exported vendor sell price. Craft validation uses the same original quantities,
@@ -214,10 +215,11 @@ Original risk flags remain visible. Add ready tasks to Buy Queue, then:
 
 The web run remains a coarse, immutable comparison. **Проверить** scans current
 AH result/material rows and computes the complete remaining procurement bundle
-independently of old per-unit caps. Item stacks are indivisible; a bounded 0/1 lot
-search minimises the full cash cost (for vendor arbitrage, maximises credited NPC
-return minus cost). Extra units are charged in full, with no credited surplus value.
-Commodity quantities can be bought partially. Known own units are removed without
+independently of old per-unit caps. The planner consumes only the required units
+across price groups (for vendor arbitrage, prioritising NPC return minus cost).
+Available group depth and one action's purchase quantity are stored separately.
+Every subsequent item purchase requires a fresh representative ID and check.
+Known own commodity units are removed without
 discarding other owners' units at the same commodity price.
 
 The in-game result shows cost including previous spending/NPC purchases, gross
@@ -238,7 +240,7 @@ excluded as in the exported contract.
 
 **Принять цены** opens a review form populated with current caps and task cost;
 it does not approve a purchase. **Цены / лимиты** supports explicit editing of caps,
-task total, package budget and surplus-stack permission. Saving requires another
+task total and package budget. Saving requires another
 scan. Old caps/budget never silently increase, and a higher current price yields
 `limits_exceeded` with complete economics rather than false `insufficient_supply`.
 The draft survives refreshes and scan expiry while editing.
@@ -317,8 +319,8 @@ venv/Scripts/python.exe tools/check_web_ui.py --local
 Python tests cover export adapters, gates, authorization, idempotency, reports,
 safe Lua parsing and Bridge retries. `tests/test_addon_lua.py` runs the real addon
 files under Lua 5.1 (Lupa is a **development-only** dependency), with fixture game
-events and hardware restrictions. Tests cover price levels, NPC separation, whole
-stacks, fee/discount boundaries, variants, partial scans, budget, expiry, wrong
+events and hardware restrictions. Tests cover price levels, NPC separation,
+group depth versus one-item purchases, fee/discount boundaries, variants, partial scans, budget, expiry, wrong
 market/run, separate quote confirmation, timeout/late success, reload, external
 conflicts, duplicate import, frame reuse and immutable report snapshots.
 The browser check exports a fixture graph through the actual web API. Tests never
@@ -329,7 +331,7 @@ Live acceptance remains pending by the user's choice:
 1. Confirm game interface/build and supplied Auctionator 340 working independently.
 2. Install Cennik, open/close all AH tabs, verify no Lua errors/taint or stuck scans.
 3. Verify exact variants and commodity/item result signatures/completeness on Forever.
-4. Check quotes/ordinary whole-stack buys with an intentionally tiny budget and
+4. Check commodity quotes/ordinary one-item buys with an intentionally tiny budget and
    real player clicks; compare event correlation, quantity, price and mail.
 5. Test price changes, own listings, competing Auctionator searches, AH close,
    disconnect, timeout and a late completion without duplicate procurement.

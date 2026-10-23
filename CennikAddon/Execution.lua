@@ -155,6 +155,7 @@ function E:Reconcile(bought,quantity,cost) -- explicit player declaration after 
   if p.sniper then return C.Sniper:Reconcile(bought,quantity,cost) end
   if bought then
     if not C:Integer(quantity) or not C:Integer(cost) then return false end
+    if not p.commodity and quantity~=1 then return false end
     p.quantity,p.cost=quantity,cost
   end
   self:Finish(bought and "bought" or "not_bought",{manually_confirmed=true})

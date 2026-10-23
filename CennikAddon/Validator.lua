@@ -13,7 +13,7 @@ function V:PlanScan(task,line,needed,live,scan)
   local plan={item_id=line.item_id,quantity=0,needed=needed,cost=0,lots={},commodity=scan.commodity,
     limit=line.unit_limit_copper,key=scan.key,vendor_revenue=0,max_unit_price=0}
   if needed==0 then return plan end
-  local eligible,available,uncertain={},0,false
+  local eligible,available,uncertain,seen={},0,false,{}
   for _,row in ipairs(scan.rows) do
     if task.strategy_id=="vendor_arbitrage" then
       local sell,source=C.NPC:Vendor(task,row)
@@ -25,50 +25,29 @@ function V:PlanScan(task,line,needed,live,scan)
       if not C.Adapter:KeyEqual(row.item_key,scan.key) then uncertain=true
       elseif task.strategy_id=="vendor_arbitrage" and not row.vendor_known then uncertain=true
       elseif task.strategy_id~="vendor_arbitrage" or (row.vendor_sell_copper or 0)>0 then
-        if row.commodity or C:Integer(row.auction_id) then eligible[#eligible+1]=row; available=available+row.quantity end
-      end
-    end
-  end
-  local chosen={}
-  if scan.commodity then
-    local remaining=needed
-    for _,row in ipairs(eligible) do
-      local quantity=math.min(remaining,row.quantity)
-      chosen[#chosen+1]={row=row,quantity=quantity,credit_quantity=quantity}; remaining=remaining-quantity
-      if remaining==0 then break end
-    end
-    if remaining>0 then chosen=nil end
-  else
-    -- Full-lot dynamic programming: lowest cash cost; for vendor, largest credited profit.
-    local states,steps={[0]={cost=0,revenue=0,quantity=0}},0
-    for _,row in ipairs(eligible) do
-      local nextStates={}
-      for coverage,node in pairs(states) do nextStates[coverage]=node end
-      for coverage,node in pairs(states) do
-        steps=steps+1
-        if steps>50000 then return nil,"requires_manual_check","Слишком много комбинаций полных лотов; сократите количество задания" end
-        local quantity=node.quantity+row.quantity
-        if coverage<needed and (live or task.allow_overbuy or quantity<=needed) then
-          local nextCoverage=math.min(needed,coverage+row.quantity)
-          local credit=nextCoverage-coverage
-          local cost=node.cost+row.total_price
-          local revenue=node.revenue+(row.vendor_sell_copper or 0)*credit
-          if C:Integer(cost) and C:Integer(revenue,true) then
-            local value=task.strategy_id=="vendor_arbitrage" and cost-revenue or cost
-            local old=nextStates[nextCoverage]
-            local oldValue=old and (task.strategy_id=="vendor_arbitrage" and old.cost-old.revenue or old.cost)
-            if not old or value<oldValue or (value==oldValue and cost<old.cost) then
-              nextStates[nextCoverage]={cost=cost,revenue=revenue,quantity=quantity,previous=node,row=row,credit_quantity=credit}
-            end
-          end
+        if row.commodity or C:Integer(row.auction_id) and not seen[row.auction_id] then
+          if not row.commodity then seen[row.auction_id]=true end
+          local depth=row.available_quantity or row.quantity
+          if C:Integer(depth) then eligible[#eligible+1]=row; available=available+depth else uncertain=true end
         end
       end
-      states=nextStates
     end
-    local node=states[needed]
-    if not node then chosen=nil
-    else while node and node.row do table.insert(chosen,1,{row=node.row,quantity=node.row.quantity,credit_quantity=node.credit_quantity}); node=node.previous end end
   end
+  -- A group is depth, never an indivisible purchase. Keep its representative ID
+  -- for the next one-item action; every subsequent action gets a new live scan.
+  table.sort(eligible,function(a,b)
+    local av,bv=a.unit_price,b.unit_price
+    if task.strategy_id=="vendor_arbitrage" then av=av-a.vendor_sell_copper; bv=bv-b.vendor_sell_copper end
+    if av~=bv then return av<bv end
+    return (a.auction_id or 0)<(b.auction_id or 0)
+  end)
+  local chosen,remaining={},needed
+  for _,row in ipairs(eligible) do
+    local quantity=math.min(remaining,row.available_quantity or row.quantity)
+    chosen[#chosen+1]={row=row,quantity=quantity,credit_quantity=quantity}; remaining=remaining-quantity
+    if remaining==0 then break end
+  end
+  if remaining>0 then chosen=nil end
   if not chosen then
     local name=C.Items:Name(line.item_id) .. " (#" .. line.item_id .. ")"
     return nil,uncertain and "requires_manual_check" or "insufficient_supply",uncertain and (name .. ": неизвестно владение, вариант или NPC-цена")
@@ -76,11 +55,12 @@ function V:PlanScan(task,line,needed,live,scan)
   end
   for _,entry in ipairs(chosen) do
     local row,quantity=entry.row,entry.quantity
-    local cost=row.commodity and quantity*row.unit_price or row.total_price
+    local cost=quantity*row.unit_price
     plan.quantity,plan.cost=plan.quantity+quantity,plan.cost+cost
     plan.max_unit_price=math.max(plan.max_unit_price,row.unit_price)
     plan.vendor_revenue=plan.vendor_revenue+(row.vendor_sell_copper or 0)*entry.credit_quantity
-    plan.lots[#plan.lots+1]={item_id=line.item_id,quantity=quantity,cost=cost,auction_id=row.auction_id,
+    plan.lots[#plan.lots+1]={item_id=line.item_id,quantity=row.commodity and quantity or 1,cost=row.commodity and cost or row.unit_price,auction_id=row.auction_id,
+      planned_quantity=quantity,available_quantity=row.available_quantity or row.quantity,
       commodity=row.commodity,key=scan.key,limit=line.unit_limit_copper,observed_at=scan.observed_at,
       vendor_sell_copper=row.vendor_sell_copper,vendor_source=row.vendor_source,item_link=row.item_link}
   end
@@ -142,7 +122,6 @@ function V:Validate(task,ownPending)
           remainingCost=remainingCost+plan.cost; vendorRevenue=vendorRevenue+plan.vendor_revenue
           result.plans[#result.plans+1]=plan
           if plan.max_unit_price>line.unit_limit_copper then result.blockers[#result.blockers+1]=C.Items:Name(line.item_id) .. ": текущая цена выше предела покупки" end
-          if plan.extra_quantity>0 and not task.allow_overbuy then result.blockers[#result.blockers+1]=C.Items:Name(line.item_id) .. ": полный стек содержит лишние " .. plan.extra_quantity .. " шт.; нужно разрешение" end
         end
       end
     else return rejected("requires_manual_check","Неизвестный источник материала") end
@@ -167,7 +146,7 @@ function V:Validate(task,ownPending)
     local sale
     for _,row in ipairs(scan.rows) do
       if row.ownership_known and not row.owned and row.quantity>0 then
-        local price=row.commodity and row.unit_price or math.floor(row.total_price/row.quantity)
+        local price=row.unit_price
         if price>0 then sale=sale and math.min(sale,price) or price end
       end
     end

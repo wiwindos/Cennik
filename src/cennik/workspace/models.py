@@ -31,7 +31,7 @@ class RefreshRequest(Model):
 class PlanRequest(Model):
     opportunity_id: str
     batches: int = Field(default=1, ge=1, le=10000)
-    allow_overbuy: bool = False
+    allow_overbuy: bool = False  # Legacy import/API field; Forever plans buy only the requested units.
 
 
 class ImportRequest(Model):

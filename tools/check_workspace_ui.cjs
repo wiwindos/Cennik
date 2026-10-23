@@ -9,6 +9,7 @@ const path = require("node:path");
   page.on("pageerror",error=>errors.push(String(error)));
   page.on("response",response=>{if(response.status()>=400)errors.push(response.status()+" "+response.url());});
   const navigate=async name=>{await page.locator(`nav [data-page="${name}"]`).click();await page.waitForFunction(()=>document.querySelector('h1')?.textContent!=="Cennik");};
+  const focused=process.argv[5]==="sniper";
   try {
     await page.goto("http://127.0.0.1:8767");
     await page.locator("[data-opportunity]").first().click();
@@ -17,10 +18,10 @@ const path = require("node:path");
     await page.getByText("Книга предложений:",{exact:false}).waitFor();
     assert.match(await page.locator(".detail").innerText(),/20 м/);
     await page.screenshot({path:path.join(process.argv[4],"opportunities.png"),fullPage:true});
-    await navigate("archive");
+    if(!focused){await navigate("archive");
     await page.locator("[data-scan]").first().click();
     await page.getByRole("button",{name:"Следующие строки"}).click();
-    await page.getByText("101–120 из 120",{exact:false}).waitFor();
+    await page.getByText("101–120 из 120",{exact:false}).waitFor();}
     await navigate("market");
     await page.locator('[name="q"]').fill("2589");
     await page.getByRole("button",{name:"Найти",exact:true}).click();
@@ -31,12 +32,18 @@ const path = require("node:path");
     assert.equal(await page.locator('#sniper-form [name="item_id"]').inputValue(),"2589");
     await page.locator('#sniper-form [name="quantity"]').fill("25");
     await page.locator('#sniper-form [name="mode"]').selectOption("limit");
-    await page.locator('#sniper-form [name="price_gold"]').fill("0.125");
+    await page.locator('#sniper-form [name="price_gold"]').fill("5");
+    await page.locator('#sniper-form [name="price_silver"]').fill("48");
+    await page.locator('#sniper-form [name="price_copper"]').fill("98");
     await page.getByRole('button',{name:'Сохранить цель',exact:true}).click();
     await page.getByText('Цель сохранена.',{exact:false}).waitFor({timeout:5000}).catch(async e=>{throw Error((await page.locator('#message').innerText())+' '+errors.join('; ')+' '+e);});
     const rules=await page.evaluate(async()=>await (await fetch('/api/v2/sniper')).json());
-    assert.equal(rules.rules.length,1);assert.equal(rules.rules[0].unit_limit_copper,1250);assert.equal(rules.rules[0].quantity,25);
+    assert.equal(rules.rules.length,1);assert.equal(rules.rules[0].unit_limit_copper,54898);assert.equal(rules.rules[0].quantity,25);
     await page.getByRole('button',{name:'Изменить',exact:true}).click();
+    for(const [name,value] of Object.entries({price_gold:"5",price_silver:"48",price_copper:"98"}))assert.equal(await page.locator(`#sniper-form [name="${name}"]`).inputValue(),value);
+    await page.locator('#sniper-form [name="price_silver"]').fill("100");
+    assert.equal(await page.locator('#sniper-form [name="price_silver"]').evaluate(e=>e.checkValidity()),false);
+    await page.locator('#sniper-form [name="price_silver"]').fill("48");
     await page.locator('#sniper-form [name="quantity"]').fill("40");
     await page.getByRole('button',{name:'Сохранить цель',exact:true}).click();
     await page.getByRole('cell',{name:'40 шт.',exact:false}).waitFor();
@@ -58,7 +65,18 @@ const path = require("node:path");
     await dialog.getByText('Fixture thread × 4 · NPC: отдельно',{exact:false}).waitFor();
     await dialog.getByRole('button',{name:'Добавить материалы',exact:true}).click();
     await page.getByText('Цели · 2',{exact:true}).waitFor();
+    await page.locator('#sniper-form [name="mode"]').selectOption("limit");
     await page.screenshot({path:path.join(process.argv[4],"sniper.png"),fullPage:true});
+    if(focused){
+      for(const width of [320,736,1024]){
+        await page.setViewportSize({width,height:900});
+        assert.ok(await page.locator('#sniper-form [name="price_copper"]').isVisible());
+        const dimensions=await page.evaluate(()=>({body:document.documentElement.scrollWidth,width:innerWidth}));
+        assert.ok(dimensions.body<=dimensions.width+1,`Sniper overflows at ${width}`);
+      }
+      assert.deepEqual(errors,[]);
+      process.stdout.write(JSON.stringify({passed:true,focus:"sniper",coin_round_trip:54898,widths:[320,736,1024,1440],errors})+"\n");return;
+    }
     for(const name of ["execution","sources","settings"]) await navigate(name);
     await page.locator("#settings-form").waitFor();
     const schemas=await page.evaluate(async()=>await (await fetch('/api/v2/settings')).json());

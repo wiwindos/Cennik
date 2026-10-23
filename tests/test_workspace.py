@@ -136,17 +136,19 @@ def test_new_generation_does_not_hash_legacy_database(workspace, monkeypatch):
     assert opportunity["potential_profit_copper"] == 3
 
 
-def test_procurement_respects_indivisible_stacks(workspace):
-    workspace.market.import_scan(scan(divisible=False))
+@pytest.mark.parametrize("commodity", [False, True])
+def test_procurement_uses_only_needed_units_from_replicate_depth(workspace, commodity):
+    workspace.market.import_scan(scan(divisible=commodity))
     workspace.analytics.start(background=False)
     identity = workspace.store.listing(MARKET)["items"][0]["id"]
-    blocked = workspace.plan(PlanRequest(opportunity_id=identity, batches=1))
-    assert not blocked["complete"] and blocked["profit_copper"] is None
+    ordinary = workspace.plan(PlanRequest(opportunity_id=identity, batches=1))
+    assert ordinary["complete"] and ordinary["cost_copper"] == 10
     allowed = workspace.plan(PlanRequest(opportunity_id=identity, batches=1, allow_overbuy=True))
     assert allowed["complete"]
-    assert allowed["cost_copper"] == 40
-    assert allowed["profit_copper"] == 12
-    assert allowed["lines"][0]["purchased"] == 4
+    assert allowed["cost_copper"] == 10
+    assert allowed["profit_copper"] == 3
+    assert allowed["lines"][0]["purchased"] == 1
+    assert not allowed["allow_overbuy"]
 
 
 def test_persistent_etag_cache_does_not_create_new_observation(workspace, monkeypatch):
@@ -203,6 +205,7 @@ def test_plan_publish_preserves_batch_and_reuses_package(workspace, tmp_path):
     published = workspace.publish_plan(plan["id"])
     assert not published["reused"]
     package = workspace.exchange.packages(MARKET)[0]
+    assert package.tasks[0].opportunity.details["quantity_model"] == "forever_units_v1"
     assert package.tasks[0].lines[0].quantity == 2
     assert package.tasks[0].max_total_cost_copper == 20
     assert workspace.publish_plan(plan["id"])["reused"]
@@ -210,6 +213,14 @@ def test_plan_publish_preserves_batch_and_reuses_package(workspace, tmp_path):
     second = workspace.plan(PlanRequest(opportunity_id=opportunity["id"], batches=3))
     with pytest.raises(RuntimeError, match="уже передана"):
         workspace.publish_plan(second["id"])
+    # A cached package must not bypass the new check on a pre-upgrade plan.
+    import json
+    with workspace.store.connection() as db:
+        old_plan = json.loads(db.execute("SELECT payload FROM workspace_plans WHERE id=?", [plan["id"]]).fetchone()[0])
+        old_plan.pop("quantity_model")
+        db.execute("UPDATE workspace_plans SET payload=? WHERE id=?", [json.dumps(old_plan), plan["id"]])
+    with pytest.raises(RuntimeError, match="прежнюю модель количества"):
+        workspace.publish_plan(plan["id"])
 
 
 def test_api_retention_never_removes_own_scans_or_pinned_data(workspace):

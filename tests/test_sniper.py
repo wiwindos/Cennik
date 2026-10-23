@@ -63,14 +63,15 @@ def test_target_buy_does_not_need_profitable_opportunity_or_published_run(exchan
     """)
 
 
-def test_indivisible_overbuy_shows_and_accounts_entire_stack(exchange):
+def test_uncached_group_of_forty_items_buys_and_accounts_only_one(exchange):
     lua = game(exchange, gear=True)
     found(lua, gear=True)
-    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 40
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].available") == 40
     assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
     lua.execute("Game.click(function() Cennik.Sniper:Buy(r.definition.id) end); Game.event('AUCTION_HOUSE_PURCHASE_COMPLETED',123)")
-    assert lua.eval("r.bought") == 40
-    assert lua.eval("Cennik.Sniper:Remaining(r)") == 0
+    assert lua.eval("r.bought") == 1
+    assert lua.eval("Cennik.Sniper:Remaining(r)") == 24
     assert lua.eval("Cennik.db.sniper.spent") == 400
 
 
@@ -114,8 +115,8 @@ def test_purchase_unknown_blocks_duplicate_and_can_be_reconciled(exchange):
     assert lua.eval("r.bought") == 0
     result = lua.eval("Cennik.Sniper:Buy(r.definition.id)")
     assert result[0] is False
-    lua.execute("assert(Cennik.Execution:Reconcile(true,40,400))")
-    assert lua.eval("r.bought") == 40
+    lua.execute("assert(not Cennik.Execution:Reconcile(true,40,400)); assert(Cennik.Execution:Reconcile(true,1,400))")
+    assert lua.eval("r.bought") == 1
     assert lua.eval("Cennik.db.pending") is None
 
 
@@ -135,8 +136,76 @@ def test_all_rpc_traffic_consumes_background_allowance(exchange):
     lua = game(exchange)
     lua.execute("for i=1,48 do C_AuctionHouse.SendSearchQuery(C_AuctionHouse.MakeItemKey(2589),{},true) end; Game.advance(4); Cennik.Sniper:Tick(0.1)")
     assert lua.eval("#Game.calls") == 48
+    lua.execute("assert(Cennik.Sniper:ResumeSearch()); Cennik.Sniper:Tick(0.1)")
+    assert lua.eval("#Game.calls") == 48  # Resuming does not reset the shared rate limit.
     lua.execute("Game.advance(61); Cennik.Sniper:Tick(0.1)")
     assert lua.eval("#Game.calls") == 49
+
+
+def test_manual_search_holds_background_until_explicit_resume_and_keeps_findings(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local offer=s.alerts[r.definition.id]
+      C_AuctionHouse.SendSearchQuery(C_AuctionHouse.MakeItemKey(5763),{},true)
+      local calls=#Game.calls
+      for i=1,4 do Game.advance(30); s:Tick(0.1) end
+      assert(#Game.calls==calls and s.manualHold and r.enabled)
+      assert(s.alerts[r.definition.id]==offer and not s.current)
+      assert(s.overlay.resume:IsShown())
+      assert(s.overlay.footer:GetText():find('Поиск на паузе',1,true))
+      -- Merely viewing saved findings must not resume searching.
+      s:ShowFindings(); s:Tick(0.1); assert(#Game.calls==calls)
+      s.overlay.resume.scripts.OnClick()
+      assert(not s.manualHold and Cennik.UI.frame:IsShown() and Cennik.UI.section=='Sniper')
+      s:Tick(0.1); assert(#Game.calls==calls+1 and not s.manualHold)
+    """)
+
+
+@pytest.mark.parametrize("tab", ["native", "auctionator"])
+def test_other_auction_tabs_hold_search_even_without_a_manual_query(exchange, tab):
+    lua = game(exchange)
+    lua.execute("Cennik.UI:Attach(); Cennik.UI:Show(); Cennik.UI:SelectSection('Sniper')")
+    if tab == "native":
+        lua.execute("AuctionHouseFrame:SetDisplayMode({'buy'})")
+    else:
+        lua.execute("local lib=LibStub(); lib:CreateTab('AuctionatorTabs_Shopping',CreateFrame('Frame')); lib:SetSelected('AuctionatorTabs_Shopping')")
+    lua.execute("""
+      local s=Cennik.Sniper
+      Game.advance(10); s:Tick(0.1)
+      assert(s.manualHold and #Game.calls==0 and r.enabled)
+      -- Switching back is not permission to overwrite manual results again.
+      Cennik.UI:Show(); s:Tick(0.1); assert(s.manualHold and #Game.calls==0)
+      assert(s:ResumeSearch()); s:Tick(0.1)
+      assert(#Game.calls==1 and not s.manualHold and not s.foreignTab)
+    """)
+
+
+def test_manual_search_cancels_inflight_sniper_and_ignores_late_result(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      local s=Cennik.Sniper
+      s:Tick(0.1); assert(s.current and not s.manualHold)
+      C_AuctionHouse.SendSearchQuery(C_AuctionHouse.MakeItemKey(5763),{},true)
+      Game.event('COMMODITY_SEARCH_RESULTS_UPDATED',2589)
+      assert(not s.current and not s.alerts[r.definition.id] and s.manualHold)
+      Game.advance(65); s:Tick(0.1); assert(#Game.calls==2)
+    """)
+
+
+def test_auctionator_search_completion_does_not_release_manual_hold(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      local a,s=Cennik.Adapter,Cennik.Sniper
+      a:ReceiveEvent(a.startEvent); a:ReceiveEvent(a.endEvent)
+      Game.advance(65); s:Tick(0.1)
+      assert(not a.shopping and s.manualHold and #Game.calls==0)
+      Cennik.db.pending={sniper=true,stage='unknown',item_id=2589,quantity=1,unit_price=10,cost=10}
+      assert(not s:ResumeSearch() and s.manualHold)
+      Cennik.db.pending=nil
+      assert(s:ResumeSearch()); s:Tick(0.1)
+      assert(#Game.calls==1 and not s.manualHold)
+    """)
 
 
 def test_priorities_do_not_starve_low_priority(exchange):
@@ -233,7 +302,7 @@ def test_web_import_is_atomic_and_identity_cannot_reuse_purchase_counts(workspac
     assert workspace.sniper.wire()["rules"] == [old.model_dump(mode="json")]
 
 
-def test_paused_goal_ignores_late_results_and_full_stack_cost_is_not_unit_price(exchange):
+def test_paused_goal_ignores_late_results(exchange):
     lua = game(exchange)
     lua.execute("Cennik.Sniper:Tick(0.1); r.enabled=false")
     lua.execute("Game.event('COMMODITY_SEARCH_RESULTS_UPDATED',2589)")
@@ -345,8 +414,8 @@ def test_explicit_method_controls_and_recipe_bulk_keep_direct_reagents(exchange)
         recipes={{spell_id=100,version_hash='latest',item_id=5763,qty_min=1,qty_max=1,profession='Tailoring',materials={{item_id=2592,quantity=3},{item_id=2321,quantity=1}}}}}
       Cennik.Sniper:ShowEditor(5763); local editor=Cennik.Sniper.editor
       assert(not editor.priceInput:IsShown())
-      editor.modeButtons.limit.scripts.OnClick(); assert(editor.priceInput:IsShown())
-      editor.priceInput:SetText('0.125'); editor.modeButtons.median3d.scripts.OnClick()
+      editor.modeButtons.limit.scripts.OnClick(); assert(editor.priceGold:IsShown() and not editor.priceInput:IsShown())
+      editor.priceSilver:SetText('12'); editor.priceCopper:SetText('50'); editor.modeButtons.median3d.scripts.OnClick()
       assert(editor.priceInput:GetText()=='50'); editor.modeButtons.any.scripts.OnClick()
       assert(not editor.priceInput:IsShown())
       Cennik.Sniper:ShowCard(5763)
@@ -450,16 +519,17 @@ def test_group_of_twelve_single_bags_uses_actual_auction_quantity_not_search_cou
     assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
     assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
     assert lua.eval("r.last_result.search_quantity") == 12
-    assert lua.eval("Cennik.Sniper.overlay.buy:GetText()") == "Купить 1 шт."
+    assert lua.eval("Cennik.Sniper.overlay.buy:GetText()") == "Купить 1 шт. за 400c"
 
 
-def test_unconfirmed_group_cannot_be_misrepresented_as_nonstackable_lot(exchange):
+def test_nonstackable_search_group_represents_one_item_at_full_buyout_price(exchange):
     lua = game(exchange, quantity=1, gear=True)
     lua.execute("C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end; Game.items[2589][1].quantity=12")
     found(lua, gear=True)
-    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is None
-    assert "поисковой группы" in lua.eval("r.reason")
-    assert not lua.eval("Cennik.Sniper.overlay.buy:IsEnabled()")
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].unit_price") == 400
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
+    assert lua.eval("r.last_result.grouped_single_rows") == 1
 
 
 def test_findings_keep_selection_content_and_action_during_refresh(exchange):
@@ -471,13 +541,13 @@ def test_findings_keep_selection_content_and_action_during_refresh(exchange):
       Cennik.Sniper:AcceptRows(other,{{item_id=2592,item_key=C_AuctionHouse.MakeItemKey(2592),commodity=true,quantity=5,unit_price=25,total_price=125,ownership_known=true,owned=false}})
       assert(Cennik.Sniper.selected==r.definition.id)
       Cennik.Sniper:BeginDetail(r,C_AuctionHouse.MakeItemKey(2589)); Cennik.Sniper:RenderOverlay()
-      assert(Cennik.Sniper.overlay.buy:IsEnabled() and Cennik.Sniper.overlay.buy:GetText()=='Купить 1 шт.')
-      assert(Cennik.Sniper.overlay.content:GetText():find('Обновляю проверку',1,true))
-      Cennik.Sniper.overlay.rows[2].scripts.OnClick()
+      assert(Cennik.Sniper.overlay.buy:IsEnabled() and Cennik.Sniper.overlay.buy:GetText()=='Купить 1 шт. за 10c')
+      assert(Cennik.Sniper.overlay.content:GetText():find('Уже есть на аукционе',1,true))
+      local row=Cennik.Sniper.overlay.rows[2]; row.scripts.OnClick(row)
       assert(Cennik.Sniper.selected==other.definition.id)
       Cennik.Sniper:AcceptRows(other,{})
       assert(Cennik.Sniper.selected==other.definition.id)
-      assert(Cennik.Sniper.overlay.content:GetText():find('Предложение больше не доступно',1,true))
+      assert(Cennik.Sniper.overlay.content:GetText():find('Выбранный лот недоступен',1,true))
     """)
 
 
@@ -496,6 +566,89 @@ def test_popup_background_close_buttons_and_manual_reopen_do_not_stop_search(exc
     """)
 
 
+@pytest.mark.parametrize("gear", [False, True])
+def test_all_offers_opens_native_buy_for_exact_key_without_purchasing_or_resuming(exchange, gear):
+    lua = game(exchange, gear=gear)
+    lua.execute("Cennik.UI:Attach(); Cennik.UI:Show(); Cennik.UI:SelectSection('Sniper')")
+    if gear:
+        lua.execute("""
+          r.keys[1].itemLevel=9; r.keys[1].itemSuffix=17
+          Game.items[2589][1].itemKey=Cennik:Clone(r.keys[1])
+          Cennik.Sniper:Tick(0.1); Game.event('ITEM_SEARCH_RESULTS_UPDATED',r.keys[1])
+        """)
+    else:
+        found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local offer=s.alerts[r.definition.id]
+      assert(offer and s.overlay.offers:IsEnabled())
+      AuctionHouseFrameDisplayMode={Buy={'nativeBrowse'}}
+      local setMode=AuctionHouseFrame.SetDisplayMode
+      AuctionHouseFrame.SetDisplayMode=function(self,mode)
+        if mode==AuctionHouseFrameDisplayMode.Buy then Game.buyTabSelected=true end
+        setMode(self,mode)
+      end
+      AuctionHouseFrame.SelectBrowseResult=function(self,row)
+        assert(s.manualHold and not s.current and Game.buyTabSelected)
+        Game.nativeSelection=Cennik:Clone(row); Cennik.UI.frame:Hide()
+        self:SetDisplayMode({'nativeBuy'})
+        C_AuctionHouse.SendSearchQuery(row.itemKey,{},true)
+      end
+      Game.click(function() s.overlay.offers.scripts.OnClick() end)
+      assert(Game.nativeSelection and Cennik.Adapter:KeyEqual(Game.nativeSelection.itemKey,offer.key))
+      assert(not s.overlay:IsShown() and s.overlayHidden and s.manualHold and r.enabled)
+      assert(not Cennik.db.pending and r.bought==0)
+      for _,call in ipairs(Game.calls) do assert(call.kind=='search') end
+      local calls=#Game.calls
+      Game.advance(65); s:Tick(0.1)
+      assert(#Game.calls==calls and not s.overlay:IsShown())
+      SlashCmdList.CENNIK('sniper'); s:ShowFindings()
+      assert(s.manualHold and s.overlay.resume:IsShown())
+      assert(s.alerts[r.definition.id]==offer)
+    """)
+    assert lua.eval("Game.nativeSelection.itemKey.itemSuffix") == (17 if gear else 0)
+
+
+def test_all_offers_blocks_during_purchase_and_unknown_equipment_variant(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper
+      Cennik.db.pending=Cennik:Clone(s.alerts[r.definition.id]); Cennik.db.pending.sniper=true; Cennik.db.pending.stage='unknown'
+      s:RenderOverlay(); assert(not s.overlay.offers:IsEnabled())
+      assert(not s:ShowOffers() and not s.manualHold)
+      Cennik.db.pending=nil
+      s.alerts[r.definition.id]=nil; r.last_finding=nil; r.keys=nil
+      r.definition.item_level=nil; r.definition.item_suffix=nil; r.definition.pet_id=nil
+      assert(not s:ShowOffers() and #Game.calls==1)
+      assert(s.message:find('выберите нужный вариант',1,true))
+    """)
+
+
+def test_finding_details_scroll_preserves_position_until_selection_changes(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      -- Simulate the measured height of wrapped localized text in the client.
+      p.content.GetStringHeight=function() return 450 end
+      Game.money=0; s:RenderOverlay()
+      assert(p.contentScroll:GetScrollChild()==p.contentBody and p.contentBody:GetHeight()>p.contentScroll:GetHeight())
+      assert(p.contentScroll.clipsChildren and p.content.parent==p.contentBody)
+      p.contentScroll:SetVerticalScroll(100)
+      local updates=p.contentScroll.rectUpdates
+      for i=1,10 do s:RenderOverlay() end
+      assert(p.contentScroll:GetVerticalScroll()==100 and p.contentScroll.rectUpdates==updates)
+      Game.money=1000000; s:RenderOverlay()
+      assert(p.contentScroll:GetVerticalScroll()==100)
+      local def=Cennik:Clone(definition); def.id='second'; def.item_id=5763
+      assert(s:Add(def)); s:ShowFindings(def.id)
+      assert(p.contentScroll:GetVerticalScroll()==0)
+      p.content.GetStringHeight=function() return 28 end
+      s.selected=r.definition.id; s:RenderOverlay()
+      assert(p.contentScroll:GetVerticalScrollRange()==0)
+    """)
+
+
 def test_shortcut_hides_on_cennik_and_native_auction_tab_changes(exchange):
     lua = game(exchange)
     lua.execute("""
@@ -505,3 +658,238 @@ def test_shortcut_hides_on_cennik_and_native_auction_tab_changes(exchange):
       Cennik.Sniper:ShowAuctionatorShortcut(5763)
       AuctionHouseFrame:SetDisplayMode('sell'); assert(not Cennik.Sniper.auctionatorShortcut:IsShown())
     """)
+
+
+def test_repeated_checks_do_not_repaint_rows_details_or_purchase_feedback(exchange):
+    lua = game(exchange, quantity=1)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      s:Notice('Проверяем сохранение результата')
+      for _,frame in ipairs({p.rows[1],p.content,p.buy,p.notice}) do
+        frame.writes=0
+        local original=frame.SetText
+        frame.SetText=function(self,value) self.writes=(self.writes or 0)+1; original(self,value) end
+      end
+      for i=1,5 do
+        Game.advance(2)
+        s:BeginDetail(r,C_AuctionHouse.MakeItemKey(2589)); s:RenderOverlay()
+        s:AcceptRows(r,Cennik.Adapter:Results(2589,C_AuctionHouse.MakeItemKey(2589),true))
+      end
+      for _,frame in ipairs({p.rows[1],p.content,p.buy,p.notice}) do assert((frame.writes or 0)==0) end
+      assert(p.notice:GetText():find('Проверяем сохранение результата',1,true))
+      assert(p.scroll.rectUpdates==1)
+    """)
+
+
+def test_new_auction_not_best_price_alerts_once_and_never_changes_selected_lot(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("PlaySound=function() Game.sounds=(Game.sounds or 0)+1 end")
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local key=C_AuctionHouse.MakeItemKey(2589)
+      assert((Game.sounds or 0)==0 and s.overlay.content:GetText():find('Уже есть',1,true))
+      s.overlay.cennikClose.scripts.OnClick()
+      Game.items[2589][2]={quantity=1,buyoutAmount=500,containsOwnerItem=false,containsAccountItem=false,auctionID=124,itemKey=key}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(Game.sounds==1 and s.overlay:IsShown())
+      assert(s.alerts[r.definition.id].auction_id==123)
+      assert(s.overlay.finding:GetText():find('500c',1,true))
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key); assert(Game.sounds==1)
+      s.overlay.latest.scripts.OnClick()
+      assert(s.alerts[r.definition.id].auction_id==124 and s.overlay.buy:GetText()=='Купить 1 шт. за 500c')
+      -- Losing the selected lot must not turn the same button into a different purchase.
+      Game.items[2589][2]=nil; s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.alerts[r.definition.id]==nil and not s.overlay.buy:IsEnabled())
+      assert(s.overlay.content:GetText():find('Выбранный лот недоступен',1,true))
+      s.overlay.next.scripts.OnClick(); assert(s.alerts[r.definition.id].auction_id==123)
+    """)
+
+
+def test_price_change_needs_explicit_selection_and_empty_baseline_detects_appearance(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("""
+      PlaySound=function() Game.sounds=(Game.sounds or 0)+1 end
+      local s=Cennik.Sniper; local key=C_AuctionHouse.MakeItemKey(2589)
+      s:MissingFindings(r)
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(Game.sounds==1 and s.alerts[r.definition.id].event=='new')
+      Game.items[2589][1].buyoutAmount=500
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.alerts[r.definition.id]==nil and not s.overlay.buy:IsEnabled())
+      assert(s.overlay.content:GetText():find('400c',1,true))
+      s.overlay.latest.scripts.OnClick()
+      assert(s.alerts[r.definition.id].cost==500)
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key); assert(Game.sounds==2)
+    """)
+
+
+def test_commodity_supply_change_is_not_claimed_as_new_auction(exchange):
+    lua = game(exchange, quantity=1)
+    lua.execute("PlaySound=function() Game.sounds=(Game.sounds or 0)+1 end")
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.commodity[2589][1].quantity=80
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert((Game.sounds or 0)==0)
+      Game.commodity[2589][1].quantity=90
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(Game.sounds==1 and s.overlay.finding:GetText():find('Изменилось предложение товара',1,true))
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==1)
+    """)
+
+
+def test_buy_button_reports_busy_then_success_with_actual_total_and_no_poll_overwrite(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      Game.throttled=true
+      Game.click(function() p.buy.scripts.OnClick() end)
+      assert(Cennik.db.pending==nil and p.notice:GetText():find('Покупка не отправлена',1,true))
+      Game.throttled=false
+      Game.click(function() p.buy.scripts.OnClick() end)
+      assert(Cennik.db.pending.stage=='buying' and r.bought==0)
+      assert(p.notice:GetText():find('ждём подтверждения',1,true))
+      Game.event('AUCTION_HOUSE_PURCHASE_COMPLETED',999); assert(r.bought==0)
+      Game.event('AUCTION_HOUSE_PURCHASE_COMPLETED',123)
+      assert(Cennik.db.pending==nil and r.bought==1)
+      assert(p.notice:GetText():find('Куплено:',1,true) and p.notice:GetText():find('400c',1,true),p.notice:GetText())
+      s:RenderOverlay(); assert(p.notice:GetText():find('Куплено:',1,true))
+    """)
+
+
+def test_commodity_buttons_show_quote_total_and_expiry_without_silent_purchase(exchange):
+    lua = game(exchange, quantity=1)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      Game.click(function() p.buy.scripts.OnClick() end)
+      assert(Cennik.db.pending.stage=='await_quote' and r.bought==0)
+      Game.event('COMMODITY_PRICE_UPDATED',20,20)
+      assert(p.buy:GetText()=='Подтвердить за 20c' and r.bought==0)
+      Game.advance(4); Game.click(function() p.buy.scripts.OnClick() end)
+      assert(Cennik.db.pending==nil and r.bought==0)
+      assert(p.notice:GetText():find('Котировка старше 3 секунд',1,true))
+      for _,call in ipairs(Game.calls) do assert(call.kind~='confirm') end
+    """)
+
+
+def test_variant_baselines_and_batch_missing_do_not_replace_selected_auction(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("""
+      PlaySound=function() Game.sounds=(Game.sounds or 0)+1 end
+      local s=Cennik.Sniper
+      local a=C_AuctionHouse.MakeItemKey(2589); local b=Cennik:Clone(a); b.itemLevel=1
+      s:PrimeFindings(r,{a,b})
+      local function row(key,id) return {{item_id=2589,item_key=key,commodity=false,auction_id=id,quantity=1,unit_price=400,total_price=400,ownership_known=true,owned=false}} end
+      s:AcceptRows(r,row(a,123),a); s:AcceptRows(r,row(b,124),b)
+      assert((Game.sounds or 0)==0 and s.alerts[r.definition.id].auction_id==123)
+      C_AuctionHouse.GetBrowseResults=function() return {{itemKey=b,minPrice=400}} end
+      C_AuctionHouse.HasFullBrowseResults=function() return true end
+      s.current={kind='batch',sent=true,keys={a,b},mapping={[s:Key(a)]={r},[s:Key(b)]={r}}}
+      s:OnSearchEvent('AUCTION_HOUSE_BROWSE_RESULTS_UPDATED')
+      assert(s.alerts[r.definition.id]==nil and r.offer_count==1)
+      assert(#s.details==1 and s:Key(s.details[1].key)==s:Key(b))
+      s:NextFinding(r); assert(s.alerts[r.definition.id].auction_id==124)
+      local c=Cennik:Clone(a); c.itemLevel=2
+      s:AcceptRows(r,row(c,125),c)
+      assert(Game.sounds==1 and s.alerts[r.definition.id].auction_id==124)
+    """)
+
+
+def test_grouped_single_bags_keep_cheapest_25000_not_119700_or_300000(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("""
+      C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end
+      local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.items[2589]={
+        {quantity=12,buyoutAmount=25000,containsOwnerItem=false,containsAccountItem=false,auctionID=101,itemKey=key},
+        {quantity=1,buyoutAmount=119700,containsOwnerItem=false,containsAccountItem=false,auctionID=102,itemKey=key},
+        {quantity=1,buyoutAmount=300000,containsOwnerItem=false,containsAccountItem=false,auctionID=103,itemKey=key}}
+    """)
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 25000
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
+    lua.execute("Game.click(function() assert(Cennik.Sniper:Buy(r.definition.id)) end)")
+    assert lua.eval("Game.calls[#Game.calls].kind") == "bid"
+    assert lua.eval("Game.calls[#Game.calls].args[1]") == 101
+    assert lua.eval("Game.calls[#Game.calls].args[2]") == 25000
+    lua.execute("Game.event('AUCTION_HOUSE_PURCHASE_COMPLETED',101)")
+    assert lua.eval("r.bought") == 1
+
+
+def test_cheaper_bag_arriving_later_is_visible_and_selected_only_explicitly(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end; Game.items[2589][1].quantity=1; Game.items[2589][1].buyoutAmount=119700")
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.items[2589][2]={quantity=12,buyoutAmount=25000,containsOwnerItem=false,containsAccountItem=false,auctionID=124,itemKey=key}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.alerts[r.definition.id].cost==119700)
+      assert(s.overlay.content:GetText():find('Есть дешевле: 25000c',1,true))
+      s.overlay.best.scripts.OnClick()
+      assert(s.alerts[r.definition.id].cost==25000 and s.alerts[r.definition.id].quantity==1)
+      assert(s.overlay.buy:GetText()=='Купить 1 шт. за 25000c')
+    """)
+
+
+def test_catalog_stack_size_never_changes_one_item_purchase_and_own_cheap_bag_is_excluded(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("C_Item.GetItemInfo=function() return 'Fixture',nil,nil,nil,nil,nil,nil,20 end")
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].unit_price") == 400
+    lua.execute("""
+      C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end
+      C_Item.GetItemInfo=function() return 'Bag',nil,nil,nil,nil,nil,nil,1 end
+      local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.items[2589]={
+        {quantity=12,buyoutAmount=25000,containsOwnerItem=true,containsAccountItem=false,auctionID=101,itemKey=key},
+        {quantity=1,buyoutAmount=119700,containsOwnerItem=false,containsAccountItem=false,auctionID=102,itemKey=key}}
+      Cennik.Sniper:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      Cennik.Sniper:SelectCheapestFinding(r)
+      assert(Cennik.Sniper.alerts[r.definition.id].cost==119700)
+      assert(r.last_result.cheapest_raw_price==25000 and r.last_result.cheapest_eligible_unit_price==119700)
+      assert(r.last_result.owned_rows==1)
+    """)
+
+
+def test_sniper_coin_fields_round_trip_and_reject_invalid_silver(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI:Show()
+      local s=Cennik.Sniper; s:ShowEditor(r.definition.item_id,r)
+      local p=s.editor; p.modeButtons.limit.scripts.OnClick()
+      p.priceGold:SetText('5'); p.priceSilver:SetText('48'); p.priceCopper:SetText('98')
+      p.modeButtons.median3d.scripts.OnClick(); p.modeButtons.limit.scripts.OnClick()
+      assert(p.priceGold:GetText()=='5' and p.priceSilver:GetText()=='48' and p.priceCopper:GetText()=='98')
+      local function save(editor)
+        for _,f in ipairs(Game.frames) do if f.parent==editor and f.text=='Сохранить цель' then f.scripts.OnClick(); return end end
+        error('Save button missing')
+      end
+      save(p); assert(r.definition.mode=='limit' and r.definition.unit_limit_copper==54898)
+      s:ShowEditor(r.definition.item_id,r); p=s.editor
+      assert(p.priceGold:GetText()=='5' and p.priceSilver:GetText()=='48' and p.priceCopper:GetText()=='98')
+      p.priceSilver:SetText('100'); save(p)
+      assert(p:IsShown() and r.definition.unit_limit_copper==54898)
+      p.priceSilver:SetText('48'); p.priceGold:SetText('5.48'); save(p)
+      assert(p:IsShown() and r.definition.unit_limit_copper==54898)
+      p.priceGold:SetText('0'); p.priceSilver:SetText('0'); p.priceCopper:SetText('1'); save(p)
+      assert(r.definition.unit_limit_copper==1)
+    """)
+
+
+def test_current_search_price_and_depth_are_not_replaced_by_an_older_auction_cache(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("""
+      Game.items[2589][1].quantity=12; Game.items[2589][1].buyoutAmount=25000
+      C_AuctionHouse.GetAuctionInfoByID=function(id) return {auctionID=id,itemKey=C_AuctionHouse.MakeItemKey(2589),quantity=1,buyoutAmount=119700,containsOwnerItem=false,containsAccountItem=false} end
+    """)
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 25000
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].available") == 12
+    assert lua.eval("Game.click(function() return Cennik.Sniper:Buy(r.definition.id) end)") is False
+    assert lua.eval("Cennik.db.pending") is None
+    assert lua.eval("Game.calls[#Game.calls].kind") == "search"

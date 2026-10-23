@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--playwright", required=True)
     parser.add_argument("--browser", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--focus", choices=["all", "sniper"], default="all")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cennik-next-ui-") as temporary:
@@ -47,7 +48,7 @@ def main():
                     break
                 time.sleep(.1)
             subprocess.run([args.node, str(Path(__file__).with_suffix(".cjs")), args.playwright,
-                args.browser, str(args.output)], check=True, timeout=120)
+                args.browser, str(args.output), args.focus], check=True, timeout=120)
         finally:
             server.should_exit = True
             thread.join(timeout=30)

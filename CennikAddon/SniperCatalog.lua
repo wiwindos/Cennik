@@ -40,6 +40,7 @@ function S:Lookup(query,callback)
     end
   end
   if #matches>0 then callback(matches); return true end
+  if self.manualHold or self.foreignTab then return false,"Откройте Cennik и нажмите «Продолжить поиск», затем повторите поиск названия" end
   if C.db.pending or C.Scanner.active or not C.Adapter:Ready("sniper") then return false,"Дождитесь завершения другой операции аукциона" end
   if not C_AuctionHouse.SendBrowseQuery or not C_AuctionHouse.GetBrowseResults then return false,"Используйте поиск Auctionator и кнопку «В снайпер»" end
   self:CancelSearch("Поиск предмета по названию")
