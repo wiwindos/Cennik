@@ -2,8 +2,10 @@ local _, C = ...
 local A = {externalUntil=0, sending=false}
 C.Adapter = A
 function A:Open() return AuctionHouseFrame and AuctionHouseFrame:IsShown() end
-function A:Ready()
+function A:Ready(owner)
   return not self.error and self:Open() and not self.shopping and not self.fullScan
+    and (owner=="sniper" or not (C.Sniper and C.Sniper.current))
+    and not (C.MarketCollector and C.MarketCollector.packing)
     and GetTime() >= self.externalUntil and C_AuctionHouse.IsThrottledMessageSystemReady()
     and (not Auctionator.AH.Queue or not Auctionator.AH.Queue.queue or #Auctionator.AH.Queue.queue == 0)
 end
@@ -19,13 +21,14 @@ function A:Initialize()
   if not Auctionator or not Auctionator.API or not Auctionator.API.v1 or not Auctionator.API.v1.MultiSearch then
     self.error = "Нужен Auctionator 340 с публичным API v1"; return
   end
-  for _, name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","ReplicateItems","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PlaceBid"}) do
+  for _, name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","SearchForItemKeys","RequestMoreBrowseResults","ReplicateItems","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PlaceBid"}) do
     if api[name] then hooksecurefunc(api,name,function()
       if not A.sending then
         A.externalUntil = GetTime() + 3
         if C.db.pending and (C.db.pending.stage == "buying" or C.db.pending.stage == "unknown") then
           C.db.pending.external_conflict = true
-          C:State(C.db.tasks[C.db.pending.task_id],"requires_manual_check","Другая операция AH: автоматическая привязка результата запрещена")
+          if C.db.pending.sniper then C.Sniper:PurchaseUnknown("Другая операция AH: результат нужно уточнить")
+          else C:State(C.db.tasks[C.db.pending.task_id],"requires_manual_check","Другая операция AH: автоматическая привязка результата запрещена") end
         end
         if C.Scanner.active then C.Scanner:Cancel("Пользователь или другой аддон начал операцию AH") end
         if C.db.pending and (C.db.pending.stage == "quoted" or C.db.pending.stage == "await_quote") then C.Execution:Stop() end
@@ -42,6 +45,13 @@ function A:Initialize()
     if full then table.insert(names,self.fullStart); table.insert(names,self.fullEnd); table.insert(names,self.fullFailed) end
     Auctionator.EventBus:Register(self,names)
   end
+end
+function A:LotStillAvailable(lot)
+  if lot.commodity then return true end
+  if not C_AuctionHouse.GetAuctionInfoByID then return false end
+  local live=C_AuctionHouse.GetAuctionInfoByID(lot.auction_id)
+  return live and live.buyoutAmount==lot.cost and live.quantity==lot.quantity and live.containsOwnerItem==false
+    and not live.containsAccountItem and self:KeyEqual(live.itemKey,lot.key)
 end
 function A:ReceiveEvent(event)
   if event == self.startEvent then self.shopping = true
@@ -104,20 +114,43 @@ function A:VendorPrice(row)
 end
 function A:Results(item,key,commodity)
   local rows = {}
+  self.resultDiagnostic={item_id=item,commodity=commodity,at=C:Now()}
+  local get=C_Item and C_Item.GetItemInfo or GetItemInfo
+  local stack
+  if not commodity and type(get)=="function" then stack=select(8,get(item)) end
+  local instant=C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
+  if not commodity and not stack and type(instant)=="function" then
+    local _,_,_,_,_,class=instant(item)
+    if class==1 then stack=1 end -- bags/containers cannot form a physical stack
+  end
   local count = commodity and C_AuctionHouse.GetNumCommoditySearchResults(item) or C_AuctionHouse.GetNumItemSearchResults(key)
   for i=1,count do
     local info = commodity and C_AuctionHouse.GetCommoditySearchResultInfo(item,i) or C_AuctionHouse.GetItemSearchResultInfo(key,i)
     if info then
+      local searchQuantity=info.quantity
+      local auctionID=info.auctionID
+      local live
+      if not commodity and info.auctionID and C_AuctionHouse.GetAuctionInfoByID then
+        live=C_AuctionHouse.GetAuctionInfoByID(info.auctionID)
+        if live and self:KeyEqual(live.itemKey,key) and C:Integer(live.quantity) and C:Integer(live.buyoutAmount) then info=live end
+      end
+      if i==1 then
+        self.resultDiagnostic.search_quantity=searchQuantity; self.resultDiagnostic.lot_quantity=live and live.quantity
+        self.resultDiagnostic.auction_id=info.auctionID or auctionID; self.resultDiagnostic.stack_limit=stack
+      end
+      -- A grouped search count is not the size of an individual auction.
+      local invalidQuantity=not commodity and C:Integer(stack) and C:Integer(info.quantity) and info.quantity>stack
+      if invalidQuantity then self.resultDiagnostic.quantity_warning="Количество поисковой группы не подтверждает размер конкретного лота" end
       local quantity = info.quantity
       local price = commodity and info.unitPrice or info.buyoutAmount
       local owned = commodity and info.numOwnerItems or (info.containsOwnerItem and quantity or 0)
       local known = commodity and type(info.numOwnerItems) == "number" or (not commodity and type(info.containsOwnerItem) == "boolean")
-      if C:Integer(quantity) and C:Integer(price) then
+      if not invalidQuantity and C:Integer(quantity) and C:Integer(price) then
         local available = math.max(0,quantity - (owned or 0))
         table.insert(rows,{item_id=item, item_key=info.itemKey or key, quantity=available,
           unit_price=commodity and price or math.ceil(price/quantity), total_price=commodity and price*available or price,
-          auction_id=info.auctionID, commodity=commodity, owned=(commodity and available==0) or (not commodity and (owned or 0)>0) or info.containsAccountItem == true,
-          ownership_known=known, observed_at=C:Now(), item_link=info.itemLink})
+          auction_id=info.auctionID or auctionID, commodity=commodity, owned=(commodity and available==0) or (not commodity and (owned or 0)>0) or info.containsAccountItem == true,
+          ownership_known=known, observed_at=C:Now(), item_link=info.itemLink, search_quantity=searchQuantity})
       end
     end
   end

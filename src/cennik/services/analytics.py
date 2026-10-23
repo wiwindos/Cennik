@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -52,10 +52,14 @@ def rank(opportunity: Opportunity, context: EvaluationContext) -> Opportunity:
 
 
 class AnalyticsService:
-    def __init__(self, root: Path, registry: StrategyRegistry | None = None):
-        self.root, self.path = root, root / "analytics/ahledger.duckdb"
+    def __init__(self, root: Path, registry: StrategyRegistry | None = None, *,
+                 provider_factory=None, database: Path | None = None,
+                 generation_reader: Callable[[], str] | None = None, store_path: Path | None = None):
+        self.root, self.path = root, database or root / "analytics/ahledger.duckdb"
+        self.provider_factory = provider_factory or DuckDBProvider
+        self.generation_reader = generation_reader
         self.directory = root / "cennik"
-        self.store = Store(self.directory / "cennik.sqlite")
+        self.store = Store(store_path or self.directory / "cennik.sqlite")
         self.registry = registry or default_registry()
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
@@ -68,6 +72,8 @@ class AnalyticsService:
             pass  # A different application instance owns a live manual calculation.
 
     def generation(self, *, refresh: bool = False) -> str:
+        if self.generation_reader is not None:
+            return self.generation_reader()
         if not self.path.is_file():
             raise DataNotReady("Готовая DuckDB отсутствует. Постройте базу существующей кнопкой AHledger.")
         stat = self.path.stat()
@@ -81,7 +87,7 @@ class AnalyticsService:
     def markets(self) -> list[dict]:
         if not self.path.is_file():
             return []
-        with DuckDBProvider(self.path, "", datetime.now(UTC)) as provider:
+        with self.provider_factory(self.path, "", datetime.now(UTC)) as provider:
             return provider.markets()
 
     def update_settings(self, settings: AnalyticsSettings) -> AnalyticsSettings:
@@ -168,7 +174,7 @@ class AnalyticsService:
         performance = self._performance or Performance()
         self._performance = performance
         try:
-            with DuckDBProvider(self.path, run.market, run.as_of) as provider:
+            with self.provider_factory(self.path, run.market, run.as_of) as provider:
                 prices = PriceEngine(provider, run.config, performance.measure)
                 run.diagnostics["quality"] = prices.quality
                 run.diagnostics["observed_items"] = len(prices.current)
@@ -186,7 +192,7 @@ class AnalyticsService:
                         self._rank_candidates(values, strategy, context, unique, run)
                 opportunities = sorted(unique.values(), key=lambda o: (-o.rating, o.id))
             with performance.measure("final_fingerprint"):
-                final_generation = fingerprint(self.path)
+                final_generation = self.generation(refresh=True) if self.generation_reader else fingerprint(self.path)
             if final_generation != run.generation:
                 raise DataNotReady("Поколение DuckDB изменилось во время расчёта; запустите пересчёт вручную.")
             run.status, run.signal_count = "completed", len(opportunities)

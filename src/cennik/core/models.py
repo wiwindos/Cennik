@@ -16,6 +16,8 @@ class AnalyticsConfig(Model):
         default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph"]
     )
     strategy_settings: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
+    history_reference_mode: Literal["local_history", "ahl_median30d"] = "local_history"
+    craft_liquidity_source: Literal["history", "latest_source"] = "history"
     discount_percent: Decimal = Field(default=Decimal("15"), ge=0, le=100)
     auction_cut_percent: Decimal = Field(default=Decimal("5"), ge=0, lt=100)
     history_days: int = Field(default=30, ge=2, le=365)

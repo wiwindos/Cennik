@@ -33,9 +33,9 @@ def lua_literal(value):
 
 
 class Parser:
-    def __init__(self, text: str):
-        if len(text.encode("utf-8")) > 16_000_000:
-            raise ValueError("SavedVariables exceeds 16 MB")
+    def __init__(self, text: str, *, max_bytes: int = 16_000_000):
+        if len(text.encode("utf-8")) > max_bytes:
+            raise ValueError(f"SavedVariables exceeds {max_bytes // 1_000_000} MB")
         self.text, self.pos, self.tokens = text.lstrip("\ufeff"), 0, 0
 
     def whitespace(self):
@@ -150,8 +150,8 @@ class Parser:
         return {"nil": None, "true": True, "false": False}[word]
 
 
-def read_saved_variables(text: str) -> dict:
-    parser = Parser(text)
+def read_saved_variables(text: str, *, max_bytes: int = 16_000_000) -> dict:
+    parser = Parser(text, max_bytes=max_bytes)
     if parser.identifier() != "CennikAddonDB":
         raise ValueError("Expected CennikAddonDB assignment")
     parser.require("=")

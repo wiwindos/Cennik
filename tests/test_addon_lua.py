@@ -447,7 +447,7 @@ def test_local_item_labels_in_history_and_limits_and_recycled_search_button_is_e
     lua.execute('Cennik.UI.limitTask=t.task_id; Cennik.UI.section="Limits"; Cennik.UI:Refresh()')
     assert lua.eval('function() for _,e in ipairs(Cennik.UI.used) do if type(e.widget.text)=="string" and e.widget.text:find("Льняная ткань") then return true end end return false end')()
     lua.execute('Cennik.UI.section="Buy Queue"; Cennik.UI:Refresh(); for _,e in ipairs(Cennik.UI.used) do if e.widget.kind=="Button" then e.widget:Disable() end end; Cennik.UI.section="Opportunities"; Cennik.UI:Refresh()')
-    assert lua.eval('function() for _,e in ipairs(Cennik.UI.used) do if e.widget.text=="Shopping" then return e.widget:IsEnabled() end end return false end')()
+    assert lua.eval('function() for _,e in ipairs(Cennik.UI.used) do if e.widget.text=="Поиск" then return e.widget:IsEnabled() end end return false end')()
 
 
 def test_old_item_load_cannot_restart_search_after_closing_and_reopening_ah(exchange):
@@ -618,7 +618,7 @@ def test_hide_keeps_history_spending_and_survives_reimport_and_restore(exchange)
     assert lua.eval("#Cennik.db.queue") == 0
     assert lua.eval("Cennik.UI.opportunityCount") == 0
     assert not lua.eval("Cennik.BuyQueue:Add(t)")[0]
-    lua.execute('for _,entry in ipairs(Cennik.UI.used) do if entry.widget.text=="Вернуть скрытые" then entry.widget:GetScript("OnClick")(); break end end')
+    lua.execute('Cennik.UI:SelectSection("Hidden"); for _,entry in ipairs(Cennik.UI.used) do if entry.widget.text=="Вернуть" then entry.widget:GetScript("OnClick")(); break end end')
     assert not lua.eval("t.hidden")
     assert lua.eval("t.state") == "pending_scan"
     assert lua.eval("t.spent") == 10
@@ -658,7 +658,7 @@ def test_ambiguous_equipment_blocks_and_shopping_targets_required_material(excha
     assert lua.eval("t.state") == "requires_manual_check"
     assert lua.eval("t.needs_variant_item_id") == 10
     assert lua.eval("t.selected_keys[10]") is None
-    lua.execute('Cennik.UI:Attach(); Cennik.UI.focus=t.task_id; Cennik.UI:Show(); for _,entry in ipairs(Cennik.UI.used) do if entry.widget.text=="Shopping" then entry.widget:GetScript("OnClick")(); break end end')
+    lua.execute('Cennik.UI:Attach(); Cennik.UI.focus=t.task_id; Cennik.UI:Show(); for _,entry in ipairs(Cennik.UI.used) do if entry.widget.text=="Поиск" then entry.widget:GetScript("OnClick")(); break end end')
     assert lua.eval("Game.shopping[1]") == "Item 10"
 
 

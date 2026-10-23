@@ -1,0 +1,507 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from test_addon import exchange as exchange
+from test_addon import exported
+from test_addon_lua import runtime
+from test_cennik import analytics_root as analytics_root
+from test_workspace import workspace as workspace
+
+from cennik.addon.lua_data import lua_literal
+from cennik.workspace.models import MARKET
+from cennik.workspace.sniper import SnipeMaterials, SnipeRule, decode_rules, encode_rules
+
+
+def game(exchange, *, quantity=25, gear=False, bags=False, mode="any"):
+    lua = runtime(exported(exchange))
+    lua.execute("""
+        Cennik.db.workspace_id='test-scope'; Cennik.db.sniper.workspace_id='test-scope'
+        Cennik.db.current_market='forever.pvp.alliance.us'; Cennik.db.binding.market=Cennik.db.current_market
+        C_Item.GetItemCount=function() return Game.stock or 0 end
+        Game.stock=5
+        function GetBuildInfo() return 'fixture','fixture' end
+    """)
+    rule = SnipeRule(id="fixture-rule", item_id=2589, quantity=quantity, use_bags=bags,
+        mode=mode, unit_limit_copper=20 if mode == "limit" else 0,
+        item_level=0 if gear else None, item_suffix=0 if gear else None, pet_id=0 if gear else None)
+    lua.execute("definition="+lua_literal(rule.model_dump(mode="json")))
+    lua.execute("assert(Cennik.Sniper:Add(definition)); r=Cennik.db.sniper.rules[definition.id]; r.enabled=true")
+    lua.execute("Game.commodity[2589]={{quantity=100,unitPrice=10,numOwnerItems=0}}")
+    if gear:
+        lua.execute("""Game.gear[2589]=true
+            Game.items[2589]={{quantity=40,buyoutAmount=400,containsOwnerItem=false,containsAccountItem=false,
+                auctionID=123,itemKey=C_AuctionHouse.MakeItemKey(2589)}}""")
+    return lua
+
+
+def found(lua, gear=False):
+    lua.execute("Cennik.Sniper:Tick(0.1)")
+    lua.execute("Game.event('ITEM_SEARCH_RESULTS_UPDATED',C_AuctionHouse.MakeItemKey(2589))" if gear else
+                "Game.event('COMMODITY_SEARCH_RESULTS_UPDATED',2589)")
+
+
+def test_target_buy_does_not_need_profitable_opportunity_or_published_run(exchange):
+    lua = game(exchange)
+    lua.execute("Cennik.db.current_run=nil")
+    found(lua)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 250
+    assert lua.eval("Game.click(function() return Cennik.Sniper:Buy(r.definition.id) end)") is True
+    assert lua.eval("r.bought") == 0
+    lua.execute("Game.event('COMMODITY_PRICE_UPDATED',10,250)")
+    assert lua.eval("Cennik.db.pending.stage") == "quoted"
+    assert lua.eval("#Game.calls") == 2  # search + initial quote, no automatic confirm
+    lua.execute("Game.click(function() Cennik.Sniper:ConfirmPurchase() end)")
+    lua.execute("Game.event('COMMODITY_PURCHASE_SUCCEEDED',2589)")
+    assert lua.eval("r.bought") == 25
+    assert lua.eval("Cennik.db.sniper.spent") == 250
+    assert not lua.eval("r.enabled")
+    lua.execute("""
+      local history=#Cennik.db.sniper.history
+      local ids={}; for _,event in ipairs(Cennik.db.sniper.events) do ids[#ids+1]=event.id end
+      CennikImport.acknowledged_sniper_event_ids=ids; Cennik.Sniper:Initialize()
+      assert(#Cennik.db.sniper.events==0 and #Cennik.db.sniper.history==history)
+    """)
+
+
+def test_indivisible_overbuy_shows_and_accounts_entire_stack(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 40
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
+    lua.execute("Game.click(function() Cennik.Sniper:Buy(r.definition.id) end); Game.event('AUCTION_HOUSE_PURCHASE_COMPLETED',123)")
+    assert lua.eval("r.bought") == 40
+    assert lua.eval("Cennik.Sniper:Remaining(r)") == 0
+    assert lua.eval("Cennik.db.sniper.spent") == 400
+
+
+def test_once_only_bag_subtraction_and_import_preserve_purchases(exchange):
+    lua = game(exchange, bags=True)
+    assert lua.eval("r.stock") == 5
+    assert lua.eval("r.goal") == 20
+    lua.execute("r.bought=7; Game.stock=999; Cennik.Sniper:Add(definition)")
+    assert lua.eval("r.goal") == 20
+    assert lua.eval("Cennik.Sniper:Remaining(r)") == 13
+    lua.execute("assert(Cennik.Sniper:Apply(assert(Cennik.Sniper:Preview(Cennik.Sniper:Export()))))")
+    assert lua.eval("r.bought") == 7
+    assert not lua.eval("r.enabled")
+
+
+@pytest.mark.parametrize("ownership", ["numOwnerItems=100", "numOwnerItems=nil"])
+def test_own_or_unknown_ownership_never_alerts(exchange, ownership):
+    lua = game(exchange)
+    lua.execute("Game.commodity[2589]={{quantity=100,unitPrice=10,"+ownership+"}}")
+    found(lua)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is None
+
+
+def test_expired_reference_never_substitutes_monthly_median(exchange):
+    lua = game(exchange, mode="median3d")
+    found(lua)
+    assert lua.eval("#Game.calls") == 0
+    lua.execute("r.reference={copper=100,valid_until=Game.now+100}")
+    found(lua)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].limit") == 50
+    lua.execute("r.reference.valid_until=Game.now-1")
+    result = lua.eval("Cennik.Sniper:Buy(r.definition.id)")
+    assert result[0] is False
+
+
+def test_purchase_unknown_blocks_duplicate_and_can_be_reconciled(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("Game.click(function() Cennik.Sniper:Buy(r.definition.id) end); Cennik:Initialize()")
+    assert lua.eval("Cennik.db.pending.stage") == "unknown"
+    assert lua.eval("r.bought") == 0
+    result = lua.eval("Cennik.Sniper:Buy(r.definition.id)")
+    assert result[0] is False
+    lua.execute("assert(Cennik.Execution:Reconcile(true,40,400))")
+    assert lua.eval("r.bought") == 40
+    assert lua.eval("Cennik.db.pending") is None
+
+
+def test_old_budget_does_not_block_findings_but_changed_auction_is_blocked(exchange):
+    lua = game(exchange, gear=True)
+    lua.execute("Cennik.db.sniper.budget_copper=250")
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
+    lua.execute("Cennik.db.sniper.budget_copper=1000; r.checked_at=nil; Game.advance(2)")
+    found(lua, gear=True)
+    lua.execute("Game.items[2589][1].buyoutAmount=500")
+    result = lua.eval("Game.click(function() return Cennik.Sniper:Buy(r.definition.id) end)")
+    assert result is False
+
+
+def test_all_rpc_traffic_consumes_background_allowance(exchange):
+    lua = game(exchange)
+    lua.execute("for i=1,48 do C_AuctionHouse.SendSearchQuery(C_AuctionHouse.MakeItemKey(2589),{},true) end; Game.advance(4); Cennik.Sniper:Tick(0.1)")
+    assert lua.eval("#Game.calls") == 48
+    lua.execute("Game.advance(61); Cennik.Sniper:Tick(0.1)")
+    assert lua.eval("#Game.calls") == 49
+
+
+def test_priorities_do_not_starve_low_priority(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      for _,entry in ipairs({{'high',2590},{'low',2591}}) do
+        local d=Cennik:Clone(definition); d.id=entry[1]; d.item_id=entry[2]; d.priority=entry[1]
+        assert(Cennik.Sniper:Add(d)); Cennik.db.sniper.rules[d.id].enabled=true
+      end
+      counts={}; for i=1,30 do local choice=Cennik.Sniper:Choose(); counts[choice.definition.id]=(counts[choice.definition.id] or 0)+1; choice.checked_at=GetTime(); Game.advance(1) end
+    """)
+    assert lua.eval("counts.high") > lua.eval("counts.low") > 0
+
+
+def test_batch_discovery_uses_one_query_for_multiple_nonmatching_keys(exchange):
+    lua = game(exchange, mode="limit")
+    lua.execute("""
+      C_AuctionHouse.SearchForItemKeys=function(keys) Game.batchKeys=keys; table.insert(Game.calls,{kind='keys'}) end
+      C_AuctionHouse.GetBrowseResults=function() return {} end
+      C_AuctionHouse.HasFullBrowseResults=function() return true end
+      r.keys={C_AuctionHouse.MakeItemKey(2589)}
+      local d=Cennik:Clone(definition); d.id='other'; d.item_id=2592
+      assert(Cennik.Sniper:Add(d)); local other=Cennik.db.sniper.rules.other; other.enabled=true; other.keys={C_AuctionHouse.MakeItemKey(2592)}
+      Cennik.Sniper:Tick(0.1); Game.event('AUCTION_HOUSE_BROWSE_RESULTS_UPDATED')
+    """)
+    assert lua.eval("#Game.batchKeys") == 2
+    assert lua.eval("#Game.calls") == 1
+    assert lua.eval("Cennik.Sniper.current") is None
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is None
+
+
+def test_python_lua_portable_round_trip_and_no_executable_import(exchange):
+    lua = game(exchange)
+    rules = [SnipeRule(id="foreign-rule", item_id=5763, quantity=40, mode="limit", unit_limit_copper=12345)]
+    text = encode_rules(rules, 500000)
+    lua.globals().portable = text
+    lua.execute("assert(Cennik.Sniper:Apply(assert(Cennik.Sniper:Preview(portable))))")
+    budget, imported = decode_rules(lua.eval("Cennik.Sniper:Export()"))
+    assert budget == 500000
+    assert rules[0] in imported
+    assert lua.eval("Cennik.Sniper:Preview('return os.execute(1)')")[0] is None
+    with pytest.raises(ValueError):
+        decode_rules(text.replace(MARKET, "forever.pvp.horde.us"))
+
+
+def test_reference_three_completed_days_equal_weights_and_no_future_points(workspace):
+    rule = SnipeRule(item_id=2589, mode="median3d")
+    workspace.sniper.save(rule)
+    end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = []
+    for day, value, repeats in [(3, 80000, 20), (2, 100000, 1), (1, 120000, 1), (0, 1, 10)]:
+        for index in range(repeats):
+            rows.append({"item_id": 2589, "market": MARKET, "observed_at": (end-timedelta(days=day)+timedelta(minutes=index)).isoformat(),
+                "median_copper": value, "granularity": "hour", "range": "7d", "raw_id": "fixture", "retrieved_at": end.isoformat()})
+    workspace.market.insert_rows("price_history_ranges", rows)
+    result = workspace.sniper.reference(rule.id)
+    assert result["copper"] == 100000
+    assert result["days"] == 3
+
+
+def test_game_rule_reports_idempotent_and_web_changes_win_conflict(workspace):
+    rule = SnipeRule(item_id=2589)
+    event = {"id": "fixture:snipe:1", "kind": "rule_update", "rule": rule.model_dump(mode="json")}
+    data = {"workspace_id": workspace.identity, "events": [event]}
+    assert workspace.sniper.accept_game(data) == [event["id"]]
+    revision = workspace.sniper.listing()["revision"]
+    workspace.sniper.accept_game(data)
+    assert workspace.sniper.listing()["revision"] == revision
+    workspace.sniper.save(rule.model_copy(update={"quantity": 100}))
+    data["events"] = [{**event, "id": "fixture:snipe:2", "base_revision": revision}]
+    workspace.sniper.accept_game(data)
+    assert workspace.sniper.listing()["rules"][0]["quantity"] == 100
+    assert workspace.sniper.listing()["reports"][0]["conflict"]
+
+
+def test_game_import_rejects_entire_merge_when_existing_identity_changes(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      local added=Cennik:Clone(definition); added.id='new'; added.item_id=2592
+      local invalid=Cennik:Clone(definition); invalid.item_id=5763
+      local before=#Cennik.db.sniper.events
+      local ok=Cennik.Sniper:Apply({budget=999,rules={added,invalid}})
+      assert(not ok and Cennik.db.sniper.rules.new==nil)
+      assert(#Cennik.db.sniper.events==before and r.definition.item_id==2589)
+    """)
+
+
+def test_web_import_is_atomic_and_identity_cannot_reuse_purchase_counts(workspace):
+    old = SnipeRule(id="old", item_id=2589)
+    workspace.sniper.save(old)
+    text = encode_rules([SnipeRule(id="new", item_id=2592), old.model_copy(update={"item_id": 5763})], 999)
+    with pytest.raises(ValueError, match="создайте новую"):
+        workspace.sniper.apply(text)
+    assert workspace.sniper.wire()["rules"] == [old.model_dump(mode="json")]
+
+
+def test_paused_goal_ignores_late_results_and_full_stack_cost_is_not_unit_price(exchange):
+    lua = game(exchange)
+    lua.execute("Cennik.Sniper:Tick(0.1); r.enabled=false")
+    lua.execute("Game.event('COMMODITY_SEARCH_RESULTS_UPDATED',2589)")
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is None
+
+
+def test_commodity_requote_above_limit_never_buys_and_partial_fill_counts_once(exchange):
+    lua = game(exchange, mode="limit")
+    lua.execute("Game.commodity[2589][1].quantity=7")
+    found(lua)
+    lua.execute("Game.click(function() Cennik.Sniper:Buy(r.definition.id) end)")
+    lua.execute("Game.event('COMMODITY_PRICE_UPDATED',25,175)")
+    assert lua.eval("r.bought") == 0
+    assert lua.eval("Cennik.db.pending") is None
+    lua.execute("Game.advance(2)")
+    found(lua)
+    lua.execute("Game.click(function() Cennik.Sniper:Buy(r.definition.id) end); Game.event('COMMODITY_PRICE_UPDATED',10,70)")
+    lua.execute("Game.click(function() Cennik.Execution:Confirm() end); Game.event('COMMODITY_PURCHASE_SUCCEEDED',2589); Game.event('COMMODITY_PURCHASE_SUCCEEDED',2589)")
+    assert lua.eval("r.bought") == 7
+    assert lua.eval("Cennik.Sniper:Remaining(r)") == 18
+    assert lua.eval("Cennik.db.sniper.spent") == 70
+
+
+def test_game_sniper_panel_switches_tabs_and_prefilled_material_creates_new_goal(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI:Show(); Cennik.UI:SelectSection('Sniper'); Game.advance(0)
+      assert(#Cennik.UI.sniperRows==1)
+      Cennik.UI:SelectSection('History'); Cennik.UI:SelectSection('Sniper'); Game.advance(0)
+      assert(Cennik.UI.sniperRows[1].font:IsVisible())
+      Cennik.Sniper:ShowEditor(2592,nil,{item_id=2592,quantity=17,mode='any',priority='normal',discount_bps=5000,unit_limit_copper=0,use_bags=true})
+      local p=Cennik.Sniper.editor
+      for _,frame in ipairs(Game.frames) do
+        if frame.parent==p and frame.text=='Сохранить цель' then frame.scripts.OnClick(frame); break end
+      end
+      local count=0
+      for _,rule in ipairs(Cennik.Sniper:Rules()) do
+        count=count+1
+        if rule.definition.item_id==2592 then assert(rule.definition.quantity==17 and rule.stock==5 and rule.goal==12 and not rule.enabled) end
+      end
+      assert(count==2)
+    """)
+
+
+def test_own_three_day_reference_uses_archive_and_preserves_old_scans(workspace):
+    from test_workspace import scan
+
+    end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    for index in (1, 2, 3):
+        data = scan(offset=index)
+        data["observed_at"] = int((end-timedelta(days=index)+timedelta(hours=12)).timestamp())
+        workspace.market.import_scan(data)
+    rule = SnipeRule(item_id=2589, mode="median3d")
+    workspace.sniper.save(rule)
+    result = workspace.sniper.reference(rule.id)
+    assert result["source"] == "Cennik replicate"
+    assert result["copper"] == 10
+    assert len(workspace.market.rows("SELECT * FROM scan_registry")) == 3
+
+
+def test_zero_money_never_blocks_finding_and_blocked_purchase_keeps_alert(exchange):
+    lua = game(exchange)
+    lua.execute("Game.money=0; Cennik.db.sniper.budget_copper=1")
+    found(lua)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 250
+    assert "недостаточно золота" in lua.eval("r.reason")
+    assert lua.eval("Cennik.Sniper:Buy(r.definition.id)")[0] is False
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is not None
+    assert lua.eval("Cennik.db.pending") is None
+    lua.execute("Game.money=1000; Game.click(function() assert(Cennik.Sniper:Buy(r.definition.id)) end)")
+    assert lua.eval("Cennik.db.pending.stage") == "await_quote"
+
+
+def test_command_selects_sniper_after_tab_onshow_and_accepts_whitespace(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI.section='History'
+      Cennik.UI.frame:SetScript('OnShow',function() Cennik.UI.section='Opportunities' end)
+      SlashCmdList.CENNIK('  SniPer  '); Game.advance(0)
+      assert(Cennik.UI.section=='Sniper' and Cennik.UI.frame:IsVisible())
+    """)
+
+
+def test_delete_hidden_keeps_audit_and_import_cannot_resurrect_deleted_task(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      assert(not Cennik:DeleteHiddenTask(t)); assert(Cennik:HideTask(t))
+      local count=#Cennik.db.history; assert(Cennik:DeleteHiddenTask(t))
+      assert(Cennik.db.tasks[t.task_id]==nil and #Cennik.db.history>count)
+      Cennik:Import(); assert(Cennik.db.tasks[t.task_id]==nil)
+      assert(Cennik.db.history[#Cennik.db.history].item_id==t.item_id)
+    """)
+
+
+def test_manual_other_character_purchase_preserves_unknown_cost(exchange):
+    lua = game(exchange)
+    lua.execute("assert(Cennik.Sniper:MarkBought(r.definition.id,7))")
+    assert lua.eval("Cennik.Sniper:Remaining(r)") == 18
+    assert lua.eval("r.spent") == 0
+    assert lua.eval("Cennik.db.sniper.events[#Cennik.db.sniper.events].cost_unknown")
+    assert not lua.eval("Cennik.Sniper:MarkBought(r.definition.id,19)")[0]
+    lua.execute("Cennik.Sniper:ShowHistory()")
+
+
+def test_explicit_method_controls_and_recipe_bulk_keep_direct_reagents(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      CennikImport.sniper_catalog={workspace_id='test-scope',items={{item_id=2592,name='Material'},{item_id=2321,name='Thread',vendor_buy_copper=50}},
+        recipes={{spell_id=100,version_hash='latest',item_id=5763,qty_min=1,qty_max=1,profession='Tailoring',materials={{item_id=2592,quantity=3},{item_id=2321,quantity=1}}}}}
+      Cennik.Sniper:ShowEditor(5763); local editor=Cennik.Sniper.editor
+      assert(not editor.priceInput:IsShown())
+      editor.modeButtons.limit.scripts.OnClick(); assert(editor.priceInput:IsShown())
+      editor.priceInput:SetText('0.125'); editor.modeButtons.median3d.scripts.OnClick()
+      assert(editor.priceInput:GetText()=='50'); editor.modeButtons.any.scripts.OnClick()
+      assert(not editor.priceInput:IsShown())
+      Cennik.Sniper:ShowCard(5763)
+      Cennik.Sniper:ShowMaterialPreview(Cennik.Sniper:Recipes(5763)[1],4)
+      for _,frame in ipairs(Game.frames) do if frame.parent==Cennik.Sniper.materialPreview and frame.text=='Добавить материалы' then frame.scripts.OnClick(); break end end
+      local found=0
+      for _,rule in ipairs(Cennik.Sniper:Rules()) do
+        assert(rule.definition.item_id~=2321)
+        if rule.definition.item_id==2592 then found=found+1; assert(rule.definition.quantity==12 and not rule.enabled) end
+      end
+      assert(found==1)
+    """)
+
+
+def test_name_lookup_and_auctionator_selection_open_ready_item_without_changing_auctionator(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      CennikImport.sniper_catalog={workspace_id='test-scope',items={{item_id=5763,name='Red Woolen Bag'}},recipes={}}
+      local selected
+      local original=C_Item.GetItemInfo
+      C_Item.GetItemInfo=function(value) assert(type(value)~='number','Name search must not request every item'); return original(value) end
+      assert(Cennik.Sniper:Lookup('Woolen',function(rows) selected=rows[1].item_id end)); assert(selected==5763)
+      C_Item.GetItemInfo=original
+      Auctionator.Buying={Events={ShowItemBuy='item buy',ShowCommodityBuy='commodity buy'}}
+      Cennik.Sniper:InstallAuctionatorButtons()
+      Cennik.Sniper.auctionatorListener:ReceiveEvent('item buy',{itemKey=C_AuctionHouse.MakeItemKey(5763)})
+      assert(Cennik.Sniper.auctionatorShortcut:IsVisible())
+      for _,frame in ipairs(Game.frames) do if frame.parent==Cennik.Sniper.auctionatorShortcut and frame.text=='В снайпер' then frame.scripts.OnClick(); break end end
+      assert(Cennik.Sniper.editor.itemEntry:GetText()=='5763')
+    """)
+
+
+def seed_recipe(workspace):
+    import json
+
+    from test_cennik import insert
+
+    db = workspace.market.db
+    for item, name, npc in [(5763, "Fixture bag", None), (2592, "Fixture cloth", None), (2321, "Fixture thread", 50)]:
+        insert(db, "items", item_id=item, name=name, vendor_buy_copper=npc)
+    for version, quantity, hours in [("old", 30, 2), ("latest", 3, 1)]:
+        at = datetime.now(UTC)-timedelta(hours=hours)
+        raw = "recipe-"+version
+        insert(db, "recipes", spell_id=100, version_hash=version, result_item_id=5763, qty_min=1, qty_max=1,
+            profession="Tailoring", raw_id=raw, retrieved_at=at,
+            payload_json=json.dumps({"reagents": [{"id": 2592, "qty": quantity}, {"id": 2321, "qty": 1}]}))
+        insert(db, "recipe_inputs", spell_id=100, version_hash=version, item_id=2592, quantity=quantity)
+        insert(db, "recipe_inputs", spell_id=100, version_hash=version, item_id=2321, quantity=1)
+        insert(db, "dataset_metadata", raw_id=raw, dataset="crafting", market=MARKET, status="COMPLETE", retrieved_at=at)
+
+
+def test_catalog_only_current_recipe_and_bulk_does_not_expand_or_add_npc(workspace):
+    seed_recipe(workspace)
+    recipes = workspace.sniper.recipes_for(5763)
+    assert [r["version_hash"] for r in recipes] == ["latest"]
+    request = SnipeMaterials(item_id=5763, spell_id=100, version_hash="latest", batches=4)
+    preview = workspace.sniper.material_preview(request)
+    lines = {r["item_id"]: r for r in preview["lines"]}
+    assert lines[2592]["quantity"] == 12
+    assert lines[2321]["npc"]
+    workspace.sniper.add_materials(request)
+    rules = workspace.sniper.wire()["rules"]
+    assert len(rules) == 1 and rules[0]["item_id"] == 2592 and rules[0]["quantity"] == 12
+    with pytest.raises(ValueError, match="Действующий рецепт"):
+        workspace.sniper.add_materials(request.model_copy(update={"version_hash": "old"}))
+
+
+def test_shift_link_only_fills_focused_sniper_editor_and_keeps_original_handler(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      HandleModifiedItemClick=function(link) Game.linkCalls=(Game.linkCalls or 0)+1 end
+      IsShiftKeyDown=function() return true end
+      Cennik.Sniper:ShowEditor(5763)
+      HandleModifiedItemClick('|Hitem:2592|h[Cloth]|h')
+      assert(Cennik.Sniper.editor.itemEntry:GetText()=='|Hitem:2592|h[Cloth]|h')
+      Cennik.Sniper.editor.itemEntry:ClearFocus()
+      HandleModifiedItemClick('|Hitem:2321|h[Thread]|h')
+      assert(Cennik.Sniper.editor.itemEntry:GetText()=='|Hitem:2592|h[Cloth]|h' and Game.linkCalls==2)
+    """)
+
+
+def test_recipe_request_outbox_is_idempotent_and_explicit(workspace):
+    event = {"id": "fixture:recipe:1", "kind": "recipe_request", "item_id": 5763}
+    data = {"workspace_id": workspace.identity, "events": [event]}
+    workspace.sniper.accept_game(data)
+    workspace.sniper.accept_game(data)
+    assert workspace.sniper.pending_recipe_requests() == [event["id"]]
+    workspace.sniper.complete_recipe_requests([event["id"]])
+    workspace.sniper.accept_game(data)
+    assert not workspace.sniper.pending_recipe_requests()
+
+
+def test_group_of_twelve_single_bags_uses_actual_auction_quantity_not_search_count(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("""
+      C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end
+      Game.items[2589][1].quantity=12
+      C_AuctionHouse.GetAuctionInfoByID=function(id) return {auctionID=id,itemKey=C_AuctionHouse.MakeItemKey(2589),quantity=1,buyoutAmount=400,containsOwnerItem=false,containsAccountItem=false} end
+    """)
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].quantity") == 1
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id].cost") == 400
+    assert lua.eval("r.last_result.search_quantity") == 12
+    assert lua.eval("Cennik.Sniper.overlay.buy:GetText()") == "Купить 1 шт."
+
+
+def test_unconfirmed_group_cannot_be_misrepresented_as_nonstackable_lot(exchange):
+    lua = game(exchange, quantity=1, gear=True)
+    lua.execute("C_Item.GetItemInfoInstant=function(id) return id,'Container','Bag','',1,1 end; Game.items[2589][1].quantity=12")
+    found(lua, gear=True)
+    assert lua.eval("Cennik.Sniper.alerts[r.definition.id]") is None
+    assert "поисковой группы" in lua.eval("r.reason")
+    assert not lua.eval("Cennik.Sniper.overlay.buy:IsEnabled()")
+
+
+def test_findings_keep_selection_content_and_action_during_refresh(exchange):
+    lua = game(exchange, quantity=1)
+    found(lua)
+    lua.execute("""
+      local def=Cennik.Sniper:NewDefinition(2592,1); assert(Cennik.Sniper:Add(def))
+      other=Cennik.db.sniper.rules[def.id]; other.enabled=true
+      Cennik.Sniper:AcceptRows(other,{{item_id=2592,item_key=C_AuctionHouse.MakeItemKey(2592),commodity=true,quantity=5,unit_price=25,total_price=125,ownership_known=true,owned=false}})
+      assert(Cennik.Sniper.selected==r.definition.id)
+      Cennik.Sniper:BeginDetail(r,C_AuctionHouse.MakeItemKey(2589)); Cennik.Sniper:RenderOverlay()
+      assert(Cennik.Sniper.overlay.buy:IsEnabled() and Cennik.Sniper.overlay.buy:GetText()=='Купить 1 шт.')
+      assert(Cennik.Sniper.overlay.content:GetText():find('Обновляю проверку',1,true))
+      Cennik.Sniper.overlay.rows[2].scripts.OnClick()
+      assert(Cennik.Sniper.selected==other.definition.id)
+      Cennik.Sniper:AcceptRows(other,{})
+      assert(Cennik.Sniper.selected==other.definition.id)
+      assert(Cennik.Sniper.overlay.content:GetText():find('Предложение больше не доступно',1,true))
+    """)
+
+
+def test_popup_background_close_buttons_and_manual_reopen_do_not_stop_search(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      Cennik.Sniper:ShowEditor(5763); Cennik.Sniper:ShowCard(5763); Cennik.Sniper:ShowTransfer(); Cennik.Sniper:ShowHistory()
+      for p in pairs(Cennik.Sniper.popupFrames) do
+        assert(p.cennikBackground.color[4]==1 and p.cennikClose)
+        p.cennikClose.scripts.OnClick(); assert(not p:IsShown())
+      end
+      assert(r.enabled)
+      Cennik.Sniper:RenderOverlay(); assert(not Cennik.Sniper.overlay:IsShown())
+      Cennik.Sniper:ShowFindings(); assert(Cennik.Sniper.overlay:IsShown() and r.enabled)
+    """)
+
+
+def test_shortcut_hides_on_cennik_and_native_auction_tab_changes(exchange):
+    lua = game(exchange)
+    lua.execute("""
+      Cennik.UI:Attach()
+      Cennik.Sniper:ShowAuctionatorShortcut(5763); assert(Cennik.Sniper.auctionatorShortcut:IsShown())
+      Cennik.UI:SelectSection('History'); assert(not Cennik.Sniper.auctionatorShortcut:IsShown())
+      Cennik.Sniper:ShowAuctionatorShortcut(5763)
+      AuctionHouseFrame:SetDisplayMode('sell'); assert(not Cennik.Sniper.auctionatorShortcut:IsShown())
+    """)

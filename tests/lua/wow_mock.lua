@@ -59,10 +59,15 @@ function CreateFrame(kind,name,parent,template)
     UpdateScrollChildRect=function(self) self.rectUpdates=(rawget(self,"rectUpdates") or 0)+1 end,
     SetText=function(self,v) self.text=v end,GetText=function(self) return self.text or "" end,
     SetChecked=function(self,v) self.checked=v end,GetChecked=function(self) return self.checked end,
+    SetFocus=function(self) Game.focused=self end,ClearFocus=function(self) if Game.focused==self then Game.focused=nil end end,
+    HasFocus=function(self) return Game.focused==self end,
     Enable=function(self) self.enabled=true end,Disable=function(self) self.enabled=false end,
     SetEnabled=function(self,v) self.enabled=not not v end,IsEnabled=function(self) return self.enabled~=false end,
     SetParent=function(self,v) self.parent=v end,IsObjectType=function() return true end,
-    CreateFontString=function(self) return CreateFrame("FontString",nil,self) end,GetChildren=function() end,GetRegions=function() end}
+    CreateFontString=function(self) return CreateFrame("FontString",nil,self) end,
+    CreateTexture=function(self) return CreateFrame("Texture",nil,self) end,
+    SetColorTexture=function(self,r,g,b,a) self.color={r,g,b,a} end,
+    GetChildren=function() end,GetRegions=function() end}
   setmetatable(f,{__index=function(_,key) return methods[key] or noop end})
   return f
 end
@@ -83,6 +88,7 @@ Auctionator={API={v1={
   Shopping={Tab={Events={SearchStart="start",SearchEnd="end"}}},FullScan={Events={ScanStart="fullstart",ScanComplete="fullend",ScanFailed="fullfailed"}},
   EventBus={Register=noop}}
 function hooksecurefunc(table,name,hook)
+  if type(table)=="string" then hook=name; name=table; table=_G end
   local original=table[name]
   table[name]=function(...) local result=original(...); hook(...); return result end
 end

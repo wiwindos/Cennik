@@ -79,6 +79,7 @@ function U:QueueRefresh()
   end)
 end
 function U:SelectSection(section)
+  if C.Sniper and C.Sniper.ClosePopups then C.Sniper:ClosePopups() end
   self.section=section; self.resetScroll=true
   self:Refresh(); self:QueueRefresh()
 end
@@ -88,6 +89,7 @@ function U:BindingStatus()
   return (C:MarketBindingMatches(C.db.current_market) and "Рынок подтверждён: " or "Подтвердите рынок для: ") .. character
 end
 function U:Attach()
+  if C.Sniper and C.Sniper.WatchAuctionTabs then C.Sniper:WatchAuctionTabs() end
   if self.frame then self:Refresh(); return end
   local lib=LibStub and LibStub("LibAHTab-1-0",true)
   if C.Adapter.error or not lib then print("Cennik: " .. (C.Adapter.error or "Auctionator не загрузил LibAHTab")); return end
@@ -98,11 +100,11 @@ function U:Attach()
   self.noticeNote=frame:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); self.noticeNote:SetPoint("TOPLEFT",0,-38); self.noticeNote:SetWidth(660)
   self.tabs={}
   for i,name in ipairs({"Opportunities","Buy Queue","History"}) do
-    local b=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); b:SetSize(130,24); b:SetPoint("TOPLEFT",(i-1)*135,-62); b:SetText(name)
+    local b=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); b:SetSize(i==3 and 90 or 125,24); b:SetPoint("TOPLEFT",(i-1)*130,-62); b:SetText(({Opportunities="Возможности",["Buy Queue"]="Очередь покупок",History="История"})[name])
     self.tabs[name]=b
     b:SetScript("OnClick",function() U:SelectSection(name) end)
   end
-  local bind=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); bind:SetSize(185,24); bind:SetPoint("TOPLEFT",410,-62); bind:SetText("Подтвердить рынок")
+  local bind=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); bind:SetSize(150,24); bind:SetPoint("TOPLEFT",355,-62); bind:SetText("Подтвердить рынок")
   self.bindButton=bind
   bind:SetScript("OnClick",function()
     local ok,reason=C:BindMarket(C.db.current_market)
@@ -110,6 +112,12 @@ function U:Attach()
     U:Refresh()
     if not ok then print("Cennik: " .. reason) end
   end)
+  local market=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+  market:SetSize(75,24); market:SetPoint("TOPLEFT",510,-62); market:SetText("Рынок")
+  market:SetScript("OnClick",function() U:SelectSection("Market") end)
+  local sniper=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+  sniper:SetSize(90,24); sniper:SetPoint("TOPLEFT",590,-62); sniper:SetText("Снайпер")
+  sniper:SetScript("OnClick",function() U:SelectSection("Sniper") end)
   self.body=CreateFrame("Frame",nil,frame); self.body:SetPoint("TOPLEFT",0,-100); self.body:SetSize(670,375)
   self.body:SetClipsChildren(true)
   frame:SetScript("OnShow",function() U.resetScroll=true; U:Refresh(); U:QueueRefresh() end)
@@ -142,7 +150,8 @@ function U:Details(task)
   table.insert(text,"Оценка спроса не подтверждает сделки и не гарантирует быструю продажу.")
   local liquidity=o.details.liquidity
   if liquidity and liquidity.enabled then
-    table.insert(text,"Фильтр ликвидности: пройден при расчёте; минимум " .. tostring(liquidity.conservative_sales_per_day) .. "/сутки; дней " .. tostring(liquidity.covered_days) .. "/" .. tostring(liquidity.window_days) .. "; предложение/продажи " .. tostring(liquidity.supply_to_daily_sales) .. " (не срок продажи)")
+    local basis=liquidity.method=="latest_source" and "последняя оценка источника" or ("история: дней " .. tostring(liquidity.covered_days) .. "/" .. tostring(liquidity.window_days))
+    table.insert(text,"Фильтр ликвидности: пройден при расчёте; " .. basis .. "; оценка " .. tostring(liquidity.conservative_sales_per_day) .. "/сутки; предложение/продажи " .. tostring(liquidity.supply_to_daily_sales) .. " (не срок продажи)")
   end
   table.insert(text,"Покупки / NPC:")
   local recipe=o.details.recipe
@@ -224,16 +233,7 @@ function U:Opportunities()
     end
     nextTask()
   end)
-  button(self.body,"Вернуть скрытые",185,0,145,function()
-    if C.db.pending then U.notice="Сначала завершите покупку"; U:Refresh(); return end
-    for _,task in pairs(C.db.tasks) do
-      if task.hidden and task.market==C.db.current_market and task.run_id==C.db.current_run then
-        task.hidden=nil; task.validation=nil
-        C:State(task,"pending_scan","Задание возвращено игроком; повторите проверку")
-      end
-    end
-    U:Refresh()
-  end)
+  button(self.body,"Скрытые задания",185,0,145,function() U:SelectSection("Hidden") end)
   local rows={}
   for _, task in pairs(C.db.tasks) do
     if not task.hidden and task.market==C.db.current_market and task.run_id==C.db.current_run then table.insert(rows,task) end
@@ -252,7 +252,12 @@ function U:Opportunities()
     check:SetScript("OnClick",function() U.selected[task.task_id]=check:GetChecked() or nil end)
     local live=U:Live(task)
     local row=button(list,C.Items:Label(task.item_id) .. " | " .. (strategies[task.strategy_id] or task.strategy_id) .. " | " .. (live and money(live.profit_copper) or "нет текущей оценки") .. " | " .. (states[task.state] or task.state),
-      32,-(index-1)*28,585,function() U.focus=task.task_id; U:Refresh() end)
+      32,-(index-1)*28,502,function() U.focus=task.task_id; U:Refresh() end)
+    button(list,"Скрыть",540,-(index-1)*28,85,function()
+      local ok,reason=C:HideTask(task)
+      if ok then U.selected[task.task_id]=nil; if U.focus==task.task_id then U.focus=nil end end
+      U.notice=ok and "Задание перенесено в скрытые" or reason; U:Refresh()
+    end)
     self.opportunityRows[#self.opportunityRows+1]=row
     row:SetScript("OnEnter",function(self)
       local info=C.Items:Get(task.item_id)
@@ -267,14 +272,14 @@ function U:Opportunities()
   if task then
     button(self.body,"Проверить",0,-actionY,110,function() C.Scanner:Start(task) end)
     button(self.body,"В очередь",115,-actionY,110,function() local _,reason=C.BuyQueue:Add(task); if reason then U.notice=reason; U:Refresh() end end)
-    button(self.body,"Shopping",230,-actionY,110,function()
+    button(self.body,"Поиск",230,-actionY,110,function()
       local ok,reason=C.Adapter:Shopping(task.needs_variant_item_id or task.item_id)
       if not ok then U.notice=reason; U:Refresh() end
     end)
     button(self.body,"Выбрать вариант",345,-actionY,155,function()
       local key=C.lastSelectedKey
       if C.db.pending then U.notice="Сначала завершите или уточните результат предыдущей покупки"; U:Refresh(); return end
-      if not key then U.notice="Сначала откройте предложения нужного предмета в Shopping"; U:Refresh(); return end
+      if not key then U.notice="Сначала откройте предложения нужного предмета в поиске Auctionator"; U:Refresh(); return end
       local permitted=key.itemID==task.item_id
       for _, line in ipairs(task.lines) do if line.source=="auction" and line.item_id==key.itemID then permitted=true end end
       if not permitted then U.notice="Выбран другой предмет (#" .. tostring(key.itemID) .. "); его нет в этом задании"; U:Refresh(); return end
@@ -297,11 +302,12 @@ function U:Opportunities()
       if C.db.pending or not U:Live(task) then U.notice="Сначала выполните полную свежую проверку"; U:Refresh(); return end
       U.limitTask=task.task_id; U.limitUseCurrent=true; U.limitDraft=nil; U.section="Limits"; U:Refresh()
     end)
+    button(self.body,"Предмет / снайпер / рецепт",0,-actionY-62,310,function() C.Sniper:ShowCard(task.item_id) end)
     local limits=button(self.body,"Цены / лимиты",505,-actionY,120,function()
       U.limitTask=task.task_id; U.limitUseCurrent=false; U.limitDraft=nil; U.section="Limits"; U:Refresh()
     end)
     limits:SetEnabled(not C.db.pending)
-    self:Text(self:Details(task),0,-actionY-66,625,math.max(40,self.body:GetHeight()-actionY-78))
+    self:Text(self:Details(task),0,-actionY-92,625,math.max(40,self.body:GetHeight()-actionY-104))
   else label(self.body,"Выберите задание. Пакеты загружаются через Bridge и /reload.",0,-165) end
 end
 function U:Queue()
@@ -336,7 +342,7 @@ function U:Queue()
     label(self.body,"Разрешаю лишний полный стек",380,-151,270)
     overflow:SetScript("OnClick",function() if not C.db.pending then task.allow_overbuy=overflow:GetChecked(); C.BuyQueue.ticket=nil; C:Emit(task,"limit_change","overbuy_changed",{allowed=task.allow_overbuy}); U:Refresh() end end)
     self:Text(self:Details(task),0,-184,625,math.max(40,self.body:GetHeight()-196))
-  else label(self.body,"Очередь пустая. Добавьте проверенное задание из Opportunities.",0,-130) end
+  else label(self.body,"Очередь пустая. Добавьте проверенное задание из «Возможностей».",0,-130) end
 end
 function U:Limits()
   local task=C.db.tasks[self.limitTask]
@@ -427,7 +433,26 @@ function U:Render()
   self.bindingNote:SetTextColor(bound and 0.3 or 1,bound and 1 or 0.82,bound and 0.3 or 0)
   self.bindButton:SetText(bound and "Рынок подтверждён" or "Подтвердить рынок")
   self.noticeNote:SetText(self.notice or "")
-  if self.section=="History" then
+  if self.section=="Sniper" and self.SniperPanel then self:SniperPanel()
+  elseif self.section=="Hidden" then self:HiddenTasks()
+  elseif self.section=="Market" and C.MarketCollector then
+    local collector=C.MarketCollector
+    label(self.body,"Массовый скан через Auctionator; снимки хранятся постоянно в локальном Cennik",0,0,625)
+    button(self.body,"Сканировать сейчас",0,-34,180,function() collector:Start(); U:Refresh() end)
+    button(self.body,C.db.collector.enabled and "Автосбор: включён" or "Автосбор: выключен",190,-34,200,function()
+      C.db.collector.enabled=not C.db.collector.enabled; U:Refresh()
+    end)
+    button(self.body,"Записать / reload",400,-34,180,function()
+      if collector.packing or collector.requested_at then
+        collector:Notice("Дождитесь сообщения «Полный снимок готов». Reload сейчас прервёт получение данных")
+        U:Refresh()
+      else ReloadUI() end
+    end)
+    self:Text((collector.message or "Ожидание") .. "\n\nВ очереди: " .. #(C.db.market_scans or {}) .. "/" .. collector.maxQueue ..
+      "\nСледующий запрос не ранее: " .. date("%H:%M:%S",C.db.collector.next_at or 0) ..
+      "\n\nПосле /reload дождитесь импорта в вебе. Ещё один /reload загрузит подтверждение архива и освободит очередь." ..
+      "\nЗаполнение очереди приостанавливает новые запросы, старые снимки не удаляются.",0,-75,625,self.body:GetHeight()-80)
+  elseif self.section=="History" then
     local lines={"Запись команды не доказывает покупку. Синхронизация отчётов после /reload."}
     for index=#C.db.history,math.max(1,#C.db.history-150),-1 do
       local e=C.db.history[index]

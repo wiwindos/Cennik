@@ -25,6 +25,7 @@ class HistoricalReference:
     latest_at: datetime | None
     granularities: list[str]
     flags: list[str]
+    method: str = "local_daily_medians"
 
 
 class PriceEngine:
@@ -93,6 +94,17 @@ class PriceEngine:
         return None
 
     def reference(self, item_id: int) -> HistoricalReference:
+        if self.config.history_reference_mode == "ahl_median30d":
+            lookup = getattr(self.provider, "source_reference", None)
+            value = lookup(item_id) if lookup else None
+            flags = []
+            if not value or not value.get("copper"):
+                flags.append("missing_source_reference")
+            elif (self.provider.as_of - value["observed_at"]).total_seconds() > self.config.max_price_age_seconds:
+                flags.append("stale_source_reference")
+            return HistoricalReference(value["copper"] if value else None, None, None, None,
+                0, 0, 30, value["observed_at"] if value else None, ["source_aggregate"], flags,
+                "AHledger median30d; local stability checks not applied")
         current = self.current.get(item_id)
         # Use complete prior UTC days. A current day's aggregate cannot be its own
         # historical baseline. Each covered day has equal weight, regardless of scans.

@@ -4,6 +4,7 @@ C.Execution = E
 function E:Unknown(reason)
   local pending=C.db.pending
   if not pending then return end
+  if pending.sniper then return C.Sniper:PurchaseUnknown(reason) end
   pending.stage="unknown"
   local task=C.db.tasks[pending.task_id]
   C:Emit(task,"purchase","unknown",{attempt_id=pending.attempt_id,reason=reason},pending.item_id)
@@ -30,9 +31,7 @@ function E:Start() -- called only from the player's Buy button
   end
   if not lot.commodity then
     if not C_AuctionHouse.GetAuctionInfoByID then C:State(task,"requires_manual_check","Нет API повторной проверки AuctionID"); return false end
-    local live=C_AuctionHouse.GetAuctionInfoByID(lot.auction_id)
-    if not live or live.buyoutAmount~=lot.cost or live.quantity~=lot.quantity or live.containsOwnerItem~=false
-      or live.containsAccountItem or not C.Adapter:KeyEqual(live.itemKey,lot.key) then
+    if not C.Adapter:LotStillAvailable(lot) then
       C.BuyQueue.ticket=nil
       C:Emit(task,"purchase","price_changed",{auction_id=lot.auction_id},lot.item_id)
       C:State(task,"pending_scan","Лот изменился или недоступен"); return false
@@ -66,6 +65,7 @@ function E:Timeout(pending)
 end
 function E:Confirm() -- a separate real player click; never called by price events
   local p=C.db.pending
+  if p and p.sniper then return C.Sniper:ConfirmPurchase() end
   if not p or p.stage~="quoted" or C:Now()-p.quoted_at>10 then return false end
   local task=C.db.tasks[p.task_id]
   local valid=C.Validator:Validate(task,true)
@@ -106,6 +106,7 @@ end
 function E:Stop()
   local p=C.db.pending
   if not p then return end
+  if p.sniper then return C.Sniper:StopPurchase() end
   if p.stage=="await_quote" or p.stage=="quoted" then
     C.Adapter:Call("CancelCommoditiesPurchase")
     self:Finish("cancelled")
@@ -114,6 +115,7 @@ end
 function E:OnEvent(event,...)
   local p=C.db and C.db.pending
   if not p or p.external_conflict then return end
+  if p.sniper then return C.Sniper:OnPurchaseEvent(event,...) end
   if (event=="ADDON_ACTION_BLOCKED" or event=="ADDON_ACTION_FORBIDDEN") and ...~="CennikAddon" then return end
   if event=="COMMODITY_PURCHASE_SUCCEEDED" or event=="COMMODITY_PURCHASE_FAILED" then
     local item=...
@@ -150,6 +152,7 @@ end
 function E:Reconcile(bought,quantity,cost) -- explicit player declaration after mailbox/history check
   local p=C.db.pending
   if not p or p.stage~="unknown" then return false end
+  if p.sniper then return C.Sniper:Reconcile(bought,quantity,cost) end
   if bought then
     if not C:Integer(quantity) or not C:Integer(cost) then return false end
     p.quantity,p.cost=quantity,cost

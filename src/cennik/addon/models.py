@@ -49,6 +49,7 @@ class Task(Model):
     created_at: AwareDatetime
     expires_at: AwareDatetime
     expires_at_epoch: int
+    allow_overbuy: bool = False
 
 
 class Package(Model):

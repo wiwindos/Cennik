@@ -10,19 +10,22 @@ class CraftLiquidity:
     def __init__(self, context: EvaluationContext):
         self.context = context
         self.history = (context.prices.sales_history(context.config.craft_sales_window_days)
-                        if context.config.craft_liquidity_enabled else {})
+                        if context.config.craft_liquidity_enabled and context.config.craft_liquidity_source == "history" else {})
 
     def check(self, price: PriceObservation, quantity: int) -> tuple[dict[str, Any], str | None]:
         config, as_of = self.context.config, self.context.provider.as_of
         points = self.history.get(price.item_id, [])
         estimates = [p.sales_estimated_per_day for p in points if p.sales_estimated_per_day is not None]
         conservative = min(estimates) if estimates else None
+        if config.craft_liquidity_source == "latest_source":
+            conservative = price.sales_estimated_per_day
         sales_at = price.sales_observed_at
         age = max(0, int((as_of - sales_at).total_seconds())) if sales_at else None
         supply_days = Decimal(price.quantity) / conservative if price.quantity is not None and conservative and conservative > 0 else None
         batch_percent = Decimal(quantity) * 100 / conservative if conservative and conservative > 0 else None
         evidence = {
             "enabled": config.craft_liquidity_enabled, "sales_estimated_per_day": str(price.sales_estimated_per_day) if price.sales_estimated_per_day is not None else None,
+            "method": config.craft_liquidity_source,
             "sales_observed_at": sales_at.isoformat() if sales_at else None,
             "sales_source": price.sales_source or price.source,
             "conservative_sales_per_day": str(conservative) if conservative is not None else None,
@@ -45,7 +48,7 @@ class CraftLiquidity:
                 reason = "liquidity_unknown_sales"
             elif age > config.craft_sales_max_age_seconds:
                 reason = "liquidity_stale_sales"
-            elif len(points) < config.craft_min_sales_days:
+            elif config.craft_liquidity_source == "history" and len(points) < config.craft_min_sales_days:
                 reason = "liquidity_insufficient_sales_history"
             elif conservative is None or conservative < config.craft_min_sales_per_day or price.sales_estimated_per_day < config.craft_min_sales_per_day:
                 reason = "liquidity_low_sales"

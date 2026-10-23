@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -59,6 +60,8 @@ class Bridge:
             else {"device_id": uuid4().hex, "acknowledged": []}
         )
         self.exchange = exchange
+        self.extra_import: dict = {}
+        self.report_handler: Callable[[ReportBatch], list[str]] | None = None
         self.client = None if exchange is not None else httpx.Client(
             base_url=server.rstrip("/"),
             timeout=20,
@@ -88,14 +91,16 @@ class Bridge:
             after = self.saved_variables.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError("SavedVariables is being written; retry after /reload")
-            data = read_saved_variables(text)
+            data = read_saved_variables(text, max_bytes=64_000_000 if self.extra_import else 16_000_000)
             events = data.get("events") or []
             if not isinstance(events, list):
                 raise ValueError("Invalid SavedVariables event list")
             pending = [e for e in events if e.get("event_id") not in acknowledged]
             for offset in range(0, len(pending), 500):
                 batch = ReportBatch(events=pending[offset : offset + 500])
-                if self.exchange is not None:
+                if self.report_handler is not None:
+                    accepted = self.report_handler(batch)
+                elif self.exchange is not None:
                     accepted = self.exchange.reports(batch)
                 else:
                     assert self.client is not None
@@ -130,6 +135,8 @@ class Bridge:
             "packages": packages,
             "acknowledged_event_ids": sorted(acknowledged),
         }
+        imported.update({k: v for k, v in self.extra_import.items()
+                         if k in {"market_collector", "acknowledged_scan_ids", "sniper_book", "sniper_catalog", "acknowledged_sniper_event_ids"}})
         text = (
             "-- Written by Cennik Bridge; loaded on /reload.\nCennikImport = "
             + lua_literal(imported)

@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.1.1"
+C.VERSION = "0.4.1"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -19,7 +19,7 @@ function C:State(task, state, reason)
   self:Refresh()
 end
 function C:HideTask(task)
-  if self.db.pending then return false,"Сначала завершите или уточните результат покупки" end
+  if self.db.pending and self.db.pending.task_id==task.task_id then return false,"Сначала завершите или уточните результат покупки этого задания" end
   if self.Scanner.active and self.Scanner.task==task then self.Scanner:Cancel("Задание скрыто игроком") end
   self.BuyQueue.ticket=nil
   task.hidden=true
@@ -27,6 +27,14 @@ function C:HideTask(task)
   for _,id in ipairs(self.db.queue) do if id~=task.task_id then table.insert(queue,id) end end
   self.db.queue=queue
   self:State(task,"cancelled","Задание скрыто игроком; покупки и история сохранены")
+  return true
+end
+function C:DeleteHiddenTask(task)
+  if not task or not task.hidden then return false,"Сначала скройте задание" end
+  if self.db.pending and self.db.pending.task_id==task.task_id then return false,"Сначала уточните результат покупки" end
+  self:Emit(task,"state","cancelled",{reason="Задание удалено из скрытых; история сохранена"},task.item_id)
+  self.db.deleted_tasks=self.db.deleted_tasks or {}; self.db.deleted_tasks[task.task_id]=true
+  self.db.tasks[task.task_id]=nil
   return true
 end
 function C:Emit(task, kind, state, details, item, quantity, cost)
@@ -75,15 +83,18 @@ function C:Initialize()
   self.db.queue = self.db.queue or {}
   self.db.events = self.db.events or {}
   self.db.history = self.db.history or {}
+  self.db.deleted_tasks = self.db.deleted_tasks or {}
   self.db.device_id = self.db.device_id or (CennikImport and CennikImport.device_id) or ("offline-" .. self:Now())
   self.db.sequence = self.db.sequence or 0
   if self.db.pending then
     self.db.pending.stage = "unknown"
     local task = self.db.tasks[self.db.pending.task_id]
-    if task then self:State(task,"requires_manual_check","Покупка прервана загрузкой аддона; проверьте почту/историю до продолжения") end
+    if task and not self.db.pending.sniper then self:State(task,"requires_manual_check","Покупка прервана загрузкой аддона; проверьте почту/историю до продолжения") end
   end
   self:Import()
   self.Adapter:Initialize()
+  if self.MarketCollector then self.MarketCollector:Initialize() end
+  if self.Sniper then self.Sniper:Initialize() end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame
@@ -94,6 +105,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" and ... == "CennikAddon" then C:Initialize()
   elseif C.db and event == "AUCTION_HOUSE_SHOW" then C.UI:Attach()
   elseif C.db and event == "AUCTION_HOUSE_CLOSED" then
+    if C.Sniper and C.Sniper.ClosePopups then C.Sniper:ClosePopups(true) end
     C.Adapter.shoppingToken=(C.Adapter.shoppingToken or 0)+1
     C.UI.notice=nil
     C.BuyQueue:Stop()
@@ -101,10 +113,14 @@ frame:SetScript("OnEvent", function(_, event, ...)
 end)
 SLASH_CENNIK1 = "/cennik"
 SlashCmdList.CENNIK = function(message)
+  message=(message or ""):match("^%s*(.-)%s*$"):lower()
   local market = message:match("^market%s+(.+)$")
   if market then
     local ok, reason = C:BindMarket(market)
     print(ok and "Cennik: рынок подтверждён" or ("Cennik: " .. reason))
-  elseif C.Adapter:Open() then C.UI:Attach(); C.UI:Show()
+  elseif C.Adapter:Open() then
+    C.UI:Attach(); C.UI:Show()
+    if message=="sniper" or message=="снайпер" then C.UI:SelectSection("Sniper")
+    else C.UI:Refresh() end
   else print("Cennik: откройте аукцион. Диагностика: " .. (C.Adapter.error or "Auctionator 340, современный AH")) end
 end

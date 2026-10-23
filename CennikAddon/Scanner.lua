@@ -7,6 +7,7 @@ function S:Cancel(reason)
   self.active,self.current = false,nil
 end
 function S:Start(task,callback)
+  if C.Sniper and C.Sniper.current then C.Sniper:CancelSearch("Проверка задания") end
   if self.active then return false end
   task.validation,task.scans,task.needs_variant_item_id=nil,{},nil
   task.vendor_keys=nil
