@@ -1,6 +1,15 @@
 local _, C = ...
 local S,U=C.Sniper,C.UI
-local panel,text,button=S.MakePanel,S.MakeText,S.MakeButton
+local panel,text=S.MakePanel,S.MakeText
+local function button(...)
+  local frame=S.MakeButton(...)
+  local font=frame:GetFontString()
+  if font then
+    local path,size,flags=font:GetFont()
+    if path and size then font:SetFont(path,math.max(9,size-1),flags) end
+  end
+  return frame
+end
 local modes={any="Любая цена",limit="Не дороже за штуку",median3d="Скидка к медиане 3 дней"}
 local function money(value) return value and GetMoneyString(value,true) or "неизвестно" end
 -- Tick may call rendering often; unchanged controls must not be rewritten.
@@ -14,10 +23,78 @@ end
 local function visible(frame,value)
   if value and not frame:IsShown() then frame:Show() elseif not value and frame:IsShown() then frame:Hide() end
 end
+local function readable(font,size)
+  font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",(size or 14)-1,"")
+  font:SetSpacing(3)
+end
+function S:UpdateFindingBorder()
+  local p=self.overlay
+  if not p then return end
+  local active=self.findingHighlight~=nil
+  local age=type(p.flashStarted)=="number" and GetTime()-p.flashStarted or 1
+  local lit=active and (age>=1 or age<0.5)
+  if p.borderLit==lit and p.borderActive==active then return end
+  p.borderLit,p.borderActive=lit,active
+  for _,edge in ipairs(p.redBorder) do edge:SetAlpha(active and (lit and 1 or 0.12) or 0) end
+end
+function S:RenderFindingSignal()
+  local p=self.overlay
+  local finding=self.findingHighlight
+  if finding and p.signalID~=self.findingSignal then
+    p.signalID=self.findingSignal; p.flashStarted=GetTime()
+  end
+  local shown,layout={},{}
+  for index,notice in ipairs(self.findingNotices or {}) do
+    local id=notice.finding.rule_id
+    local icon=p.foundIcons[id]
+    if not icon then
+      icon=CreateFrame("Button",nil,p.iconsBody); p.foundIcons[id]=icon
+      icon:SetSize(48,48); icon.ruleID=id
+      local border=icon:CreateTexture(nil,"BACKGROUND"); border:SetAllPoints(icon)
+      border:SetColorTexture(1,0.25,0.12,1)
+      icon.image=icon:CreateTexture(nil,"ARTWORK")
+      icon.image:SetPoint("TOPLEFT",2,-2); icon.image:SetPoint("BOTTOMRIGHT",-2,2)
+      icon:HookScript("OnMouseDown",function() S:FocusWindow(p) end)
+      icon:SetScript("OnClick",function(self)
+        S:FocusWindow(p); S.selected=self.ruleID
+        S:ReadFinding(self.ruleID); S:RenderOverlay()
+      end)
+      icon:SetScript("OnEnter",function(self)
+        local current=S.unreadFindings[self.ruleID]
+        if current and GameTooltip then
+          GameTooltip:SetOwner(self,"ANCHOR_RIGHT")
+          GameTooltip:SetText(C.Items:Name(current.finding.item_id))
+          GameTooltip:AddLine(current.message,1,0.82,0,true)
+          GameTooltip:AddLine("Нажмите, чтобы открыть цель и отметить изменение просмотренным.",1,1,1,true)
+          GameTooltip:Show()
+        end
+      end)
+      icon:SetScript("OnLeave",function() if GameTooltip then GameTooltip:Hide() end end)
+    end
+    local info=C.Items:Get(notice.finding.item_id)
+    local texture=info and info.icon or "Interface\\Icons\\INV_Misc_QuestionMark"
+    if icon.texture~=texture then icon.texture=texture; icon.image:SetTexture(texture) end
+    if icon.layoutIndex~=index then
+      icon.layoutIndex=index; icon:ClearAllPoints()
+      icon:SetPoint("TOPLEFT",(index-1)%p.iconsPerRow*56,-math.floor((index-1)/p.iconsPerRow)*56)
+    end
+    visible(icon,true); shown[id]=true; layout[#layout+1]=id
+  end
+  for id,icon in pairs(p.foundIcons) do if not shown[id] then visible(icon,false) end end
+  local signature=table.concat(layout,"|")
+  if p.iconsLayout~=signature then
+    p.iconsLayout=signature
+    p.iconsBody:SetHeight(math.max(48,math.ceil(#layout/p.iconsPerRow)*56))
+    p.iconsScroll:UpdateScrollChildRect()
+    p.iconsScroll:SetVerticalScroll(math.min(p.iconsScroll:GetVerticalScroll(),math.max(0,p.iconsScroll:GetVerticalScrollRange())))
+  end
+  self:UpdateFindingBorder()
+end
 function S:ShowFindings(identity)
   self.overlayHidden=false; self.overlayRequested=true
   if identity then self.selected=identity end
   self:RenderOverlay()
+  if self.overlay then self:OpenWindow(self.overlay) end
 end
 function S:ShowOffers()
   local rule=C.db.sniper.rules[self.selected or ""]
@@ -35,8 +112,9 @@ function S:ShowOffers()
   self:HoldForManualSearch("Просмотр всех предложений")
   local ok,reason=C.Adapter:OpenOffers(key,lot and lot.unit_price)
   if not ok then self:Notice(reason); return false end
-  self.overlayHidden=true; self.overlayRequested=false; self:ClosePopups(true)
-  self:Notice("Открыты все предложения в «Купить». Снайпер на паузе; возврат: /cennik sniper → «Находки»")
+  self.overlayHidden=false; self.overlayRequested=true; self:ClosePopups()
+  self:FocusWindow(AuctionHouseFrame)
+  self:Notice("Предложения открыты в «Купить». Окно снайпера остаётся открытым; поиск на паузе, чтобы не мешать выбору лота.")
   return true
 end
 function S:SetFindingDetails(value,identity)
@@ -86,34 +164,58 @@ function S:RenderOverlay()
   end
   local p=self.overlay
   if not p then
-    p=panel(570,610); self.overlay=p; p:ClearAllPoints(); p:SetPoint("TOPRIGHT",AuctionHouseFrame,"TOPRIGHT",-15,-15)
+    local width,height=self:PanelSize(960,760)
+    local left=math.floor((width-54)*0.38); local rightX=left+36; local right=width-rightX-18
+    p=panel(width,height); self.overlay=p
+    p.redBorder={}
+    for _,side in ipairs({"TOP","BOTTOM","LEFT","RIGHT"}) do
+      local edge=p:CreateTexture(nil,"OVERLAY"); edge:SetTexture("Interface\\Buttons\\WHITE8X8"); edge:SetVertexColor(1,0.12,0.12,1)
+      if side=="TOP" or side=="BOTTOM" then
+        edge:SetPoint(side .. "LEFT",p,side .. "LEFT",0,0); edge:SetPoint(side .. "RIGHT",p,side .. "RIGHT",0,0); edge:SetHeight(3)
+      else
+        edge:SetPoint("TOP" .. side,p,"TOP" .. side,0,0); edge:SetPoint("BOTTOM" .. side,p,"BOTTOM" .. side,0,0); edge:SetWidth(3)
+      end
+      edge:SetAlpha(0); p.redBorder[#p.redBorder+1]=edge
+    end
+    p:SetScript("OnUpdate",function() S:UpdateFindingBorder() end)
     p.onUserClose=function() S.overlayHidden=true; S.overlayRequested=false end
-    p.title=text(p,"Cennik · Снайпер",14,-13,520)
-    text(p,"Цели · выберите строку. Поиск не зависит от золота персонажа.",14,-36,535)
-    p.scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); p.scroll:SetPoint("TOPLEFT",14,-57); p.scroll:SetSize(517,113); p.scroll:SetClipsChildren(true)
-    p.body=CreateFrame("Frame",nil,p.scroll); p.body:SetSize(505,113); p.scroll:SetScrollChild(p.body); p.rows={}
-    p.finding=text(p,"",14,-182,370); p.finding:SetHeight(30); p.finding:SetJustifyV("TOP")
-    p.latest=button(p,"Показать новое",394,-184,162,function() S:ShowLatestFinding() end)
+    p.title=text(p,"Cennik · Снайпер",18,-16,width-70); readable(p.title,17)
+    p.resumeAll=button(p,"Продолжить все",18,-48,170,function() S:ResumeAll(); C:Refresh() end)
+    p.pauseAll=button(p,"Пауза все",198,-48,130,function() S:Pause(); C:Refresh() end)
+    p.add=button(p,"Добавить",338,-48,110,function() S:ShowEditor() end)
+    button(p,"Все цели",458,-48,130,function() U:Attach(); U:Show(); U:SelectSection("Sniper") end)
+    p.resume=p.resumeAll
+    local listTitle=text(p,"Цели поиска · выберите предмет",18,-91,left); readable(listTitle)
+    p.scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); p.scroll:SetPoint("TOPLEFT",18,-116); p.scroll:SetSize(left-18,height-190); p.scroll:SetClipsChildren(true)
+    p.rowWidth=left-30
+    p.body=CreateFrame("Frame",nil,p.scroll); p.body:SetSize(p.rowWidth,height-190); p.scroll:SetScrollChild(p.body); p.rows={}
+    p.finding=text(p,"",rightX,-94,right); readable(p.finding,14); p.finding:SetHeight(30); p.finding:SetJustifyV("TOP")
+    p.iconsScroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
+    p.iconsScroll:SetPoint("TOPLEFT",rightX,-130); p.iconsScroll:SetSize(right-24,52); p.iconsScroll:SetClipsChildren(true)
+    p.iconsPerRow=math.max(1,math.floor((right-24)/56))
+    p.iconsBody=CreateFrame("Frame",nil,p.iconsScroll); p.iconsBody:SetSize(right-24,48)
+    p.iconsScroll:SetScrollChild(p.iconsBody); p.foundIcons={}
+    p.latest=button(p,"Показать новое",rightX,-194,right,function() S:ShowLatestFinding() end)
     p.contentScroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
-    p.contentScroll:SetPoint("TOPLEFT",14,-220); p.contentScroll:SetSize(517,154); p.contentScroll:SetClipsChildren(true)
-    p.contentBody=CreateFrame("Frame",nil,p.contentScroll); p.contentBody:SetSize(505,154)
+    p.contentScroll:SetPoint("TOPLEFT",rightX,-234); p.contentScroll:SetSize(right-18,height-450); p.contentScroll:SetClipsChildren(true)
+    p.contentBody=CreateFrame("Frame",nil,p.contentScroll); p.contentBody:SetSize(right-30,height-450)
     p.contentScroll:SetScrollChild(p.contentBody)
-    p.content=text(p.contentBody,"",0,0,505); p.content:SetJustifyV("TOP"); p.content:SetWordWrap(true)
-    p.notice=text(p,"",14,-385,535); p.notice:SetHeight(52); p.notice:SetJustifyV("TOP")
-    p.buy=button(p,"Нет находки",14,-445,270,function()
+    p.content=text(p.contentBody,"",0,0,right-30); readable(p.content,15); p.content:SetJustifyV("TOP"); p.content:SetWordWrap(true)
+    p.notice=text(p,"",rightX,-height+210,right); readable(p.notice,14); p.notice:SetHeight(56); p.notice:SetJustifyV("TOP")
+    p.buy=button(p,"Нет находки",rightX,-height+146,right,function()
       local current=C.db.pending; local ok,reason
       if current and current.sniper and current.stage=="quoted" then ok,reason=S:ConfirmPurchase()
       else ok,reason=S:Buy(S.selected) end
       if not ok then S:Notice(reason or "Покупка недоступна") end
     end)
-    p.best=button(p,"Самый дешёвый",294,-445,136,function()
+    p.best=button(p,"Самый дешёвый",rightX,-height+110,(right-8)/2,function()
       S:SelectCheapestFinding(C.db.sniper.rules[S.selected or ""])
     end)
-    p.next=button(p,"Другой лот",440,-445,116,function()
+    p.next=button(p,"Другой лот",rightX+(right+8)/2,-height+110,(right-8)/2,function()
       local rule=C.db.sniper.rules[S.selected or ""]
       if rule and not C.db.pending then S:NextFinding(rule) end
     end)
-    p.toggle=button(p,"Пауза",14,-482,88,function()
+    p.toggle=button(p,"Пауза",rightX,-height+74,(right-16)/3,function()
       local rule=C.db.sniper.rules[S.selected or ""]
       if not rule then return end
       if C.db.pending then S:Notice("Сначала завершите покупку"); return end
@@ -123,43 +225,65 @@ function S:RenderOverlay()
       else S:CancelSearch("Цель приостановлена"); S:Notice("Цель приостановлена") end
       if U.section=="Sniper" then C:Refresh() end
     end)
-    p.edit=button(p,"Изменить",108,-482,100,function()
+    p.edit=button(p,"Изменить",rightX+(right+8)/3,-height+74,(right-16)/3,function()
       local rule=C.db.sniper.rules[S.selected or ""]
       if rule then S:ShowEditor(rule.definition.item_id,rule) end
     end)
-    p.remove=button(p,"Удалить",214,-482,90,function() S:RemoveGoal(C.db.sniper.rules[S.selected or ""]) end)
-    button(p,"Добавить",310,-482,100,function() S:ShowEditor() end)
-    button(p,"Все цели",416,-482,140,function() U:Attach(); U:Show(); U:SelectSection("Sniper") end)
-    p.reconcile=button(p,"Уточнить результат",359,-445,197,function() S:ShowReconcile() end)
-    p.cancel=button(p,"Отменить котировку",359,-445,197,function() S:StopPurchase() end)
-    p.resume=button(p,"Продолжить поиск",14,-523,220,function() S:ResumeSearch(); C:Refresh() end)
-    p.offers=button(p,"Все предложения → Купить",244,-523,312,function() S:ShowOffers() end)
-    p.footer=text(p,"",14,-563,535); p.footer:SetHeight(34); p.footer:SetJustifyV("TOP")
+    p.remove=button(p,"Удалить",rightX+2*(right+8)/3,-height+74,(right-16)/3,function() S:RemoveGoal(C.db.sniper.rules[S.selected or ""]) end)
+    p.reconcile=button(p,"Уточнить результат",rightX,-height+110,right,function() S:ShowReconcile() end)
+    p.cancel=button(p,"Отменить котировку",rightX,-height+110,right,function() S:StopPurchase() end)
+    p.offers=button(p,"Посмотреть лоты",rightX,-height+38,right,function() S:ShowOffers() end)
+    p.footer=text(p,"",18,-height+64,left); readable(p.footer,13); p.footer:SetHeight(50); p.footer:SetJustifyV("TOP")
   end
-  if not p:IsShown() then p:Show() end
+  if not p:IsShown() then self:OpenWindow(p,true) end
   setText(p.title,"Cennik · Снайпер · целей: " .. #rules .. " · с предложением: " .. found)
   local selected=C.db.sniper.rules[self.selected or ""]
   if not selected or selected.removed then selected=rules[1]; self.selected=selected and selected.definition.id end
-  local layout={}
+  local layout={}; local y=0
   for i,rule in ipairs(rules) do
-    layout[#layout+1]=rule.definition.id
     local row=p.rows[i]
     if not row then
-      row=button(p.body,"",0,-(i-1)*33,503,function(self) S.selected=self.ruleID; S:RenderOverlay() end)
-      row:SetHeight(31); p.rows[i]=row
+      row=button(p.body,"",0,0,p.rowWidth,function(self)
+        S.selected=self.ruleID; S:ReadFinding(self.ruleID); S:RenderOverlay()
+      end)
+      row.marker=text(row,"",6,-6,16); readable(row.marker,14)
+      row.title=text(row,"",24,-6,p.rowWidth-32); readable(row.title,14); row.title:SetWordWrap(true)
+      row.detail=text(row,"",24,-28,p.rowWidth-32); readable(row.detail,13); row.detail:SetWordWrap(true)
+      p.rows[i]=row
     end
     row.ruleID=rule.definition.id
     if not row:IsShown() then row:Show() end
-    setText(row,(self.selected==rule.definition.id and "▶ " or "") .. C.Items:Label(rule.definition.item_id) .. " · нужно " .. self:Remaining(rule) .. " · " .. self:FindingState(rule))
+    local unread=self.unreadFindings[rule.definition.id]~=nil
+    setText(row.marker,self.selected==rule.definition.id and "▶" or unread and "●" or "")
+    if row.noticeUnread~=unread then
+      row.noticeUnread=unread; row.title:SetTextColor(1,unread and 0.8 or 1,unread and 0.35 or 1)
+    end
+    local titleChanged=setText(row.title,C.Items:Label(rule.definition.item_id))
+    local detailChanged=setText(row.detail,"Нужно " .. self:Remaining(rule) .. " · " .. self:FindingState(rule))
+    if titleChanged or detailChanged or not row.rowHeight then
+      row.title:SetHeight(0); row.detail:SetHeight(0)
+      local titleHeight=row.title:GetStringHeight()
+      row.title:SetHeight(titleHeight); row.detail:ClearAllPoints(); row.detail:SetPoint("TOPLEFT",24,-titleHeight-10)
+      local detailHeight=row.detail:GetStringHeight(); row.detail:SetHeight(detailHeight)
+      row.rowHeight=math.max(58,titleHeight+detailHeight+18); row:SetHeight(row.rowHeight)
+    end
+    if row.layoutY~=y then row.layoutY=y; row:ClearAllPoints(); row:SetPoint("TOPLEFT",0,y) end
+    layout[#layout+1]=rule.definition.id .. ":" .. row.rowHeight; y=y-row.rowHeight-6
   end
   for i=#rules+1,#p.rows do if p.rows[i]:IsShown() then p.rows[i]:Hide() end end
   local signature=table.concat(layout,"|")
-  if p.layout~=signature then p.layout=signature; p.body:SetHeight(math.max(113,#rules*33)); p.scroll:UpdateScrollChildRect() end
+  if p.layout~=signature then
+    p.layout=signature; p.body:SetHeight(math.max(p.scroll:GetHeight(),-y)); p.scroll:UpdateScrollChildRect()
+    p.scroll:SetVerticalScroll(math.min(p.scroll:GetVerticalScroll(),math.max(0,p.scroll:GetVerticalScrollRange())))
+  end
   visible(p.reconcile,pending and pending.sniper and pending.stage=="unknown")
   visible(p.cancel,pending and pending.sniper and (pending.stage=="await_quote" or pending.stage=="quoted"))
   visible(p.next,not (pending and pending.sniper)); visible(p.best,not (pending and pending.sniper)); visible(p.latest,self.latestFinding~=nil)
-  visible(p.resume,self.manualHold~=nil); enabled(p.resume,not pending)
-  setText(p.finding,"|cff66ff99" .. (self.findingNotice or "Первый скан покажет уже выставленное. Звук — при новых предложениях.") .. "|r")
+  enabled(p.resumeAll,not pending); enabled(p.pauseAll,not pending)
+  self:RenderFindingSignal()
+  local notice=(self.unreadCount or 0)>0 and ("Непросмотренных целей: " .. self.unreadCount .. ". Нажмите иконку предмета.")
+    or ((self.findingSignal or 0)>0 and "Все изменения просмотрены." or "Первый скан покажет уже выставленное. Звук — при новых предложениях.")
+  setText(p.finding,"|cff66ff99" .. notice .. "|r")
   -- Polling never overwrites transaction feedback.
   setText(p.notice,self.message and ("Результат действия: " .. self.message) or "Выберите предложение. Покупка выполняется только вашим нажатием.")
   enabled(p.toggle,selected~=nil and not pending); enabled(p.edit,selected~=nil and not pending); enabled(p.remove,selected~=nil and not pending)
@@ -201,12 +325,10 @@ function S:RenderOverlay()
     self:SetFindingDetails("Целей нет. Нажмите «Добавить», выберите предмет и включите поиск.","empty")
     setText(p.buy,"Нет находки"); enabled(p.buy,false); enabled(p.next,false); enabled(p.best,false)
   end
-  local footer="Поиск: " .. running .. " целей. Последняя проверка: " .. (self.lastScanAt and date("%H:%M:%S",self.lastScanAt) or "ещё не выполнена")
+  local checked=self.lastScanAt and date("%H:%M:%S",self.lastScanAt) or "ещё не выполнена"
+  local footer="Поиск: " .. running .. " целей.\nПоследняя проверка: " .. checked
   if self.manualHold then
-    footer="Поиск на паузе: " .. self.manualHold .. ".\nПоследняя проверка: " .. (self.lastScanAt and date("%H:%M:%S",self.lastScanAt) or "ещё не выполнена") .. "; найденные цены могут устареть."
-  else
-    if selected and selected.search_error then footer=footer .. " · " .. selected.search_error end
-    footer=footer .. "\nЗакрытие окна не останавливает поиск. Открыть: «Находки»."
+    footer="Поиск на паузе. Цены могут устареть.\nПоследняя проверка: " .. checked .. "\nДля запуска: «Продолжить все»."
   end
   setText(p.footer,footer)
   if U.sniperStatus and U.section=="Sniper" then

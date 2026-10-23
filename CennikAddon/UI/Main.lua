@@ -131,31 +131,41 @@ function U:Clear()
   end
   self.used={}
 end
-function U:Details(task)
+function U:Details(task,structured)
   local o=task.opportunity
   local live=self:Live(task)
   local text={C.Items:Link(task.item_id) .. " (#" .. task.item_id .. ") / " .. (strategies[task.strategy_id] or task.strategy_id),
     "Проверка: " .. (states[task.state] or task.state) .. "; " .. (task.reason or "")}
+  local blocks={}; local byID={}
+  for _,entry in ipairs({{"status","Результат проверки"},{"economics","Экономика"},{"materials","Материалы и закупка (AH / NPC)"},
+    {"conditions","Профессия и рецепт"},{"steps","Этапы крафта"},{"source","Источники и ликвидность"},
+    {"risks","Ограничения исходного расчёта"},{"scans","Подробности сканов"}}) do
+    local block={id=entry[1],title=entry[2],lines={}}
+    blocks[#blocks+1]=block; byID[block.id]=block
+  end
+  for _,line in ipairs(text) do byID.status.lines[#byID.status.lines+1]=line end
+  byID.materials.rows={}
+  local function add(value,id) text[#text+1]=value; local lines=byID[id].lines; lines[#lines+1]=value end
   if live then
-    table.insert(text,"ТЕКУЩАЯ ОЦЕНКА: " .. date("%H:%M:%S",live.checked_at) .. "; данные AH действуют до 90 секунд")
-    table.insert(text,"Все затраты: " .. money(live.cost_copper) .. "; осталось AH: " .. money(live.remaining_cost_copper) .. "; NPC: " .. money(live.npc_cost_copper))
-    table.insert(text,"Выручка: " .. money(live.gross_revenue_copper) .. "; комиссия: " .. money(live.fee_copper) .. "; после комиссии: " .. money(live.net_revenue_copper))
-    table.insert(text,"Потенциальная прибыль: " .. money(live.profit_copper) .. "; ROI: " .. percent(live.roi_percent) .. "; маржа от выручки: " .. percent(live.margin_percent))
-    table.insert(text,"Безубыточная цена за штуку: " .. money(live.break_even_unit_copper) .. "; " .. live.revenue_basis)
-  else table.insert(text,"Полная текущая экономика неизвестна. Требуются свежие цены и достаточное количество всех материалов; повторите проверку.") end
-  if live then table.insert(text,"Для сравнения — расчёт из веба: затраты " .. money(o.required_capital_copper) .. "; прибыль " .. money(task.predicted_profit_copper) .. "; ROI " .. tostring(o.roi_percent) .. "%")
-  else table.insert(text,"Исходный расчёт веба не используется как текущая прибыль. Сначала нужна полная проверка.") end
+    add("ТЕКУЩАЯ ОЦЕНКА: " .. date("%H:%M:%S",live.checked_at) .. "; данные AH действуют до 90 секунд","status")
+    add("Все затраты: " .. money(live.cost_copper) .. "; осталось AH: " .. money(live.remaining_cost_copper) .. "; NPC: " .. money(live.npc_cost_copper),"economics")
+    add("Выручка: " .. money(live.gross_revenue_copper) .. "; комиссия: " .. money(live.fee_copper) .. "; после комиссии: " .. money(live.net_revenue_copper),"economics")
+    add("Потенциальная прибыль: " .. money(live.profit_copper) .. "; ROI: " .. percent(live.roi_percent) .. "; маржа от выручки: " .. percent(live.margin_percent),"economics")
+    add("Безубыточная цена за штуку: " .. money(live.break_even_unit_copper) .. "; " .. live.revenue_basis,"economics")
+  else add("Полная текущая экономика неизвестна. Требуются свежие цены и достаточное количество всех материалов; повторите проверку.","economics") end
+  if live then add("Для сравнения — расчёт из веба: затраты " .. money(o.required_capital_copper) .. "; прибыль " .. money(task.predicted_profit_copper) .. "; ROI " .. tostring(o.roi_percent) .. "%","economics")
+  else add("Исходный расчёт веба не используется как текущая прибыль. Сначала нужна полная проверка.","economics") end
   local price=o.details.price or {}
-  table.insert(text,"Продажи/сутки — оценка источника: " .. tostring(price.sales_estimated_per_day or "неизвестно") .. "; дата: " .. tostring(price.sales_observed_at or "неизвестно") .. "; источник: " .. tostring(price.sales_source or price.source or "неизвестно"))
-  table.insert(text,"Оценка спроса не подтверждает сделки и не гарантирует быструю продажу.")
+  add("Продажи/сутки — оценка источника: " .. tostring(price.sales_estimated_per_day or "неизвестно") .. "; дата: " .. tostring(price.sales_observed_at or "неизвестно") .. "; источник: " .. tostring(price.sales_source or price.source or "неизвестно"),"source")
+  add("Оценка спроса не подтверждает сделки и не гарантирует быструю продажу.","source")
   local liquidity=o.details.liquidity
   if liquidity and liquidity.enabled then
     local basis=liquidity.method=="latest_source" and "последняя оценка источника" or ("история: дней " .. tostring(liquidity.covered_days) .. "/" .. tostring(liquidity.window_days))
-    table.insert(text,"Фильтр ликвидности: пройден при расчёте; " .. basis .. "; оценка " .. tostring(liquidity.conservative_sales_per_day) .. "/сутки; предложение/продажи " .. tostring(liquidity.supply_to_daily_sales) .. " (не срок продажи)")
+    add("Фильтр ликвидности: пройден при расчёте; " .. basis .. "; оценка " .. tostring(liquidity.conservative_sales_per_day) .. "/сутки; предложение/продажи " .. tostring(liquidity.supply_to_daily_sales) .. " (не срок продажи)","source")
   end
-  table.insert(text,"Покупки / NPC:")
+  add("Покупки / NPC:","materials")
   local recipe=o.details.recipe
-  if recipe then table.insert(text,"Рецепт: " .. (recipe.result_item_id and C.Items:Name(recipe.result_item_id) or ("#" .. tostring(recipe.spell_id))) .. "; профессия " .. tostring(recipe.profession) .. "; навык " .. tostring(recipe.skill_required) .. "; получение " .. tostring(recipe.acquisition)) end
+  if recipe then add("Рецепт: " .. (recipe.result_item_id and C.Items:Name(recipe.result_item_id) or ("#" .. tostring(recipe.spell_id))) .. "; профессия " .. tostring(recipe.profession) .. "; навык " .. tostring(recipe.skill_required) .. "; получение " .. tostring(recipe.acquisition),"conditions") end
   for _, line in ipairs(task.lines) do
     local availability="NPC: текущая цена неизвестна; откройте торговца или введите цену"
     if line.source=="auction" then
@@ -169,22 +179,165 @@ function U:Details(task)
       local quote=C.NPC:Quote(task,line.item_id)
       if quote then availability="NPC: " .. money(quote.batch_price_copper) .. " за " .. quote.batch_quantity .. " шт.; " .. quote.source .. (quote.from_database and "; стабильная цена из исходных данных" or ("; " .. date("%H:%M:%S",quote.observed_at) .. "; цена действительна 15 минут")) end
     end
-    table.insert(text,C.Items:Link(line.item_id) .. " (#" .. line.item_id .. ") × " .. line.quantity .. "; предел " .. money(line.unit_limit_copper) .. "; " .. availability)
+    local item=C.Items:Link(line.item_id) .. " (#" .. line.item_id .. ")"
+    add(item .. " × " .. line.quantity .. "; предел " .. money(line.unit_limit_copper) .. "; " .. availability,"materials")
+    byID.materials.rows[#byID.materials.rows+1]={item=item,quantity=tostring(line.quantity),limit=money(line.unit_limit_copper),availability=availability}
   end
   local translated={}
   for _,flag in ipairs(o.risk_flags or {}) do translated[#translated+1]=risks[flag] or flag end
-  table.insert(text,"Ограничения исходного расчёта: " .. table.concat(translated,"; "))
+  add("Ограничения исходного расчёта: " .. table.concat(translated,"; "),"risks")
   for index,step in ipairs(o.details.steps or {}) do
-    table.insert(text,index .. ". " .. (step.recipe.result_item_id and C.Items:Name(step.recipe.result_item_id) or ("Рецепт #" .. tostring(step.recipe.spell_id))) .. "; крафтов " .. step.batches .. "; версия " .. step.recipe.version_hash .. "; профессия " .. tostring(step.recipe.profession) .. "; навык " .. tostring(step.recipe.skill_required) .. "; излишек " .. step.surplus_quantity)
+    add(index .. ". " .. (step.recipe.result_item_id and C.Items:Name(step.recipe.result_item_id) or ("Рецепт #" .. tostring(step.recipe.spell_id))) .. "; крафтов " .. step.batches .. "; версия " .. step.recipe.version_hash .. "; профессия " .. tostring(step.recipe.profession) .. "; навык " .. tostring(step.recipe.skill_required) .. "; излишек " .. step.surplus_quantity,"steps")
   end
   for item,scan in pairs(task.scans or {}) do
-    table.insert(text,"Скан " .. C.Items:Name(item) .. " (#" .. item .. "); " .. scan.observed_at .. "; полный: " .. tostring(scan.complete) .. "; лотов: " .. #scan.rows)
+    add("Скан " .. C.Items:Name(item) .. " (#" .. item .. "); " .. scan.observed_at .. "; полный: " .. tostring(scan.complete) .. "; лотов: " .. #scan.rows,"scans")
     for index,row in ipairs(scan.rows) do
-      if index>25 then table.insert(text,"… дополнительные лоты сохранены в скане"); break end
-      table.insert(text,"  доступно " .. (row.available_quantity or row.quantity) .. " шт. × " .. money(row.unit_price) .. "/шт." .. (row.commodity and "; нужное количество через котировку" or "; одна покупка = 1 шт.") .. (row.vendor_known and ("; продажа NPC/шт. " .. money(row.vendor_sell_copper) .. "; " .. row.vendor_source) or ""))
+      if index>25 then add("… дополнительные лоты сохранены в скане","scans"); break end
+      add("  доступно " .. (row.available_quantity or row.quantity) .. " шт. × " .. money(row.unit_price) .. "/шт." .. (row.commodity and "; нужное количество через котировку" or "; одна покупка = 1 шт.") .. (row.vendor_known and ("; продажа NPC/шт. " .. money(row.vendor_sell_copper) .. "; " .. row.vendor_source) or ""),"scans")
     end
   end
-  return table.concat(text,"\n")
+  local value=table.concat(text,"\n")
+  if structured then blocks.raw=value; return blocks end
+  return value
+end
+function U:LayoutTaskBlocks(p,blocks)
+  if type(p.blocks)~="table" then p.blocks={} end
+  local y=0
+  for _,block in ipairs(blocks) do
+    local widget=p.blocks[block.id]
+    if #block.lines>0 then
+      if not widget then
+        widget={frame=CreateFrame("Frame",nil,p.body),rows={}}; p.blocks[block.id]=widget
+        local background=widget.frame:CreateTexture(nil,"BACKGROUND")
+        background:SetAllPoints(widget.frame); background:SetColorTexture(0.06,0.11,0.15,1)
+        widget.title=C.Sniper.MakeText(widget.frame,block.title,12,-10,p.contentWidth-24)
+        widget.title:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",14,p.compact and "OUTLINE" or ""); widget.title:SetTextColor(1,0.82,0.3)
+        widget.content=C.Sniper.MakeText(widget.frame,"",12,-36,p.contentWidth-24)
+        widget.content:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,""); widget.content:SetSpacing(3); widget.content:SetWordWrap(true); widget.content:SetNonSpaceWrap(true)
+      end
+      local value=table.concat(block.lines,"\n")
+      if widget.value~=value then
+        widget.value=value
+        if p.compact and block.id~="materials" then
+          widget.content:Hide(); widget.lineFonts=widget.lineFonts or {}
+          local lineY=36
+          for index,line in ipairs(block.lines) do
+            local font=widget.lineFonts[index]
+            if not font then
+              font=C.Sniper.MakeText(widget.frame,"",12,0,p.contentWidth-24)
+              font:SetSpacing(3); font:SetWordWrap(true); font:SetNonSpaceWrap(true)
+              widget.lineFonts[index]=font
+            end
+            local important=block.id=="status" and index==1 or block.id=="economics" and
+              (line:find("Все затраты:",1,true) or line:find("Потенциальная прибыль:",1,true) or line:find("экономика неизвестна",1,true))
+            font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,important and "OUTLINE" or "")
+            if important then font:SetTextColor(1,0.88,0.5) else font:SetTextColor(0.9,0.94,0.97) end
+            font:SetText(line); font:SetHeight(0); font:Show()
+            local height=font:GetStringHeight(); font:SetHeight(height)
+            font:ClearAllPoints(); font:SetPoint("TOPLEFT",12,-lineY); lineY=lineY+height+10
+          end
+          for i=#block.lines+1,#widget.lineFonts do widget.lineFonts[i]:Hide() end
+          widget.height=lineY+4
+        elseif block.id=="materials" and #block.rows>0 then
+          widget.content:Hide()
+          local inner=p.contentWidth-24; local itemWidth=math.floor(inner*0.29)
+          local widths={itemWidth,60,130,inner-itemWidth-214}
+          if not widget.headers then
+            widget.headers={}; local x=12
+            for i,caption in ipairs({"Предмет","Нужно","Предел / шт.","Наличие и стоимость"}) do
+              local font=C.Sniper.MakeText(widget.frame,caption,x,-36,widths[i])
+              font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",12,""); font:SetTextColor(0.65,0.8,0.9)
+              widget.headers[i]=font; x=x+widths[i]+8
+            end
+          end
+          for _,font in ipairs(widget.headers) do font:Show() end
+          local rowY=60
+          for index,row in ipairs(block.rows) do
+            local cells=widget.rows[index]
+            if not cells then
+              cells={}; widget.rows[index]=cells; local x=12
+              for i=1,4 do
+                local font=C.Sniper.MakeText(widget.frame,"",x,0,widths[i])
+                font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,p.compact and (i==2 or i==3) and "OUTLINE" or ""); font:SetSpacing(3); font:SetWordWrap(true); font:SetNonSpaceWrap(true)
+                cells[i]=font; x=x+widths[i]+8
+              end
+            end
+            local rowHeight=0; local x=12
+            for i,value in ipairs({row.item,row.quantity,row.limit,row.availability}) do
+              local font=cells[i]; font:Show(); font:SetText(value); font:SetHeight(0)
+              local height=font:GetStringHeight(); font:SetHeight(height); rowHeight=math.max(rowHeight,height)
+              font:ClearAllPoints(); font:SetPoint("TOPLEFT",x,-rowY); x=x+widths[i]+8
+            end
+            rowY=rowY+rowHeight+14
+          end
+          for i=#block.rows+1,#widget.rows do for _,font in ipairs(widget.rows[i]) do font:Hide() end end
+          widget.height=rowY+2
+        else
+          for _,font in ipairs(widget.headers or {}) do font:Hide() end
+          for _,cells in ipairs(widget.rows) do for _,font in ipairs(cells) do font:Hide() end end
+          widget.content:Show()
+          widget.content:SetText(table.concat(block.lines,block.id=="scans" and "\n" or "\n\n")); widget.content:SetHeight(0)
+          local height=widget.content:GetStringHeight(); widget.content:SetHeight(height); widget.height=height+48
+        end
+      end
+      if not widget.frame:IsShown() then widget.frame:Show() end
+      if widget.y~=y then widget.y=y; widget.frame:ClearAllPoints(); widget.frame:SetPoint("TOPLEFT",0,-y) end
+      widget.frame:SetSize(p.contentWidth,widget.height); y=y+widget.height+14
+    elseif widget then widget.frame:Hide() end
+  end
+  p.content=p.blocks.status.content
+  p.body:SetHeight(math.max(p.scroll:GetHeight(),y)); p.scroll:UpdateScrollChildRect()
+end
+function U:UpdateTaskDetails()
+  local p=self.taskDetails
+  if not p or not p:IsShown() then return end
+  local task=C.db.tasks[p.taskID]
+  if not task or task.hidden then p:Hide(); return end
+  p.title:SetText("Расчёт и проверка · " .. C.Items:Label(task.item_id))
+  local blocks=self:Details(task,true)
+  if p.detailText~=blocks.raw then
+    local offset=p.scroll:GetVerticalScroll()
+    p.detailText=blocks.raw; self:LayoutTaskBlocks(p,blocks)
+    p.scroll:SetVerticalScroll(math.min(offset,math.max(0,p.scroll:GetVerticalScrollRange())))
+  end
+  p.check:SetEnabled(not C.db.pending and not C.Scanner.active)
+  p.queue:SetEnabled(not C.db.pending)
+end
+function U:ShowTaskDetails(task)
+  if not task then return end
+  local S=C.Sniper; local p=self.taskDetails
+  if not p then
+    local width,height=S:PanelSize(940,700)
+    p=S.MakePanel(width,height); self.taskDetails=p
+    p.title=S.MakeText(p,"",18,-18,width-70)
+    p.title:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",15,"")
+    p.check=S.MakeButton(p,"Проверить цены",18,-52,165,function()
+      local current=C.db.tasks[p.taskID]
+      if current then C.Scanner:Start(current) end
+    end)
+    p.queue=S.MakeButton(p,"В очередь покупок",193,-52,175,function()
+      local current=C.db.tasks[p.taskID]
+      if current then
+        local _,reason=C.BuyQueue:Add(current)
+        if reason then p.feedback:SetText(reason) end
+      end
+    end)
+    p.limits=S.MakeButton(p,"Цены / лимиты",378,-52,165,function()
+      U.limitTask=p.taskID; U.limitUseCurrent=false; U.limitDraft=nil; U:SelectSection("Limits")
+    end)
+    p.scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
+    p.scroll:SetPoint("TOPLEFT",18,-94); p.scroll:SetSize(width-58,height-150); p.scroll:SetClipsChildren(true)
+    p.body=CreateFrame("Frame",nil,p.scroll); p.body:SetSize(width-74,height-150); p.scroll:SetScrollChild(p.body)
+    p.contentWidth=width-74
+    p.feedback=S.MakeText(p,"Показана текущая проверка. Неполные и устаревшие данные не дают подтверждённую прибыль.",18,-height+42,width-40)
+    p.feedback:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",12,"")
+    for _,frame in ipairs({p.check,p.queue,p.limits}) do
+      local font=frame:GetFontString()
+      if font then local path,size,flags=font:GetFont(); if path and size then font:SetFont(path,math.max(9,size-1),flags) end end
+    end
+  end
+  if p.taskID~=task.task_id then p.taskID=task.task_id; p.detailText=nil; p.scroll:SetVerticalScroll(0) end
+  S:OpenWindow(p); self:UpdateTaskDetails()
 end
 function U:AttachScrollChild(scroll,child)
   local offset=(self.resetScroll or scroll.cennikLayout~=true) and 0 or scroll:GetVerticalScroll()
@@ -213,6 +366,23 @@ function U:Text(text,x,y,width,height)
   box.text=text
   self:AttachScrollChild(scroll,box)
   return box
+end
+function U:TaskPreview(task,x,y,width,height)
+  local role="text-" .. self.section
+  local scroll=self:Widget("ScrollFrame",self.body,"UIPanelScrollFrameTemplate",role)
+  scroll:SetClipsChildren(true); scroll:SetPoint("TOPLEFT",x,y); scroll:SetSize(width,height)
+  local body=self:Widget("Frame",scroll,nil,role .. "-blocks")
+  local view=body.cennikPreview
+  if type(view)~="table" then view={body=body,compact=true}; body.cennikPreview=view end
+  view.scroll=scroll; view.contentWidth=width-18
+  local blocks=self:Details(task,true)
+  if view.detailText~=blocks.raw then
+    view.detailText=blocks.raw; self:LayoutTaskBlocks(view,blocks)
+  end
+  if view.taskID~=task.task_id then view.taskID=task.task_id; scroll:SetVerticalScroll(0) end
+  body:SetWidth(view.contentWidth)
+  self:AttachScrollChild(scroll,body)
+  self.taskPreview=view
 end
 function U:Opportunities()
   button(self.body,"Проверить выбранные",0,0,180,function()
@@ -289,7 +459,7 @@ function U:Opportunities()
   scroll:Show()
   local task=self:Task()
   if task then
-    button(self.body,"Проверить",0,-actionY,110,function() C.Scanner:Start(task) end)
+    button(self.body,"Проверить",0,-actionY,110,function() U:ShowTaskDetails(task); C.Scanner:Start(task) end)
     button(self.body,"В очередь",115,-actionY,110,function() local _,reason=C.BuyQueue:Add(task); if reason then U.notice=reason; U:Refresh() end end)
     button(self.body,"Поиск",230,-actionY,110,function()
       local ok,reason=C.Adapter:Shopping(task.needs_variant_item_id or task.item_id)
@@ -322,11 +492,12 @@ function U:Opportunities()
       U.limitTask=task.task_id; U.limitUseCurrent=true; U.limitDraft=nil; U.section="Limits"; U:Refresh()
     end)
     button(self.body,"Предмет / снайпер / рецепт",0,-actionY-62,310,function() C.Sniper:ShowCard(task.item_id) end)
+    button(self.body,"Развернуть расчёт",320,-actionY-62,305,function() U:ShowTaskDetails(task) end)
     local limits=button(self.body,"Цены / лимиты",505,-actionY,120,function()
       U.limitTask=task.task_id; U.limitUseCurrent=false; U.limitDraft=nil; U.section="Limits"; U:Refresh()
     end)
     limits:SetEnabled(not C.db.pending)
-    self:Text(self:Details(task),0,-actionY-92,625,math.max(40,self.body:GetHeight()-actionY-104))
+    self:TaskPreview(task,0,-actionY-92,625,math.max(40,self.body:GetHeight()-actionY-104))
   else label(self.body,"Выберите задание. Пакеты загружаются через Bridge и /reload.",0,-165) end
 end
 function U:Queue()
@@ -484,6 +655,7 @@ function U:Refresh()
   if self.rendering then self:QueueRefresh(); return end
   self.rendering=true
   local ok,reason=pcall(self.Render,self)
+  if ok then ok,reason=pcall(self.UpdateTaskDetails,self) end
   self.rendering=false
   if not ok then error(reason) end
 end

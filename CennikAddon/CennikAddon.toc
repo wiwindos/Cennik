@@ -1,6 +1,6 @@
 ## Interface: 16001, 38000, 120100, 50504
 ## Title: Cennik
-## Version: 0.6.2
+## Version: 0.6.7
 ## Notes: Аналитика, сканы рынка и снайпер Cennik через Auctionator
 ## Dependencies: Auctionator
 ## SavedVariables: CennikAddonDB

@@ -543,6 +543,71 @@ def test_opportunity_wrapped_title_and_summary_grow_row_and_remain_in_tooltip(ex
     """)
 
 
+def test_large_task_details_refresh_after_price_scan_and_keep_reading_position(exchange):
+    lua = runtime(exported(exchange, "simple_craft"))
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI:Show(); Cennik.UI:ShowTaskDetails(t)
+      local p=Cennik.UI.taskDetails
+      assert(p:IsShown() and p:GetWidth()>=900 and p.scroll:GetHeight()>=500)
+      assert(p.content.font[2]==13 and p.cennikClose)
+      assert(p.detailText:find('Полная текущая экономика неизвестна',1,true))
+      Game.expectedDetailsScroll=math.min(80,p.scroll:GetVerticalScrollRange())
+      p.scroll:SetVerticalScroll(Game.expectedDetailsScroll)
+    """)
+    scan(lua)
+    lua.execute(r"""
+      local p=Cennik.UI.taskDetails
+      assert(p:IsShown() and p.detailText:find('ТЕКУЩАЯ ОЦЕНКА',1,true))
+      assert(p.blocks.economics.frame:IsShown() and p.blocks.materials.frame:IsShown())
+      assert(p.blocks.materials.headers[2]:GetText()=='Нужно')
+      assert(p.blocks.materials.rows[1][2]:GetText()==tostring(t.lines[1].quantity))
+      local sections=Cennik.UI:Details(t,true)
+      local lines={}
+      for _,section in ipairs(sections) do
+        for _,line in ipairs(section.lines) do lines[line]=(lines[line] or 0)+1 end
+      end
+      for line in (p.detailText .. '\n'):gmatch('(.-)\n') do
+        assert(lines[line] and lines[line]>0,'A detail was lost during grouping: ' .. line)
+        lines[line]=lines[line]-1
+      end
+      for _,count in pairs(lines) do assert(count==0) end
+      assert(p.scroll:GetVerticalScroll()==math.min(Game.expectedDetailsScroll,p.scroll:GetVerticalScrollRange()))
+      local updates=p.scroll.rectUpdates
+      Cennik.UI:Refresh(); assert(p.scroll.rectUpdates==updates)
+      Game.advance(91)
+      assert(p.detailText:find('Полная текущая экономика неизвестна',1,true))
+      p.cennikClose.scripts.OnClick(); assert(not p:IsShown())
+    """)
+
+
+def test_selected_opportunity_preview_groups_details_and_emphasizes_live_metrics(exchange):
+    lua = runtime(exported(exchange, "simple_craft"))
+    lua.execute("""
+      Cennik.UI:Attach(); Cennik.UI.focus=t.task_id; Cennik.UI:Show()
+      local view=Cennik.UI.taskPreview
+      assert(view.compact and view.blocks.status.frame:IsVisible())
+      assert(view.blocks.status.lineFonts[1].font[3]=='OUTLINE')
+      assert(view.blocks.economics.lineFonts[1]:GetText():find('неизвестна',1,true))
+      assert(view.blocks.materials.rows[1][2].font[3]=='OUTLINE')
+      assert(view.detailText==Cennik.UI:Details(t))
+    """)
+    scan(lua)
+    lua.execute("""
+      local view=Cennik.UI.taskPreview; local profit
+      for _,font in ipairs(view.blocks.economics.lineFonts) do
+        if font:GetText():find('Потенциальная прибыль:',1,true) then profit=font end
+      end
+      assert(profit and profit.font[3]=='OUTLINE' and profit:GetText():find('ROI:',1,true))
+      assert(view.detailText==Cennik.UI:Details(t))
+      local offset=math.min(40,view.scroll:GetVerticalScrollRange())
+      view.scroll:SetVerticalScroll(offset)
+      Cennik.UI:Refresh()
+      assert(Cennik.UI.taskPreview==view and view.scroll:GetVerticalScroll()==offset)
+      -- Refresh reattaches the pooled viewport without recreating its cards.
+      assert(profit==view.blocks.economics.lineFonts[3])
+    """)
+
+
 def test_list_does_not_reuse_history_scroll_and_repeated_tab_clicks_keep_pool_bounded(exchange):
     lua = runtime(exported(exchange, "vendor_arbitrage"))
     lua.execute('Cennik.UI:Attach(); Cennik.UI:Show(); oldList=Cennik.UI.opportunityScroll; Cennik.UI.tabs.History:GetScript("OnClick")()')

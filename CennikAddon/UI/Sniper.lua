@@ -2,6 +2,76 @@ local _, C = ...
 local S,U=C.Sniper,C.UI
 local modeNames={any="Любая цена",limit="Не дороже / шт.",median3d="Скидка к медиане 3 дней"}
 local priorities={high="Высокий",normal="Обычный",low="Низкий"}
+S.windowOrder={}
+local strataRank={BACKGROUND=0,LOW=1,MEDIUM=2,HIGH=3,DIALOG=4,FULLSCREEN=5,FULLSCREEN_DIALOG=6,TOOLTIP=7}
+function S:ApplyWindowOrder()
+  if InCombatLockdown and InCombatLockdown() then return end
+  local level=20
+  local strata=AuctionHouseFrame and AuctionHouseFrame:GetFrameStrata() or "HIGH"
+  for _,window in ipairs(self.windowOrder) do
+    if window:IsShown() then
+      -- The opener can be raised by the client's toplevel handling after
+      -- OnClick. Keep the explicitly active dialog in a higher stratum;
+      -- focusing the auction or another window releases that distinction.
+      local front=window==self.activeWindow and window~=AuctionHouseFrame
+      local foreground=(strataRank[strata] or 0)<strataRank.DIALOG and "DIALOG" or "FULLSCREEN_DIALOG"
+      window:SetFrameStrata(front and foreground or strata); window:SetFrameLevel(level)
+      level=level+200
+    end
+  end
+end
+function S:FocusWindow(window)
+  if not window or not window:IsShown() then return end
+  for index,entry in ipairs(self.windowOrder) do if entry==window then table.remove(self.windowOrder,index); break end end
+  self.windowOrder[#self.windowOrder+1]=window; self.activeWindow=window
+  self:ApplyWindowOrder()
+  -- Blizzard and other addons can raise the auction independently of our
+  -- cached active window. An explicit click/open must always raise again.
+  if not (InCombatLockdown and InCombatLockdown()) then window:Raise() end
+end
+function S:OpenWindow(window,passive)
+  window:Show()
+  if passive then self:ApplyWindowOrder() else self:FocusWindow(window) end
+end
+function S:RegisterWindow(window,passive)
+  for _,entry in ipairs(self.windowOrder) do if entry==window then return end end
+  -- Background findings stay behind the window the player is using.
+  table.insert(self.windowOrder,1,window)
+  window:HookScript("OnMouseDown",function() S:FocusWindow(window) end)
+  if passive then self:ApplyWindowOrder() else self:FocusWindow(window) end
+end
+function S:WindowForControl(control)
+  for _=1,100 do
+    if not control then return end
+    for _,window in ipairs(self.windowOrder) do if window==control then return window end end
+    if type(control.GetParent)~="function" then return end
+    control=control:GetParent()
+  end
+end
+function S:WatchWindowFocus()
+  if not self.focusListener then
+    local listener=CreateFrame("Frame"); self.focusListener=listener
+    pcall(listener.RegisterEvent,listener,"GLOBAL_MOUSE_DOWN")
+    listener:SetScript("OnEvent",function()
+      local foci=GetMouseFoci and GetMouseFoci() or (GetMouseFocus and {GetMouseFocus()}) or {}
+      local target,topStrata,topLevel=nil,-1,-1
+      for _,control in ipairs(foci) do
+        local window=S:WindowForControl(control)
+        if window then
+          -- Mouse foci can include both an auction parent and a Cennik
+          -- control; their enumeration order is not a window focus order.
+          local strata=strataRank[control:GetFrameStrata()] or 0
+          local level=control:GetFrameLevel()
+          if strata>topStrata or strata==topStrata and level>topLevel then
+            target,topStrata,topLevel=window,strata,level
+          end
+        end
+      end
+      if target then S:FocusWindow(target) end
+    end)
+  end
+  if AuctionHouseFrame then self:RegisterWindow(AuctionHouseFrame,true) end
+end
 local function money(n) return n and GetMoneyString(n,true) or "нет данных" end
 local function text(parent,value,x,y,width)
   local f=parent:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
@@ -10,7 +80,14 @@ local function text(parent,value,x,y,width)
 end
 local function button(parent,value,x,y,width,callback)
   local f=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate")
-  f:SetSize(width,25); f:SetPoint("TOPLEFT",x,y); f:SetText(value); f:SetScript("OnClick",callback); return f
+  f:SetSize(width,25); f:SetPoint("TOPLEFT",x,y); f:SetText(value)
+  local function focus() S:FocusWindow(S:WindowForControl(f)) end
+  f:HookScript("OnMouseDown",focus)
+  f:SetScript("OnClick",function(...)
+    -- Activate the owner BEFORE the action: the action may open a child.
+    focus(); return callback(...)
+  end)
+  return f
 end
 local function input(parent,value,x,y,width,multiline)
   local f=CreateFrame("EditBox",nil,parent,"InputBoxTemplate")
@@ -20,8 +97,10 @@ local function input(parent,value,x,y,width,multiline)
 end
 local function panel(width,height)
   local p=CreateFrame("Frame",nil,UIParent or AuctionHouseFrame,BackdropTemplateMixin and "BackdropTemplate" or nil)
+  p:Hide()
   p:SetSize(width,height); p:SetPoint("CENTER"); p:SetFrameStrata("DIALOG"); p:EnableMouse(true)
   p.cennikWidth=width
+  S:WatchWindowFocus(); S:RegisterWindow(p,true)
   p:SetAlpha(1); p:SetToplevel(true)
   -- A real opaque texture also works when the client's Backdrop mixin is absent.
   local background=p:CreateTexture(nil,"BACKGROUND"); background:SetAllPoints(p)
@@ -37,10 +116,17 @@ local function panel(width,height)
   return p
 end
 S.MakePanel,S.MakeText,S.MakeButton,S.MakeInput=panel,text,button,input
+function S:PanelSize(width,height)
+  local screenWidth=tonumber(UIParent and UIParent:GetWidth()) or 0
+  local screenHeight=tonumber(UIParent and UIParent:GetHeight()) or 0
+  return screenWidth>0 and math.min(width,screenWidth-32) or width,
+    screenHeight>0 and math.min(height,screenHeight-40) or height
+end
 function S:ClosePopups(all)
   for p in pairs(self.popupFrames or {}) do if all or p~=self.overlay then p:Hide() end end
 end
 function S:WatchAuctionTabs()
+  self:WatchWindowFocus()
   if not self.libTabHook then
     local lib=LibStub and LibStub("LibAHTab-1-0",true)
     if lib and lib.SetSelected then
@@ -69,7 +155,7 @@ function S:ShowEditor(item,existing,preset)
   local def=C:Clone(existing and existing.definition or preset or {item_id=item,quantity=1,mode="any",priority="normal",discount_bps=5000,unit_limit_copper=0,use_bags=false})
   text(p,existing and "Изменить цель снайпера" or "Добавить в снайпер",18,-18,440)
   text(p,"Название, ID, ссылка или Shift-клик в активное поле",18,-48,475)
-  local entry=input(p,item or def.item_id,22,-70,320); entry:SetFocus()
+  local entry=input(p,item or def.item_id,22,-70,320)
   p.itemInfo=text(p,item and C.Items:Label(item) or "Нажмите «Найти», затем выберите предмет",18,-102,475)
   button(p,"Найти",355,-70,135,function()
     local ok,reason=S:Lookup(entry:GetText(),function(rows)
@@ -170,6 +256,7 @@ function S:ShowEditor(item,existing,preset)
     p:Hide(); U:SelectSection("Sniper")
   end)
   button(p,"Закрыть",320,-380,170,function() p:Hide() end)
+  self:OpenWindow(p); entry:SetFocus()
 end
 function S:ShowTransfer()
   if self.transfer then self.transfer:Hide() end
@@ -194,6 +281,7 @@ function S:ShowTransfer()
     if ok then U:SelectSection("Sniper") end
   end)
   button(p,"Закрыть",400,-335,160,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowReconcile()
   local pending=C.db.pending; if not pending or not pending.sniper or pending.stage~="unknown" then return end
@@ -204,6 +292,7 @@ function S:ShowReconcile()
   button(p,"Куплено",18,-155,125,function() if S:Reconcile(true,tonumber(quantity:GetText()),tonumber(cost:GetText())) then p:Hide() end end)
   button(p,"Не куплено",155,-155,135,function() S:Reconcile(false); p:Hide() end)
   button(p,"Закрыть",300,-155,130,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowHistory()
   local p=panel(565,420)
@@ -222,6 +311,7 @@ function S:ShowHistory()
   local label=text(body,#lines>0 and table.concat(lines,"\n\n") or "Покупок пока нет. Поиск сам по себе не подтверждает покупку.",0,0,490)
   body:SetHeight(math.max(305,label:GetStringHeight()+15)); scroll:UpdateScrollChildRect()
   button(p,"Закрыть",390,-375,150,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:RowText(rule)
   local def=rule.definition; local limit=self:Limit(rule)
@@ -236,12 +326,8 @@ function U:SniperPanel()
     local f=pooled("Button","UIPanelButtonTemplate"); f:Enable(); f:SetPoint("TOPLEFT",x,y); f:SetSize(w,24); f:SetText(caption); f:SetScript("OnClick",fn); return f
   end
   b("Добавить предмет",0,0,155,function() S:ShowEditor() end)
-  b("Запустить все",163,0,145,function()
-    if not C:MarketBindingMatches(C.db.current_market) then S:Notice("Подтвердите рынок"); return end
-    for _,rule in ipairs(S:Rules()) do rule.enabled=S:Remaining(rule)>0 end
-    S:ResumeSearch(); C:Refresh()
-  end)
-  b("Пауза",316,0,100,function() S:Pause(); C:Refresh() end)
+  b("Продолжить все",163,0,145,function() S:ResumeAll(); C:Refresh() end)
+  b("Пауза все",316,0,100,function() S:Pause(); C:Refresh() end)
   b("Импорт / экспорт",424,0,180,function() S:ShowTransfer() end)
   local status=pooled("FontString","GameFontHighlightSmall"); status:SetPoint("TOPLEFT",0,-32); status:SetWidth(S.manualHold and 430 or 630); status:SetJustifyH("LEFT")
   status:SetText(S.manualHold and "Поиск на паузе после ручной работы в аукционе." or "Поиск и сигналы не зависят от золота. Цена в правилах — за штуку."); self.sniperStatus=status
@@ -261,6 +347,7 @@ function U:SniperPanel()
       end)
     end
     button(p,"Закрыть",350,-p:GetHeight()+35,125,function() p:Hide() end)
+    S:OpenWindow(p)
   end)
   b("Журнал",340,-52,120,function() S:ShowHistory() end)
   b("Найти / рецепт",465,-52,145,function() S:ShowEditor() end)

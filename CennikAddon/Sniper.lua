@@ -196,6 +196,7 @@ end
 function S:Pause()
   for _,rule in pairs(C.db.sniper.rules) do rule.enabled=false end
   self:CancelSearch("Снайпер приостановлен")
+  if self.overlay and self.overlay:IsShown() then self.overlayRequested=true end
   self:Notice("Снайпер приостановлен")
 end
 function S:HoldForManualSearch(reason)
@@ -212,6 +213,16 @@ function S:ResumeSearch()
   if not C.UI.frame or not C.UI.frame:IsShown() then return false end
   self.manualHold=nil; self.foreignTab=false
   self:Notice("Поиск продолжен во вкладке Cennik")
+  return true
+end
+function S:ResumeAll()
+  if not self:ResumeSearch() then return false end
+  local count=0
+  for _,rule in ipairs(self:Rules()) do
+    rule.enabled=self:Remaining(rule)>0
+    if rule.enabled then count=count+1 end
+  end
+  self:Notice(count>0 and ("Поиск продолжен для всех целей: " .. count) or "Нет незавершённых целей. Добавьте предмет")
   return true
 end
 function S:Traffic()

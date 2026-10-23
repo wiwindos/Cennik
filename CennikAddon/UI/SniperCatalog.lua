@@ -15,6 +15,7 @@ function S:ShowPicker(rows,callback)
   local body=CreateFrame("Frame",nil,scroll); body:SetSize(470,math.max(275,#rows*30)); scroll:SetScrollChild(body)
   for i,row in ipairs(rows) do button(body,C.Items:Label(row.item_id) .. " (#" .. row.item_id .. ")",0,-30*(i-1),465,function() p:Hide(); callback(row.item_id) end) end
   button(p,"Закрыть",365,-345,145,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowCard(item,index)
   if self.card then self.card:Hide() end
@@ -52,6 +53,7 @@ function S:ShowCard(item,index)
     text(p,"Показаны непосредственные материалы. Для NPC проверьте цену и доступ.\nЗолото персонажа не ограничивает поиск на аукционе.",18,-430,545)
   end
   button(p,"Закрыть",410,-470,150,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowMaterialPreview(recipe,batches)
   local p=panel(565,470); self.materialPreview=p
@@ -80,6 +82,7 @@ function S:ShowMaterialPreview(recipe,batches)
     p:Hide(); if S.card then S.card:Hide() end; U:Show(); U:SelectSection("Sniper")
   end)
   button(p,"Закрыть",380,-420,150,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowManualBought(identity)
   local rule=C.db.sniper.rules[identity]; if not rule then return end
@@ -92,6 +95,7 @@ function S:ShowManualBought(identity)
     if ok then p:Hide(); C:Refresh() else note:SetText(reason) end
   end)
   button(p,"Закрыть",310,-173,150,function() p:Hide() end)
+  self:OpenWindow(p)
 end
 function S:ShowAuctionatorShortcut(item)
   local p=self.auctionatorShortcut
@@ -102,7 +106,7 @@ function S:ShowAuctionatorShortcut(item)
     button(p,"Предмет / рецепт",160,-39,145,function() S:ShowCard(S.auctionatorSelection.itemID) end)
     p:SetScript("OnUpdate",function(self) if not C.Adapter:Open() then self:Hide() end end)
   end
-  p.item:SetText(C.Items:Label(item)); p:Show()
+  p.item:SetText(C.Items:Label(item)); self:OpenWindow(p,true)
 end
 function U:HiddenTasks()
   local parent=self.body
@@ -124,6 +128,7 @@ function U:HiddenTasks()
       local p=panel(445,170); text(p,"Удалить задание из скрытых?\nИстория покупок сохранится. Повторный импорт того же задания\nне восстановит его. Новые предложения предмета разрешены.",18,-18,405)
       button(p,"Удалить",18,-115,180,function() local ok,reason=C:DeleteHiddenTask(task); if ok then p:Hide(); C:Refresh() else C.UI.notice=reason; C:Refresh() end end)
       button(p,"Отмена",235,-115,180,function() p:Hide() end)
+      S:OpenWindow(p)
     end)
   end
   if #tasks==0 then local label=self:Widget("FontString",body,"GameFontHighlightSmall","hidden-label"); label:SetPoint("TOPLEFT",0,0); label:SetText("Скрытых заданий нет") end

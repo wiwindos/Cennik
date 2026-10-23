@@ -595,12 +595,14 @@ def test_all_offers_opens_native_buy_for_exact_key_without_purchasing_or_resumin
       end
       Game.click(function() s.overlay.offers.scripts.OnClick() end)
       assert(Game.nativeSelection and Cennik.Adapter:KeyEqual(Game.nativeSelection.itemKey,offer.key))
-      assert(not s.overlay:IsShown() and s.overlayHidden and s.manualHold and r.enabled)
+      assert(s.overlay:IsShown() and not s.overlayHidden and s.manualHold and r.enabled)
+      assert(s.activeWindow==AuctionHouseFrame)
+      assert(AuctionHouseFrame:GetFrameLevel()>s.overlay:GetFrameLevel())
       assert(not Cennik.db.pending and r.bought==0)
       for _,call in ipairs(Game.calls) do assert(call.kind=='search') end
       local calls=#Game.calls
       Game.advance(65); s:Tick(0.1)
-      assert(#Game.calls==calls and not s.overlay:IsShown())
+      assert(#Game.calls==calls and s.overlay:IsShown())
       SlashCmdList.CENNIK('sniper'); s:ShowFindings()
       assert(s.manualHold and s.overlay.resume:IsShown())
       assert(s.alerts[r.definition.id]==offer)
@@ -646,6 +648,312 @@ def test_finding_details_scroll_preserves_position_until_selection_changes(excha
       p.content.GetStringHeight=function() return 28 end
       s.selected=r.definition.id; s:RenderOverlay()
       assert(p.contentScroll:GetVerticalScrollRange()==0)
+    """)
+
+
+def test_findings_global_pause_and_resume_include_paused_but_not_completed_targets(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      for _,id in ipairs({'paused','completed'}) do
+        local d=Cennik:Clone(definition); d.id=id; assert(s:Add(d))
+      end
+      Cennik.db.sniper.rules.completed.bought=definition.quantity
+      p.pauseAll.scripts.OnClick()
+      assert(not r.enabled and not s.current and p:IsShown())
+      s:HoldForManualSearch('Ручной поиск')
+      p.resumeAll.scripts.OnClick()
+      assert(r.enabled and Cennik.db.sniper.rules.paused.enabled)
+      assert(not Cennik.db.sniper.rules.completed.enabled and not s.manualHold)
+      assert(p.resumeAll:GetText()=='Продолжить все' and p.pauseAll:GetText()=='Пауза все')
+      assert(p.offers:GetText()=='Посмотреть лоты' and Cennik.UI.section=='Sniper')
+      assert(not Cennik.db.pending and #Game.calls==1)
+    """)
+
+
+def test_finding_border_flashes_once_then_stays_lit_without_poll_restarts(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay; local key=C_AuctionHouse.MakeItemKey(2589)
+      local icon=p.foundIcons[r.definition.id]
+      assert(icon:IsShown() and icon.image.texture==12345)
+      local started=p.flashStarted; local signal=s.findingSignal
+      Game.advance(0.25); s:RenderOverlay(); assert(p.borderLit and p.flashStarted==started)
+      Game.advance(0.5); p.scripts.OnUpdate(); assert(not p.borderLit)
+      Game.advance(0.25)
+      p.scripts.OnUpdate(); assert(p.borderLit)
+      Game.advance(10); s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(p.borderLit and p.flashStarted==started and s.findingSignal==signal)
+      Game.items[2589][2]={quantity=1,buyoutAmount=500,containsOwnerItem=false,containsAccountItem=false,auctionID=124,itemKey=key}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.findingSignal==signal+1 and p.flashStarted==GetTime())
+      -- Unread icons stay visible when another target is selected.
+      local d=Cennik:Clone(definition); d.id='other'; d.item_id=5763; assert(s:Add(d))
+      s:ShowFindings('other'); assert(icon:IsShown() and s.findingHighlight.item_id==2589)
+      icon.scripts.OnClick(icon); assert(s.selected==r.definition.id)
+      assert(not icon:IsShown() and not p.borderActive and s.unreadCount==0)
+    """)
+
+
+def test_add_dialog_stays_above_large_findings_dashboard_when_new_lot_arrives(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      p.add.scripts.OnClick()
+      assert(s.editor:IsShown() and s.editor:GetFrameLevel()>p:GetFrameLevel())
+      local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.items[2589][2]={quantity=1,buyoutAmount=500,containsOwnerItem=false,containsAccountItem=false,auctionID=124,itemKey=key}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.editor:IsShown() and s.editor:GetFrameLevel()>p:GetFrameLevel())
+      s.editor.cennikClose.scripts.OnClick(); assert(p:IsShown() and r.enabled)
+      for i=1,60 do local d=Cennik:Clone(definition); d.id='many-' .. i; assert(s:Add(d)) end
+      s:RenderOverlay()
+      assert(p.scroll:GetHeight()>=400 and p.scroll:GetVerticalScrollRange()>0)
+      assert(p.content.font[2]==14 and p.rows[1].title.font[2]==13)
+    """)
+
+
+def test_unread_targets_coalesce_acknowledge_individually_and_rearm_without_changing_purchase(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay; local key=C_AuctionHouse.MakeItemKey(2589)
+      local d=Cennik:Clone(definition); d.id='other'; d.item_id=5763
+      assert(s:Add(d)); local other=Cennik.db.sniper.rules.other; other.enabled=true
+      Game.commodity[5763]={{quantity=50,unitPrice=15,numOwnerItems=0}}
+      local otherKey=C_AuctionHouse.MakeItemKey(5763)
+      s:AcceptRows(other,Cennik.Adapter:Results(5763,otherKey,true),otherKey)
+      local first,second=p.foundIcons[r.definition.id],p.foundIcons.other
+      assert(s.unreadCount==2 and first:IsShown() and second:IsShown())
+      assert(first~=second and first.layoutIndex==1 and second.layoutIndex==2)
+      assert(p.finding:GetText():find('2',1,true))
+      Game.commodity[2589][1].quantity=110
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(p.foundIcons[r.definition.id]==first and p.foundIcons.other==second)
+      assert(first.layoutIndex==1 and second.layoutIndex==2 and s.unreadCount==2)
+      local original=s.alerts[r.definition.id]; local otherOffer=s.alerts.other
+      p.rows[1].scripts.OnClick(p.rows[1])
+      assert(s.selected==r.definition.id and not s.unreadFindings[r.definition.id])
+      assert(s.unreadCount==1 and p.borderActive and not first:IsShown() and second:IsShown())
+      assert(s.alerts[r.definition.id]==original and s.alerts.other==otherOffer)
+      second.scripts.OnClick(second)
+      assert(s.selected=='other' and s.unreadCount==0 and not second:IsShown())
+      assert(not p.borderActive and s.alerts.other==otherOffer)
+      for _,edge in ipairs(p.redBorder) do assert(edge:GetAlpha()==0) end
+      local signal=s.findingSignal
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(s.unreadCount==0 and s.findingSignal==signal)
+      Game.commodity[2589][1].quantity=90
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      Game.commodity[2589][1].quantity=80
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(s.unreadCount==1 and s.findingSignal==signal+2 and first:IsShown())
+      assert(s.unreadFindings[r.definition.id].finding.available==80)
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(s.unreadCount==1 and s.findingSignal==signal+2)
+      p.rows[1].scripts.OnClick(p.rows[1])
+      Game.commodity[2589]={}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
+      assert(s.unreadCount==1 and not s.alerts[r.definition.id] and not p.buy:IsEnabled())
+      assert(s.findingNotice:find('недоступно',1,true))
+      signal=s.findingSignal
+      s:MissingFindings(r,key); s:RenderOverlay(); assert(s.findingSignal==signal)
+    """)
+
+
+def test_finding_icons_scroll_when_many_targets_have_unread_changes(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      local original=s.alerts[r.definition.id]
+      for index=1,24 do
+        local d=Cennik:Clone(definition); d.id='notice-' .. index; d.item_id=6000+index
+        assert(s:Add(d)); local rule=Cennik.db.sniper.rules[d.id]
+        local lot=Cennik:Clone(original); lot.rule_id=d.id; lot.item_id=d.item_id
+        s:NotifyFinding(rule,lot,'Новое предложение',true)
+      end
+      s:RenderOverlay()
+      assert(s.unreadCount==25 and p.iconsScroll:GetScrollChild()==p.iconsBody)
+      assert(p.iconsScroll.clipsChildren and p.iconsScroll:GetVerticalScrollRange()>0)
+      local first=p.foundIcons[r.definition.id]; local last=p.foundIcons['notice-24']
+      assert(first:IsVisible() and last:IsShown() and last.layoutIndex==25)
+      p.iconsScroll:SetVerticalScroll(56); local updates=p.iconsScroll.rectUpdates
+      for index=1,10 do s:RenderOverlay() end
+      assert(p.iconsScroll:GetVerticalScroll()==56 and p.iconsScroll.rectUpdates==updates)
+      last.scripts.OnClick(last)
+      assert(not last:IsShown() and first:IsShown() and s.unreadCount==24)
+      assert(s.selected=='notice-24' and s.alerts[r.definition.id]==original)
+    """)
+
+
+def test_reappearing_ordinary_auction_notifies_again_after_its_disappearance_was_read(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay; local key=C_AuctionHouse.MakeItemKey(2589)
+      local icon=p.foundIcons[r.definition.id]; icon.scripts.OnClick(icon)
+      local row=Game.items[2589][1]; Game.items[2589]={}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.unreadCount==1 and not s.alerts[r.definition.id])
+      icon.scripts.OnClick(icon); assert(s.unreadCount==0)
+      Game.items[2589]={row}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.unreadCount==1 and s.findingHighlight.auction_id==123)
+      local signal=s.findingSignal
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.findingSignal==signal)
+    """)
+
+
+def test_native_auction_and_task_dialog_follow_clicked_child_without_scan_focus_steal(exchange):
+    lua = game(exchange, gear=True)
+    found(lua, gear=True)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      s:ShowFindings(); assert(p:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+      p.add.scripts.OnClick(); local editor=s.editor
+      assert(editor:GetFrameLevel()>p:GetFrameLevel())
+      local nativePanel=CreateFrame('Frame',nil,AuctionHouseFrame)
+      local nativeButton=CreateFrame('Button',nil,nativePanel)
+      Game.mouseFoci={nativeButton}; Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(s.activeWindow==AuctionHouseFrame and AuctionHouseFrame:GetFrameLevel()>editor:GetFrameLevel())
+      local before=AuctionHouseFrame:GetFrameLevel()
+      local key=C_AuctionHouse.MakeItemKey(2589)
+      Game.items[2589][2]={quantity=1,buyoutAmount=500,containsOwnerItem=false,containsAccountItem=false,auctionID=124,itemKey=key}
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
+      assert(s.activeWindow==AuctionHouseFrame and AuctionHouseFrame:GetFrameLevel()==before)
+      assert(p:GetFrameLevel()<before and editor:IsShown())
+      Cennik.UI:ShowTaskDetails(t); local details=Cennik.UI.taskDetails
+      assert(details:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+      Game.mouseFoci={p.rows[1]}; Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(p:GetFrameLevel()>details:GetFrameLevel())
+      Game.mouseFoci={details.check}; Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(details:GetFrameLevel()>p:GetFrameLevel())
+      GetMouseFoci=nil; GetMouseFocus=function() return nativeButton end
+      Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(AuctionHouseFrame:GetFrameLevel()>details:GetFrameLevel())
+    """)
+
+
+def test_findings_raise_again_when_native_auction_changed_levels_outside_focus_manager(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      s:ShowFindings(); assert(s.activeWindow==p and p.toplevel)
+      AuctionHouseFrame:SetFrameLevel(p:GetFrameLevel()+1000)
+      local before=Game.raiseCount
+      -- The cached activeWindow is still p, but the game raised the AH.
+      s:ShowFindings()
+      assert(p:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+      assert(Game.raised==p and Game.raiseCount>before)
+      -- Child controls must also work without the optional global event.
+      AuctionHouseFrame:SetFrameLevel(p:GetFrameLevel()+1000)
+      p.rows[1].scripts.OnClick(p.rows[1])
+      assert(Game.raised==p and p:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+      AuctionHouseFrame:SetFrameLevel(p:GetFrameLevel()+1000)
+      p.scripts.OnMouseDown(p,'LeftButton')
+      assert(Game.raised==p and p:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+      p.add.scripts.OnClick()
+      assert(Game.raised==s.editor and s.editor:GetFrameLevel()>p:GetFrameLevel())
+    """)
+
+
+def test_mouse_focus_order_does_not_send_findings_behind_auction_parent(exchange):
+    lua = game(exchange)
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; local p=s.overlay
+      s:ShowFindings()
+      Game.mouseFoci={AuctionHouseFrame,p.rows[1]}
+      Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(s.activeWindow==p and Game.raised==p)
+      assert(p:GetFrameLevel()>AuctionHouseFrame:GetFrameLevel())
+    """)
+
+
+def test_edit_dialog_stays_in_front_after_opener_is_raised_at_end_of_click(exchange):
+    lua = game(exchange)
+    lua.execute("UIParent=CreateFrame('Frame')")
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper; s:ShowFindings(); local p=s.overlay
+      Game.mouseFoci={p.edit}; Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      p.edit.scripts.OnMouseDown(p.edit,'LeftButton')
+      p.edit.scripts.OnClick(p.edit)
+      local editor=s.editor
+      assert(editor:IsVisible() and Game.focused==editor.itemEntry)
+      -- Simulate the engine's toplevel raise of the clicked owner after
+      -- its callback has opened another window. Levels alone are insufficient.
+      p:SetFrameLevel(editor:GetFrameLevel()+1000); p:Raise()
+      assert(s.activeWindow==editor and editor:GetFrameStrata()=='DIALOG')
+      assert(p:GetFrameStrata()=='MEDIUM')
+      s:RenderOverlay()
+      assert(editor:GetFrameStrata()=='DIALOG' and p:GetFrameStrata()=='MEDIUM')
+      -- A subsequent real click must still be able to activate the auction.
+      local nativeButton=CreateFrame('Button',nil,AuctionHouseFrame)
+      Game.mouseFoci={nativeButton}; Game.event('GLOBAL_MOUSE_DOWN','LeftButton')
+      assert(s.activeWindow==AuctionHouseFrame and editor:GetFrameStrata()=='MEDIUM')
+      assert(AuctionHouseFrame:GetFrameLevel()>editor:GetFrameLevel())
+      -- Reopening the hidden findings while editing is passive.
+      s:ShowEditor(5763); editor=s.editor; p:Hide(); s:RenderOverlay()
+      assert(p:IsShown() and s.activeWindow==editor and p:GetFrameStrata()=='MEDIUM')
+      assert(editor:GetFrameStrata()=='DIALOG')
+    """)
+
+
+def test_nested_catalog_and_auxiliary_dialogs_open_above_their_owner(exchange):
+    lua = game(exchange)
+    lua.execute("UIParent=CreateFrame('Frame')")
+    found(lua)
+    lua.execute("""
+      local s=Cennik.Sniper
+      local function click(window,caption)
+        for i=#Game.frames,1,-1 do
+          local b=Game.frames[i]
+          if b.kind=='Button' and b:GetText()==caption and s:WindowForControl(b)==window then
+            b.scripts.OnClick(b); return
+          end
+        end
+        error('Button not found: ' .. caption)
+      end
+      local function above(previous)
+        local current=s.activeWindow
+        assert(current~=previous and current:IsVisible())
+        assert(current:GetFrameLevel()>previous:GetFrameLevel())
+        assert(current:GetFrameStrata()=='DIALOG' and previous:GetFrameStrata()=='MEDIUM')
+        return current
+      end
+      s:ShowFindings(); local current=s.overlay
+      click(current,'Изменить'); current=above(current)
+      click(current,'Карточка / рецепт'); current=above(current)
+      click(current,'Снайпить предмет'); current=above(current)
+      s:ShowPicker({{item_id=2589},{item_id=5763}},function() end); current=above(current)
+      local recipe={item_id=5763,materials={{item_id=2592,quantity=3}}}
+      s:ShowMaterialPreview(recipe,2); current=above(current)
+      s:ShowTransfer(); current=above(current)
+      s:ShowHistory(); current=above(current)
+      s:ShowManualBought(r.definition.id); current=above(current)
+      Cennik.db.pending={sniper=true,stage='unknown',quantity=1,cost=10}
+      s:ShowReconcile(); current=above(current)
+      Cennik.db.pending=nil
+      Cennik.UI:ShowTaskDetails(t); local details=above(current)
+      s:ShowFindings(); above(details)
+      Cennik.UI:ShowTaskDetails(t); assert(s.activeWindow==details and details:IsVisible())
+      -- The Auctionator shortcut is populated automatically, including while
+      -- a dialog is being edited. Neither first show nor reuse may take focus.
+      s:ShowEditor(5763); local editor=s.editor
+      s:ShowAuctionatorShortcut(5763); local shortcut=s.auctionatorShortcut
+      assert(s.activeWindow==editor and shortcut:GetFrameStrata()=='MEDIUM')
+      shortcut:Hide(); s:ShowAuctionatorShortcut(2589)
+      assert(s.activeWindow==editor and shortcut:GetFrameStrata()=='MEDIUM')
+      s.auctionatorSelection={itemID=2589}
+      click(shortcut,'В снайпер'); current=above(shortcut)
+      assert(current==s.editor and current.itemEntry:GetText()=='2589')
     """)
 
 
@@ -731,11 +1039,11 @@ def test_commodity_supply_change_is_not_claimed_as_new_auction(exchange):
     lua.execute("""
       local s=Cennik.Sniper; local key=C_AuctionHouse.MakeItemKey(2589)
       Game.commodity[2589][1].quantity=80
-      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert((Game.sounds or 0)==0)
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==1)
       Game.commodity[2589][1].quantity=90
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
-      assert(Game.sounds==1 and s.overlay.finding:GetText():find('Изменилось предложение товара',1,true))
-      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==1)
+      assert(Game.sounds==2 and s.overlay.finding:GetText():find('Изменилось предложение товара',1,true))
+      s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==2)
     """)
 
 

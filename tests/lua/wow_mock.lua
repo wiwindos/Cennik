@@ -5,6 +5,7 @@ function GetServerTime() return Game.now end
 function GetTime() return Game.clock end
 function GetMoney() return Game.money end
 function GetMoneyString(value) return tostring(value) .. "c" end
+function GetMouseFoci() return Game.mouseFoci or {} end
 function date(format,value) return tostring(value) end
 function GetRealmName() return "FixtureRealm" end
 function UnitFactionGroup() return "Alliance" end
@@ -14,6 +15,10 @@ function CreateFrame(kind,name,parent,template)
   local f={kind=kind,scripts={},events={},shown=true,parent=parent,points={}}
   table.insert(Game.frames,f)
   local methods={SetScript=function(self,key,fn) self.scripts[key]=fn end, RegisterEvent=function(self,e) self.events[e]=true end,
+    HookScript=function(self,key,fn)
+      local original=self.scripts[key]
+      self.scripts[key]=function(...) if original then original(...) end; fn(...) end
+    end,
     Show=function(self)
       local was=self.shown; self.shown=true
       if not was and self.scripts.OnShow then self.scripts.OnShow(self) end
@@ -33,6 +38,18 @@ function CreateFrame(kind,name,parent,template)
     GetScript=function(self,key) return self.scripts[key] end,
     SetSize=function(self,w,h) self.width,self.height=w,h end,
     SetWidth=function(self,w) self.width=w end,SetHeight=function(self,h) self.height=h end,
+    GetWidth=function(self) return rawget(self,"width") or 0 end,
+    SetFrameStrata=function(self,value) self.strata=value end,GetFrameStrata=function(self)
+      local parent=rawget(self,"parent"); return rawget(self,"strata") or (parent and parent:GetFrameStrata()) or "MEDIUM"
+    end,
+    SetFrameLevel=function(self,value) self.level=value end,GetFrameLevel=function(self)
+      local value=rawget(self,"level"); if value~=nil then return value end
+      local parent=rawget(self,"parent"); return parent and parent:GetFrameLevel()+1 or 0
+    end,
+    SetToplevel=function(self,value) self.toplevel=value end,
+    Raise=function(self) Game.raised=self; Game.raiseCount=(Game.raiseCount or 0)+1 end,
+    SetAlpha=function(self,value) self.alpha=value end,GetAlpha=function(self) return rawget(self,"alpha") or 1 end,
+    SetTexture=function(self,value) self.texture=value end,SetFont=function(self,path,size,flags) self.font={path,size,flags} end,
     SetClipsChildren=function(self,value) self.clipsChildren=value end,
     GetHeight=function(self) return rawget(self,"height") or 0 end,
     ClearAllPoints=function(self) self.points={} end,
@@ -63,7 +80,7 @@ function CreateFrame(kind,name,parent,template)
     HasFocus=function(self) return Game.focused==self end,
     Enable=function(self) self.enabled=true end,Disable=function(self) self.enabled=false end,
     SetEnabled=function(self,v) self.enabled=not not v end,IsEnabled=function(self) return self.enabled~=false end,
-    SetParent=function(self,v) self.parent=v end,IsObjectType=function() return true end,
+    SetParent=function(self,v) self.parent=v end,GetParent=function(self) return rawget(self,"parent") end,IsObjectType=function() return true end,
     CreateFontString=function(self) return CreateFrame("FontString",nil,self) end,
     CreateTexture=function(self) return CreateFrame("Texture",nil,self) end,
     SetColorTexture=function(self,r,g,b,a) self.color={r,g,b,a} end,
