@@ -289,7 +289,7 @@ class BulkChecks:
                   used: dict[int, int] | None = None, *, inspect_capacity=True,
                   policy: tuple[AnalyticsConfig, int] | None = None) -> dict:
         used = used if used is not None else {}
-        config, budget = policy or (self.w.store.settings().config, self.w.settings().budget_copper)
+        config, budget = policy or (self.w.effective_config(), self.w.settings().budget_copper)
         errors, warnings, lines = [], ["Сбыт и ликвидность не проверялись повторно; объём AH не гарантирует продажу"], []
         current = int(datetime.now(UTC).timestamp())
         for item in needed_items(o):

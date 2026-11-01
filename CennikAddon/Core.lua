@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.15.0"
+C.VERSION = "0.16.0"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -157,6 +157,8 @@ function C:Initialize()
   if self.Bulk and not self.collectorOnly then self.Bulk:Initialize() end
   if self.Accounting then self.Accounting:Initialize() end
   if self.Production and not self.collectorOnly then self.Production:Initialize() end
+  if self.CharacterRole then self.CharacterRole:Initialize() end
+  if self.IdleGuard then self.IdleGuard:Initialize() end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame
@@ -179,6 +181,7 @@ SlashCmdList.CENNIK = function(message)
   message=(message or ""):match("^%s*(.-)%s*$"):lower()
   local market = message:match("^market%s+(.+)$")
   if C.collectorOnly then C.CollectorUI:Show(message=="diagnostics" or message=="диагностика");return end
+  if message=="role" or message=="роль" then C.CharacterRole:Show();return end
   if message=="collector" or message=="сбор" then C.CollectorUI:Show();return end
   if message=="diagnostics" or message=="диагностика" then C.CollectorUI:Show(true);return end
   if message=="production" or message=="производство" then C.Production:Show();return end

@@ -18,7 +18,7 @@ ALLOWED = {
     "scan": {"market", "realm", "faction", "build", "observed_at", "requested_at", "count", "reported_count", "skipped", "full", "error", "variants", "data", "auction_context"},
     "auctioneer_proposal": set(AuctioneerProposal.model_fields),
     "npc": {"item_id", "npc_id", "npc_name", "map_id", "batch_price_copper", "batch_quantity", "available", "observed_at", "blocked", "build"},
-    "recipe": {"spell_id", "item_id", "name", "inputs", "observed_at", "coverage", "build"},
+    "recipe": {"spell_id", "item_id", "name", "inputs", "observed_at", "coverage", "build", "qty_min", "qty_max", "profession"},
     "disenchant": {"observed_at", "spell_id", "inputs", "outputs", "build"},
     "craft": {"observed_at", "spell_id", "inputs", "outputs", "build"},
     "diagnostic": {"at", "code", "level", "scans", "rows", "queue", "error_counts", "addon_version", "build"},

@@ -151,13 +151,15 @@ function P:CaptureRecipes()
           local _,_,q=GetTradeSkillReagentInfo(index,i);local line=C.Accounting:Line(GetTradeSkillReagentItemLink(index,i),q)
           if line then inputs[#inputs+1]=line end
         end
-        report.recipes[tostring(spell)]={spell_id=spell,item_id=output.item_id,name=output.item_name,inputs=inputs}
+        local qmin,qmax
+        if GetTradeSkillNumMade then qmin,qmax=GetTradeSkillNumMade(index) end
+        report.recipes[tostring(spell)]={spell_id=spell,item_id=output.item_id,name=output.item_name,inputs=inputs,qty_min=qmin,qty_max=qmax}
       end
     end
   elseif C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs and C_TradeSkillUI.GetRecipeInfo then
     for _,id in ipairs(C_TradeSkillUI.GetAllRecipeIDs() or {}) do
       local info=C_TradeSkillUI.GetRecipeInfo(id)
-      if info and info.learned then report.recipes[tostring(id)]={spell_id=id,name=info.name} end
+      if info and info.learned then report.recipes[tostring(id)]=C:ObservedModernRecipe(id,info.name) end
     end
   end
   if IsPlayerSpell then report.disenchant=not not IsPlayerSpell(13262) elseif IsSpellKnown then report.disenchant=not not IsSpellKnown(13262) end

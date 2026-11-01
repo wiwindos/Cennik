@@ -89,10 +89,12 @@ class NpcReferences:
 
 class NpcReferenceProvider:
     def __init__(self, provider, quotes: dict[int, NpcQuote], cutoff: datetime,
-                 catalog: NpcPriceDocument | None = None):
+                 catalog: NpcPriceDocument | None = None, recipes=None):
         self.provider = provider
         self.quotes = {i: q for i, q in quotes.items() if q.observed_at <= cutoff}
         self.catalog = catalog
+        self.local_recipes = recipes
+        self.reference_as_of = cutoff
         self.catalog_metadata = catalog.metadata() if catalog else None
 
     def __enter__(self):
@@ -107,6 +109,12 @@ class NpcReferenceProvider:
 
     def items(self):
         items = self.provider.items()
+        if self.catalog:
+            for item_id, value in self.catalog.items.items():
+                item = items.get(item_id) or Item(item_id=item_id, name=value.name)
+                if item.vendor_sell_copper is None and value.sell_copper is not None:
+                    item = item.model_copy(update={"vendor_sell_copper": value.sell_copper})
+                items[item_id] = item
         for item_id, quote in self.quotes.items():
             item = items.get(item_id) or Item(item_id=item_id, name=quote.name)
             if item.source == "manual" and item.vendor_buy_copper is not None:
@@ -114,6 +122,14 @@ class NpcReferenceProvider:
             items[item_id] = item.model_copy(update={"vendor_buy_copper": quote.unit_price_copper,
                                                     "source": "NPC captured in game"})
         return items
+
+    def recipes(self):
+        known = {r.spell_id: r for r in self.provider.recipes()}
+        for recipe in self.local_recipes.recipes(self.reference_as_of) if self.local_recipes else []:
+            previous = known.get(recipe.spell_id)
+            if not previous or not previous.source_retrieved_at or recipe.source_retrieved_at >= previous.source_retrieved_at:
+                known[recipe.spell_id] = recipe
+        return list(known.values())
 
     def npc_reference(self, item_id: int):
         quote = self.quotes.get(item_id)

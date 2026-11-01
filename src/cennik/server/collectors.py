@@ -75,6 +75,8 @@ class ServerCollectors:
                                 elif value.kind == "npc" and not value.data.get("blocked"):
                                     w.npc_references.ingest({str(value.data["item_id"]): {**value.data,
                                         "scope": value.data.get("realm", "")+"/"+profile.faction}})
+                                elif value.kind == "recipe":
+                                    w.local_recipes.ingest({"recipes": {str(value.data["spell_id"]): value.data}})
                                 # Recipes and transform observations remain raw evidence;
                                 # they never automatically replace reviewed reference rules.
                                 return {"forwarded": value.identity()}

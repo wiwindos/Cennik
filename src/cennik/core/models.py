@@ -12,6 +12,7 @@ class Model(BaseModel):
 
 
 class AnalyticsConfig(Model):
+    own_data_only: bool = False
     enabled_strategies: list[str] = Field(
         default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph",
                                  "buy_disenchant", "craft_disenchant", "npc_to_auction"]

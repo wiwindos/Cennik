@@ -660,6 +660,9 @@ function U:Render()
   elseif self.section=="Sniper" and self.SniperPanel then self:SniperPanel()
   elseif self.section=="Hidden" then self:HiddenTasks()
   elseif self.section=="Market" and C.MarketCollector then
+    if CennikImport and CennikImport.worker_discovery then
+      button(self.body,"Роль этого персонажа",0,-92,250,function() C.CharacterRole:Show() end)
+    end
     local collector=C.MarketCollector
     label(self.body,"Массовый скан через Auctionator; снимки хранятся постоянно в локальном Cennik",0,0,625)
     button(self.body,"Сканировать сейчас",0,-34,180,function() collector:Start(); U:Refresh() end)
@@ -676,7 +679,7 @@ function U:Render()
     self:Text((collector.message or "Ожидание") .. "\n\nВ очереди: " .. #(C.db.market_scans or {}) .. "/" .. collector.maxQueue ..
       "\nСледующий запрос не ранее: " .. date("%H:%M:%S",C.db.collector.next_at or 0) ..
       "\n\nПосле /reload дождитесь импорта в вебе. Ещё один /reload загрузит подтверждение архива и освободит очередь." ..
-      "\nЗаполнение очереди приостанавливает новые запросы, старые снимки не удаляются.",0,-100,625,self.body:GetHeight()-105)
+      "\nХранятся последние снимки; старейшие заменяются. Заменено до выгрузки: " .. (C.db.collector.rotated or 0),0,-128,625,self.body:GetHeight()-133)
   elseif self.section=="History" then
     local lines={"Запись команды не доказывает покупку. Синхронизация отчётов после /reload."}
     if C.Accounting and C.Accounting.db then

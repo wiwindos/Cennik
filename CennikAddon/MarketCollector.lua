@@ -15,6 +15,13 @@ function M:Notice(message)
   self.message=message
   if C.UI and C.UI.section=="Market" then C:Refresh() end
 end
+function M:Reserve(bytes, includeCount)
+  -- Keep the newest observations, within both count and byte bounds.
+  while #C.db.market_scans>0 and ((includeCount and #C.db.market_scans>=self.maxQueue) or self:QueuedBytes()+bytes>self.maxTotalBytes) do
+    table.remove(C.db.market_scans,1)
+    C.db.collector.rotated=(C.db.collector.rotated or 0)+1
+  end
+end
 function M:Initialize()
   C.db.market_scans=C.db.market_scans or {}
   C.db.collector=C.db.collector or {enabled=false,next_at=0,sequence=0}
@@ -60,8 +67,6 @@ end
 function M:Available()
   local state=C.db.collector
   if not state or not C:MarketBindingMatches(state.market or C.db.current_market) then return false,"Подтвердите рынок персонажа","UNBOUND" end
-  if #C.db.market_scans>=self.maxQueue then return false,"Очередь заполнена. /reload, дождитесь импорта в вебе, затем /reload для подтверждения","QUEUE_FULL" end
-  if self:QueuedBytes()>=self.maxTotalBytes-4096 then return false,"Достигнут размер очереди. Сохраните и синхронизируйте снимки","QUEUE_FULL" end
   if not C.Adapter:Open() then return false,"Откройте аукцион","WAIT_AUCTION" end
   local contextOK,contextReason,contextCode=C.AuctionContext:Check("collect")
   if not contextOK then return false,contextReason,contextCode end
@@ -140,7 +145,12 @@ function M:Finish()
     count=#p.parts,reported_count=p.count,skipped=p.skipped,full=not p.error and p.skipped==0 and #p.parts==p.count,
     error=p.error,variants=p.variants,data=table.concat(p.parts,";"),workspace_id=C.db.collector.workspace_id,
     auction_context=C:Clone(self.auction_context)}
-  table.insert(C.db.market_scans,scan)
+  if scan.full then self:Reserve((p.bytes or 0)+4096,true) end
+  if scan.full or (#C.db.market_scans<self.maxQueue and self:QueuedBytes()+(p.bytes or 0)+4096<=self.maxTotalBytes) then
+    table.insert(C.db.market_scans,scan)
+  else
+    C.db.collector.skipped_partial=(C.db.collector.skipped_partial or 0)+1
+  end
   if C.CollectorStatus then C.CollectorStatus:Finished(scan) end
   self.packing=nil; self.requested_at=nil
   self.emptyResponse=nil
@@ -155,9 +165,6 @@ function M:Receive()
     self.requested_at=nil;C.CollectorStatus:Set("AUCTION_CONTEXT_UNKNOWN","Ответ относится к другому или неподтверждённому аукциону")
     return
   end
-  if #C.db.market_scans>=self.maxQueue then self:Notice("Очередь сканов полна; новые запросы приостановлены до подтверждения архива"); return end
-  local limit=math.min(self.maxBytes,self.maxTotalBytes-self:QueuedBytes()-4096)
-  if limit<=0 then self:Notice("Достигнут размер очереди; сохраните и синхронизируйте снимки"); return end
   local count=C_AuctionHouse.GetNumReplicateItems()
   if not C:Integer(count,true) then self:Notice("API не сообщил количество строк"); return end
   if count==0 then
@@ -165,6 +172,8 @@ function M:Receive()
     self.emptyResponse=true
     return
   end
+  self:Reserve(self.maxBytes+4096,false)
+  local limit=math.min(self.maxBytes,self.maxTotalBytes-self:QueuedBytes()-4096)
   self.packing={index=0,count=count,observed_at=C:Now(),parts={},keys={},variants={},skipped=0,bytes=0,limit=limit}
   if C.CollectorStatus then C.CollectorStatus:Set("PACKING",tostring(count) .. " строк") end
   self:Pack()

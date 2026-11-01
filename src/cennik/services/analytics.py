@@ -107,7 +107,7 @@ class AnalyticsService:
             self.lock.release()
         return settings
 
-    def start(self, *, background: bool = True, as_of: datetime | None = None) -> dict:
+    def start(self, *, background: bool = True, as_of: datetime | None = None, config_override=None) -> dict:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("Аналитика уже выполняется.")
         self._performance = Performance()
@@ -117,6 +117,8 @@ class AnalyticsService:
             # The lock proves an abandoned 'running' record has no live owner.
             self.store.recover()
             settings = self.store.settings()
+            if config_override is not None:
+                settings.config = config_override
             settings.config = self.registry.normalize_config(settings.config)
             if settings.active_market is None:
                 raise ValueError("Выберите один активный рынок.")

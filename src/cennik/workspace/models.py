@@ -8,6 +8,10 @@ MARKET = "forever.pvp.alliance.us"
 
 
 class WorkspaceSettings(Model):
+    own_data_only: bool = False
+    auto_references: bool = True
+    auto_history: bool = True
+    auto_fyi: bool = True
     development_mode: bool = False
     development_as_of: AwareDatetime | None = None
     auto_scan: bool = True

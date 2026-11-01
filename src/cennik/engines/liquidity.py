@@ -45,7 +45,7 @@ class CraftLiquidity:
         reason = None
         if config.craft_liquidity_enabled:
             if price.sales_estimated_per_day is None or age is None:
-                reason = "liquidity_unknown_sales"
+                reason = None if config.own_data_only else "liquidity_unknown_sales"
             elif age > config.craft_sales_max_age_seconds:
                 reason = "liquidity_stale_sales"
             elif config.craft_liquidity_source == "history" and len(points) < config.craft_min_sales_days:
@@ -59,4 +59,6 @@ class CraftLiquidity:
             elif batch_percent is not None and batch_percent > config.craft_max_batch_sales_percent:
                 reason = "liquidity_large_batch"
         evidence["passed"] = None if not config.craft_liquidity_enabled else reason is None
+        if config.own_data_only and (price.sales_estimated_per_day is None or age is None):
+            evidence.update(passed=None, status="unknown", note="Ликвидность неизвестна: расчёт по собственному сбору, продажа не подтверждена")
         return evidence, reason

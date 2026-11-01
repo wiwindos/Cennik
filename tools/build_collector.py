@@ -34,7 +34,7 @@ def main():
     from cennik.collector.desktop import icon_image
     icon = build / "collector.ico"
     icon_image().save(icon, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
-    notices = ["Cennik Collector — third-party notices\n"]
+    notices = [product_name+" — third-party notices\n"]
     for package_name in ("pystray", "Pillow", "httpx", "httpcore", "anyio", "pydantic", "pydantic_core", "annotated-types", "typing_extensions", "typing-inspection", "certifi", "idna", "h11", "six", "PyInstaller"):
         distribution = importlib.metadata.distribution(package_name)
         notices.append(f"\n{package_name} {distribution.version}\n")

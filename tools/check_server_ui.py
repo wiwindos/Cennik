@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import uvicorn
 
 from cennik.server.app import create_server
@@ -18,6 +19,13 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     app = create_server(args.output / "server", "ui-fixture-"+"x"*40, public_origin="http://127.0.0.1:8772")
+    def upstream(request):
+        if request.url.path.endswith('/markets'):
+            return httpx.Response(200,json={'markets':[{'id':'forever.pvp.alliance.eu','label':'PvP Alliance EU'}, {'id':'forever.normal.horde.us','label':'Normal Horde US'}]})
+        if '/pricetable/' in request.url.path:
+            return httpx.Response(200,text='AHL1|forever/pvp/alliance/eu|'+str(int(time.time()))+'|0\n')
+        return httpx.Response(200,json={'recipes':[]})
+    app.state.catalog.sources.transport=httpx.MockTransport(upstream)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8772, log_level="warning", proxy_headers=False))
     thread = threading.Thread(target=server.run)
     thread.start()

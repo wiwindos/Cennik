@@ -18,6 +18,7 @@ from cennik.collector.server import Invitation
 from cennik.core.models import AnalyticsConfig
 from cennik.engines.disenchant import DisenchantRules
 from cennik.engines.npc_catalog import NpcPriceDocument
+from cennik.sources import TokenUpdate
 from cennik.strategies.craft_graph import CraftGraphSettings
 
 from .accounting import JournalRevision, LedgerEvent
@@ -194,6 +195,7 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     @app.get("/api/v2/settings")
     def settings():
         return {"workspace": workspace.settings(), "analytics": workspace.store.settings(),
+            "upstreams": workspace.sources.public(), "source_updates": workspace.source_updates.status(),
             "development": workspace.development_report(),
             "schemas": {"workspace": WorkspaceSettings.model_json_schema(), "analytics": AnalyticsConfig.model_json_schema(),
                         "craft_graph": CraftGraphSettings.model_json_schema()}}
@@ -201,6 +203,18 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     @app.put("/api/v2/settings")
     def save(value: WorkspaceSettings):
         return workspace.save_settings(value)
+
+    @app.put("/api/v2/sources/ahl/token")
+    def save_ahl_token(value: TokenUpdate):
+        return workspace.sources.save_token(value)
+
+    @app.post("/api/v2/sources/ahl/check", status_code=202)
+    def check_ahl_token():
+        return workspace.submit("ahl_token_check", workspace.sources.check_token)
+
+    @app.post("/api/v2/sources/fyi/update", status_code=202)
+    def update_fyi():
+        return workspace.submit("source_fyi", lambda: workspace.source_updates.run("fyi", force=True))
 
     @app.post("/api/v2/refresh", status_code=202)
     def refresh(value: RefreshRequest):

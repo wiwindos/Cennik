@@ -1,4 +1,22 @@
 local _, C = ...
+function C:ObservedModernRecipe(id,name)
+  local result={spell_id=id,name=name}
+  if not (C_TradeSkillUI and C_TradeSkillUI.GetRecipeSchematic) then return result end
+  local ok,s=pcall(C_TradeSkillUI.GetRecipeSchematic,id,false)
+  if not ok or type(s)~="table" or s.isRecraft or not C:Integer(s.outputItemID)
+    or not C:Integer(s.quantityMin) or not C:Integer(s.quantityMax) or s.quantityMax<s.quantityMin then return result end
+  local inputs={}
+  for _,slot in ipairs(s.reagentSlotSchematics or {}) do
+    if slot.required or slot.reagentType==1 then
+      if type(slot.reagents)~="table" or #slot.reagents~=1 or not C:Integer(slot.reagents[1].itemID)
+        or not C:Integer(slot.quantityRequired) or (slot.variableQuantities and #slot.variableQuantities>0) then return result end
+      inputs[#inputs+1]={item_id=slot.reagents[1].itemID,quantity=slot.quantityRequired}
+    elseif slot.required==nil and slot.reagentType==nil then return result end
+  end
+  if #inputs==0 then return result end
+  result.item_id=s.outputItemID;result.qty_min=s.quantityMin;result.qty_max=s.quantityMax;result.inputs=inputs
+  return result
+end
 -- Client-local names/links are presentation only. Imported tasks and identities stay unchanged.
 local I = {pending={},failed={},timeout=15}
 C.Items = I

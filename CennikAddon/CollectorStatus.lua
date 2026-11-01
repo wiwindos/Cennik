@@ -83,6 +83,7 @@ function S:Summary()
     current.message or "Ожидание",current.detail or "",current.action or "",
     "Последний полный снимок: " .. (success and date("%d.%m %H:%M:%S",success.at) .. " · " .. success.rows .. " строк" or "ещё нет"),
     "В памяти игры ожидают записи/локального подтверждения: " .. #(C.db.market_scans or {}) .. " снимков",
+    "Ротация: последние 3 снимка, максимум 40 МБ. Заменено до выгрузки: " .. (C.db.collector.rotated or 0),
     "Собрано этим аддоном: " .. (d.scans or 0) .. " снимков / " .. (d.rows or 0) .. " строк",
     "Локальный импорт: " .. (delivery.local_at and date("%d.%m %H:%M:%S",delivery.local_at) or "подтверждения ещё нет"),
     "Сервер: " .. (delivery.message or "подключение не настроено") .. (delivery.at and " · подтверждение от " .. date("%d.%m %H:%M:%S",delivery.at) or ""),
@@ -133,7 +134,9 @@ function S:CaptureRecipes()
           local line=C.Accounting:Line(GetTradeSkillReagentItemLink(i,j),q)
           if line then inputs[#inputs+1]={item_id=line.item_id,quantity=line.quantity} end
         end
-        r.recipes[tostring(spell)]={spell_id=spell,item_id=output and output.item_id,name=output and output.item_name,inputs=inputs,observed_at=r.observed_at}
+        local qmin,qmax
+        if GetTradeSkillNumMade then qmin,qmax=GetTradeSkillNumMade(i) end
+        r.recipes[tostring(spell)]={spell_id=spell,item_id=output and output.item_id,name=output and output.item_name,inputs=inputs,qty_min=qmin,qty_max=qmax,observed_at=r.observed_at}
       end
     end
   elseif C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs and C_TradeSkillUI.GetRecipeInfo then
@@ -142,7 +145,9 @@ function S:CaptureRecipes()
       if info and info.learned then
         -- Alternatives and optional reagents require a schematic; recipe access
         -- alone must never fabricate a complete material list.
-        r.recipes[tostring(id)]={spell_id=id,name=info.name,observed_at=r.observed_at}
+        local observed=C:ObservedModernRecipe(id,info.name)
+        observed.observed_at=r.observed_at
+        r.recipes[tostring(id)]=observed
       end
     end
   else self:Set("RECIPE_API_UNAVAILABLE");return end

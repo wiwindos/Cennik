@@ -2,7 +2,11 @@ local _, C = ...
 function C:Import()
   local imported = CennikImport
   if type(imported)=="table" and imported.format_version==2 then
-    imported=imported.routes and imported.routes[GetRealmName() .. ":" .. UnitName("player")]
+    local envelope=imported
+    imported=(imported.routes and imported.routes[GetRealmName() .. ":" .. UnitName("player")]) or imported.discovery
+    if imported and envelope.worker_agent_id then
+      imported=C:Clone(imported);imported.worker_discovery=true
+    end
     CennikImport=imported
     if not imported then self.db.current_run=nil;self.db.queue={}; print("Cennik: этому персонажу не назначен маршрут импорта"); return end
   end

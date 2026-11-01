@@ -20,6 +20,8 @@ def opportunity(
     item = context.items.get(price.item_id)
     observed = observed_at or price.observed_at
     risks = sorted(set(context.prices.flags(price) + (flags or [])))
+    if context.config.own_data_only:
+        risks = sorted(set(risks + ["own_data_only", "liquidity_unknown"]))
     return Opportunity(
         id=uuid5(NAMESPACE_URL, f"{context.run_id}/{strategy.id}/{price.item_id}/{identity}").hex,
         run_id=context.run_id, strategy_id=strategy.id, strategy_version=strategy.version,

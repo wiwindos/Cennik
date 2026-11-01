@@ -381,8 +381,9 @@ class MarketDatabase:
 
 
 class WorkspaceProvider(DuckDBProvider):
-    def __init__(self, database: MarketDatabase, market: str, as_of: datetime):
+    def __init__(self, database: MarketDatabase, market: str, as_of: datetime, *, own_data_only=False):
         self.database, self.market, self.as_of = database, market, as_of
+        self.own_data_only = own_data_only
         self.db = database.db.cursor()
         self.recipe_selection = {"policy": "latest_market_snapshot_as_of"}
         self._recipes = None
@@ -400,6 +401,12 @@ class WorkspaceProvider(DuckDBProvider):
         return rows
 
     def current_prices(self) -> dict[int, PriceObservation]:
+        if self.own_data_only:
+            rows = self.rows("SELECT quote_path FROM scan_registry WHERE complete AND market=? AND observed_at<=? ORDER BY observed_at DESC LIMIT 1", [self.market, self.as_of])
+            if not rows or not rows[0]["quote_path"]:
+                return {}
+            own_rows = self.rows("SELECT *, 'scan' granularity FROM read_parquet(?)", [str(self.database.root / rows[0]["quote_path"])])
+            return {row["item_id"]: self.observation(row) for row in own_rows}
         prices = super().current_prices()
         # Missing items in a newer complete source snapshot must not be resurrected.
         heads = self.rows("SELECT source,max(observed_at) observed_at FROM price_snapshots WHERE market=? AND observed_at<=? GROUP BY source", [self.market, self.as_of])
@@ -416,6 +423,8 @@ class WorkspaceProvider(DuckDBProvider):
         return result
 
     def source_reference(self, item_id: int):
+        if self.own_data_only:
+            return None
         if self._source_references is None:
             self._source_references = {row["item_id"]: row for row in self.rows(
                 "SELECT item_id,median30d_copper copper,observed_at,raw_id FROM price_snapshots WHERE market=? AND source='AHL1' AND observed_at<=?", [self.market, self.as_of])}
@@ -434,7 +443,7 @@ class WorkspaceProvider(DuckDBProvider):
         return result
 
     def historical_prices(self, days):
-        result = super().historical_prices(days)
+        result = {} if self.own_data_only else super().historical_prices(days)
         from datetime import timedelta
         paths = [str(self.database.root / row["quote_path"]) for row in self.rows(
             "SELECT quote_path FROM scan_registry WHERE complete AND quote_path IS NOT NULL AND market=? AND observed_at>=? AND observed_at<=?",
@@ -460,6 +469,8 @@ class WorkspaceProvider(DuckDBProvider):
     def sales_history(self, days):
         from datetime import timedelta
         result: dict[int, list[PriceObservation]] = defaultdict(list)
+        if self.own_data_only:
+            return result
         for row in self.rows("SELECT *, 'scan' granularity FROM source_sales_daily WHERE market=? AND observed_at>=? AND observed_at<=? ORDER BY observed_at",
                              [self.market, self.as_of-timedelta(days=days), self.as_of]):
             result[row["item_id"]].append(self.observation(row))

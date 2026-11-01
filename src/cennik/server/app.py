@@ -16,14 +16,16 @@ from cennik.core.models import Model
 from cennik.workspace.web import create_app as create_workspace_app
 
 from .auth import OwnerAuth
-from .bridge import ExchangeRequest, PrivateBridge, RegisterDevice
+from .bridge import DiscoverCharacters, ExchangeRequest, PrivateBridge, RegisterDevice
 from .catalog import Catalog, MarketProfile
 from .collectors import ServerCollectors
+from .pairing import PairApprove, Pairing, PairPoll, PairStart
 
 
 class SaveMarket(Model):
     profile: MarketProfile
     ahl_source: bool = False
+    enable_updates: bool | None = None
 
 
 class CollectorInvite(Model):
@@ -44,6 +46,7 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
     intake = create_hub(root / "collector-archive", owner_key)
     collectors = ServerCollectors(catalog, intake.state.hub)
     bridge = PrivateBridge(catalog)
+    pairing = Pairing(bridge)
     bridge.recover()
     mounted = set()
     analysis_slots = threading.Semaphore(1)
@@ -81,7 +84,8 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
     @app.middleware("http")
     async def access(request: Request, call_next):
         path = request.url.path
-        public = path in {"/", "/login", "/healthz", "/auth/login"} or path.startswith("/static/") or path.startswith("/collect/")
+        pair_public = path in {"/pair/v1/start", "/pair/v1/poll", "/pair/v1/ack"}
+        public = pair_public or path in {"/", "/login", "/healthz", "/auth/login"} or path.startswith("/static/") or path.startswith("/collect/")
         private_bridge = path.startswith("/bridge/v1/")
         if private_bridge:
             try:
@@ -93,7 +97,7 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
                 return JSONResponse({"detail": "Нужен вход владельца"}, status_code=401)
             request.state.cennik_owner = True
         origin = request.headers.get("origin")
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and not private_bridge and not path.startswith("/collect/"):
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not private_bridge and not pair_public and not path.startswith("/collect/"):
             if origin != auth.origin and not request.headers.get("X-Owner-Key"):
                 return JSONResponse({"detail": "Запрос должен исходить со страницы Cennik"}, status_code=403)
             if origin and origin != auth.origin:
@@ -156,17 +160,41 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
     def state():
         return {"profiles": catalog.public(), "ahl_profile_id": catalog.config().get("ahl_profile_id"),
             "collector_url": auth.origin+"/collect", "worker_url": auth.origin,
+            "pairing": pairing.pending(),
             "devices": [{k: v for k, v in d.items() if k != "token_hash"} for d in bridge.devices()]}
 
     @app.post("/server/api/markets")
     def save_market(value: SaveMarket):
         profile = catalog.save(value.profile, source=value.ahl_source)
         mount_profile(profile)
+        if value.enable_updates is not None:
+            w=catalog.workspace(profile.id)
+            w.save_settings(w.settings().model_copy(update={"auto_refresh":value.enable_updates,"auto_recalculate":value.enable_updates}))
         return profile.public()
+
+    @app.get("/server/api/ahl/markets")
+    def ahl_markets():
+        return catalog.sources.markets()
 
     @app.post("/server/api/markets/{identity}/workers")
     def register_worker(identity: str, value: RegisterDevice):
         return bridge.register(identity, value)
+
+    @app.post("/pair/v1/start")
+    def pair_start(value: PairStart, request: Request):
+        return pairing.start(value, request.client.host if request.client else "unknown")
+
+    @app.post("/pair/v1/poll")
+    def pair_poll(value: PairPoll):
+        return pairing.poll(value)
+
+    @app.post("/pair/v1/ack")
+    def pair_ack(value: PairPoll):
+        return pairing.acknowledge(value)
+
+    @app.post("/server/api/pairing/approve")
+    def pair_approve(value: PairApprove):
+        return pairing.approve(value)
 
     @app.delete("/server/api/workers/{identity}")
     def revoke_worker(identity: str):
@@ -180,7 +208,11 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
 
     @app.get("/bridge/v1/manifest")
     def manifest(request: Request):
-        return bridge.manifest(request.state.device)
+        return bridge.manifest(request.state.device, extended=request.headers.get("X-Cennik-Worker")=="0.2")
+
+    @app.post("/bridge/v1/characters")
+    def discovered_characters(value: DiscoverCharacters, request: Request):
+        return bridge.discover(request.state.device, value)
 
     @app.post("/bridge/v1/exchange", status_code=202)
     def exchange(value: ExchangeRequest, request: Request):

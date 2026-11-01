@@ -16,7 +16,7 @@
       if(formId==='server-login'){await api('/auth/login','POST',{key:f.get('key')});location.href='/';return;}
       if(formId==='server-market'){
         const profile={id:f.get('id')||crypto.randomUUID().replaceAll('-',''),label:f.get('label'),ruleset:f.get('ruleset'),faction:f.get('faction'),region:f.get('region'),realm_names:String(f.get('realm_names')).split('\n').map(v=>v.trim()).filter(Boolean),ahl_market:String(f.get('ahl_market')).trim()||null};
-        await api('/server/api/markets','POST',{profile,ahl_source:f.has('ahl_source')});message('Рынок сохранён. Данные других серверов остаются в отдельных профилях');await load();
+        await api('/server/api/markets','POST',{profile,ahl_source:f.has('ahl_source'),enable_updates:f.has('enable_updates')});message('Рынок сохранён. Данные других серверов остаются в отдельных профилях');await load();
       }else if(formId==='server-worker'){
         const clients=String(f.get('clients')).split('\n').filter(v=>v.trim()).map(line=>{const [role,character,realm,account='']=line.split('|').map(v=>v.trim());return {role,character,realm,account};});
         const d=await api('/server/api/markets/'+f.get('profile_id')+'/workers','POST',{label:f.get('label'),clients});

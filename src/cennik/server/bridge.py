@@ -29,7 +29,17 @@ class RemoteCharacter(Model):
 
 class RegisterDevice(Model):
     label: str = Field(min_length=1, max_length=100)
-    clients: list[RemoteCharacter] = Field(min_length=1, max_length=8)
+    clients: list[RemoteCharacter] = Field(default_factory=list, max_length=8)
+
+
+class CharacterDiscovery(RemoteCharacter):
+    role: str = Field(pattern=r"^(auctioneer|crafter|unassigned)$")
+    faction: str = Field(pattern=r"^(alliance|horde)$")
+    professions: list[str] = Field(default_factory=list, max_length=20)
+
+
+class DiscoverCharacters(Model):
+    characters: list[CharacterDiscovery] = Field(max_length=30)
 
 
 class ExchangeRequest(Model):
@@ -95,11 +105,52 @@ class PrivateBridge:
             atomic_json(self.root / (identity+".json"), device)
             return {"revoked": True}
 
-    def manifest(self, device):
+    def manifest(self, device, *, extended=False):
+        device = next(d for d in self.devices() if d["id"] == device["id"])
         profile = self.catalog.profile(device["profile_id"])
         clients = self.catalog.workspace(profile.id).production.clients()
-        return {"format_version": 1, "device_id": device["id"], "profile": profile.public(), "clients": [
+        result = {"format_version": 1, "device_id": device["id"], "profile": profile.public(), "clients": [
             {k: getattr(c, k) for k in ("id", "role", "realm", "character", "account")} for c in clients if c.id in device["clients"]]}
+        if extended:
+            result["notes"] = device.get("notes", [])
+        return result
+
+    def discover(self, device, value: DiscoverCharacters):
+        with self.lock:
+            device=next(d for d in self.devices() if d["id"]==device["id"])
+            profile=self.catalog.profile(device["profile_id"])
+            rows=[r for r in value.characters if r.faction==profile.faction]
+            if not profile.realm_names and len({r.realm for r in rows})==1:
+                profile=self.catalog.save(profile.model_copy(update={"realm_names":[rows[0].realm]}))
+            w=self.catalog.workspace(profile.id)
+            clients=w.production.clients()
+            notes=[]
+            for row in rows:
+                if row.realm not in profile.realm_names:
+                    notes.append("Сервер персонажа не совпадает с выбранным рынком")
+                    continue
+                if row.role=="unassigned":
+                    continue
+                existing=next((c for c in clients if (c.realm,c.character)==(row.realm,row.character)),None)
+                if existing and existing.remote_device!=device["id"]:
+                    notes.append("Персонаж уже назначен другому рабочему ПК")
+                    continue
+                if existing:
+                    clients=[c.model_copy(update={"role":row.role}) if c.id==existing.id else c for c in clients]
+                else:
+                    client=ProductionClient(remote_device=device["id"], role=row.role, character=row.character,
+                        realm=row.realm, account=row.account or uuid4().hex, game_root=str(w.root/"remote-games"/device["id"]))
+                    client.game_root=str(w.root/"remote-games"/device["id"]/client.id)
+                    clients.append(client)
+            try:
+                if clients:
+                    w.production.save_clients(ClientRoster(clients=clients))
+                    device["clients"]=[c.id for c in clients if c.remote_device==device["id"]]
+            except ValueError as error:
+                notes.append(str(error))
+            device.update(discovered=[r.model_dump(mode="json") for r in value.characters],notes=notes)
+            atomic_json(self.root/(device["id"]+".json"),device)
+            return self.manifest(device, extended=True)
 
     def state_path(self, device, client_id):
         if client_id not in device["clients"]:

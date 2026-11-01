@@ -12,6 +12,7 @@ from pydantic import Field
 from ahledger.util import atomic_json
 from cennik.core.models import Model
 from cennik.markets import MARKET_PATTERN
+from cennik.sources import Sources
 from cennik.workspace.service import Workspace
 
 
@@ -38,6 +39,7 @@ class Catalog:
         self.lock = threading.RLock()
         self.workspaces: dict[str, Workspace] = {}
         self.running = False
+        self.sources = Sources(self.root)
         if not self.path.exists():
             p = MarketProfile()
             atomic_json(self.path, {"profiles": [p.model_dump(mode="json")], "ahl_profile_id": p.id})
@@ -86,7 +88,7 @@ class Catalog:
             if identity not in self.workspaces:
                 p = self.profile(identity)
                 w = Workspace(self.root / "markets" / p.id, market_key=p.market, market_info=p.public(),
-                    server_mode=True, ahl_market=p.ahl_market)
+                    server_mode=True, ahl_market=p.ahl_market, sources=self.sources)
                 def guard():
                     if self.config().get("ahl_profile_id") != identity or not self.profile(identity).ahl_market:
                         raise RuntimeError("AHledger настроен на другой сервер/рынок. Измените выбор в панели сервера")

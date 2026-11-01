@@ -34,6 +34,7 @@ from cennik.engines.disenchant import DisenchantYield, expected_gross
 from cennik.engines.economics import auction_net
 from cennik.engines.npc_catalog import NpcPriceCatalog
 from cennik.services.analytics import AnalyticsService
+from cennik.sources import Sources
 
 from .accounting import Accounting
 from .bulk import BulkChecks
@@ -43,7 +44,9 @@ from .install import install_addon
 from .models import MARKET, ItemFacts, PlanRequest, RefreshRequest, WorkspaceSettings
 from .npc import NpcReferenceProvider, NpcReferences
 from .production import Production
+from .recipes import LocalRecipes
 from .sniper import SniperBook
+from .source_updates import SourceUpdates
 
 
 class WorkspaceExchange(AddonExchange):
@@ -56,13 +59,16 @@ class WorkspaceExchange(AddonExchange):
 
 
 class Workspace:
-    def __init__(self, root: Path, *, market_key: str = MARKET, market_info=None, server_mode=False, ahl_market=None):
+    def __init__(self, root: Path, *, market_key: str = MARKET, market_info=None, server_mode=False, ahl_market=None, sources=None):
         self.market_key = market_key
         self.ahl_market = ahl_market or market_key
         self.server_mode = server_mode
         self.updates_guard: Callable[[], None] | None = None
         self.market_binding: dict | None = None
         self.root = root.resolve()
+        self.sources = sources or Sources(self.root)
+        self.source_updates = SourceUpdates(self)
+        self.local_recipes = LocalRecipes(self.root, market_key)
         self.market = MarketDatabase(self.root, market_key=market_key, market_info=market_info)
         marker = self.root / "workspace.json"
         if not marker.exists():
@@ -135,12 +141,13 @@ class Workspace:
 
     def generation(self) -> str:
         clock = self.development_clock()
-        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + (":development:" + clock.isoformat() if clock else "")
+        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + ":recipes:"+self.local_recipes.generation() + ":own:"+str(self.settings().own_data_only) + (":development:" + clock.isoformat() if clock else "")
 
     def provider(self, path, market, as_of, *, data_as_of=None):
-        provider = DevelopmentProvider(self.market, market, as_of, data_as_of) if data_as_of is not None else WorkspaceProvider(self.market, market, as_of)
+        own = self.settings().own_data_only
+        provider = DevelopmentProvider(self.market, market, as_of, data_as_of) if data_as_of is not None and not own else WorkspaceProvider(self.market, market, as_of, own_data_only=own)
         return NpcReferenceProvider(provider, self.npc_references.snapshot(), data_as_of or as_of,
-                                    self.npc_catalog.snapshot())
+                                    self.npc_catalog.snapshot(), recipes=self.local_recipes)
 
     def development_report(self):
         key = (self.market.generation(), int(time.time() // 300))
@@ -155,6 +162,8 @@ class Workspace:
             self.updates_guard()
         if self.settings().development_mode:
             raise RuntimeError("Режим разработки: запросы AHledger отключены. Снимите галочку в настройках для обновления.")
+        if self.settings().own_data_only:
+            raise RuntimeError("Включена работа без AHledger: используются собственные сканы и сохранённые справочники")
 
     def save_settings(self, value: WorkspaceSettings):
         if self.server_mode and (value.game_root or value.account):
@@ -229,7 +238,7 @@ class Workspace:
         if cached and cached["expires"] > time.time():
             self.log.info("Cache hit: %s", spec.dataset)
             return {"dataset": spec.dataset, "cached": True, "changed": False}
-        headers = {"User-Agent": "Cennik/0.2 local analytics", "Accept-Encoding": "identity"}
+        headers = self.sources.headers(spec.url)
         if cached:
             previous = json.loads(cached["headers"])
             if previous.get("etag"):
@@ -245,7 +254,8 @@ class Workspace:
             self.last_request = time.monotonic()
             self.log.info("GET %s %s attempt=%s", spec.url, spec.params, attempt + 1)
             try:
-                with httpx.Client(timeout=45, follow_redirects=False) as client:
+                options = {"transport": self.sources.transport} if self.sources.transport is not None else {}
+                with httpx.Client(timeout=45, follow_redirects=False, trust_env=False, **options) as client:
                     with client.stream("GET", spec.url, params=spec.params, headers=headers) as response:
                         body = bytearray()
                         for chunk in response.iter_bytes():
@@ -264,8 +274,10 @@ class Workspace:
                         db.execute("UPDATE source_cache SET expires=?,checked_at=?,headers=? WHERE id=?", [cache_expiry(combined), now(), dumps(combined), key])
                     return {"dataset": spec.dataset, "changed": False, "http_status": 304}
                 if status != 200:
-                    raise ValueError(f"AHledger HTTP {status}: {bytes(body[:300]).decode('utf-8', errors='replace')}")
+                    raise ValueError(f"AHledger HTTP {status}")
                 parsed = parse(spec, bytes(body))
+                if spec.dataset == "crafting" and parsed.data.get("recipes") == []:
+                    raise RuntimeError("AHledger не вернул рецепты; прежний справочник сохранён")
                 changed = self.market.import_api(spec, parsed, bytes(body), response_headers)
                 with self.store.connection() as db:
                     db.execute("INSERT OR REPLACE INTO source_cache VALUES(?,?,?,?,?,?,?)", [key,
@@ -317,8 +329,17 @@ class Workspace:
             self.calculate()
         return result
 
+    def effective_config(self):
+        config = self.store.settings().config
+        if self.settings().own_data_only:
+            config = config.model_copy(update={"own_data_only": True, "history_reference_mode": "local_history"})
+        else:
+            config = config.model_copy(update={"own_data_only": False})
+        return config
+
     def calculate(self):
-        result = self.analytics.start(background=False)
+        config = self.effective_config()
+        result = self.analytics.start(background=False, config_override=config)
         latest = self.store.latest(self.market_key, summary=True)
         if latest and latest.status == "failed":
             raise ValueError(latest.error or "Расчёт завершился ошибкой")
@@ -421,6 +442,8 @@ class Workspace:
             if not isinstance(scans, list):
                 raise ValueError("Неверная очередь снимков")
         npc_prices = self.npc_references.ingest(data.get("npc_quotes") or {})
+        recipe_report = data.get("collector_recipes") or (data.get("production") or {}).get("recipes") or {}
+        local_recipes = self.local_recipes.ingest(recipe_report)
         try:
             self.collectors.capture(data, client.character if client else "Локальный сборщик")
         except (ValueError, TypeError, KeyError):
@@ -445,12 +468,12 @@ class Workspace:
             bulk_reports = {"accepted": 0, "error": str(error)}
             self.log.warning("Bulk report retained without acknowledgement: %s", error)
         results = self.import_scans(scans) if include_scans else []
-        if npc_prices["updated"] and self.settings().auto_recalculate and not any(not r["reused"] for r in results):
+        if (npc_prices["updated"] or local_recipes["updated"]) and self.settings().auto_recalculate and not any(not r["reused"] for r in results):
             self.calculate()
         sniper_ack = self.sniper.accept_game(data.get("sniper") or {})
         recipe_requests = self.sniper.pending_recipe_requests()
         recipe_error = None
-        if recipe_requests and not self.settings().development_mode:
+        if recipe_requests and not self.settings().development_mode and not self.settings().own_data_only:
             self.log.info("Requested recipe catalogue refresh from addon: %s requests", len(recipe_requests))
             try:
                 self.refresh(RefreshRequest(dataset="references"))
@@ -511,7 +534,7 @@ class Workspace:
         return {**exchanged, "scans": results, "acknowledged_scans": len(acknowledgements),
                 "saved_stamp": (before.st_mtime_ns, before.st_size) if before else None,
                 "npc_prices": npc_prices, "bulk_reports": bulk_reports, "accounting_reports": accounting_reports,
-                "production_reports": production_reports, "recipe_error": recipe_error,
+                "production_reports": production_reports, "recipe_error": recipe_error, "local_recipes": local_recipes,
                 "note": "Подтверждения и настройки загрузятся аддоном после /reload"}, payload
 
     def overview(self):
@@ -523,6 +546,8 @@ class Workspace:
         scans = self.market.rows('SELECT count(*) scans,coalesce(sum(row_count),0) "rows" FROM scan_registry')[0]
         return {"workspace_id": self.identity, "market": self.market_key, "market_info": self.market.market_info,
                 "server_mode": self.server_mode, "root": str(self.root), "sources": source, "coverage": coverage,
+                "source_updates": self.source_updates.status(), "upstreams": self.sources.public(),
+                "observed_recipes": len(self.local_recipes.document()),
                 "npc_reference_prices": len(self.npc_references.snapshot()),
                 "npc_catalog": self.npc_catalog.snapshot().metadata(),
                 "bulk_checks": {"format_version": 1, "max_candidates": 200, "max_unique_items": 200},
@@ -547,7 +572,7 @@ class Workspace:
             url = f"https://api.ahledger.com/v1/disenchant/{self.ahl_market}"
             with httpx.Client(timeout=30, follow_redirects=False) as client:
                 with client.stream("GET", url, params={"all": "true", "limit": "200"},
-                                   headers={"User-Agent": "Cennik disenchant rules check"}) as response:
+                                   headers=self.sources.headers(url)) as response:
                     body = bytearray()
                     for chunk in response.iter_bytes():
                         body.extend(chunk)
@@ -656,14 +681,14 @@ class Workspace:
             gross = opportunity.reference_price_copper * lines[0].get("purchased", lines[0]["needed"]) // opportunity.quantity
         if vendor:
             gross = sum(row["vendor_sell"] * row["purchased_quantity"] for line in lines for row in line.get("offers", []) if row["vendor_sell"] is not None)
-        config = self.store.settings().config
-        if config.craft_liquidity_enabled and opportunity.strategy_id in {"simple_craft", "craft_graph", "npc_to_auction"}:
+        config = self.effective_config()
+        if config.craft_liquidity_enabled and not config.own_data_only and opportunity.strategy_id in {"simple_craft", "craft_graph", "npc_to_auction"}:
             estimate = opportunity.details.get("liquidity", {}).get("conservative_sales_per_day")
             if estimate is None or Decimal(str(estimate)) <= 0:
                 problems.append("Нет оценки ликвидности для выбранной партии")
             elif Decimal(opportunity.quantity * request.batches) * 100 / Decimal(str(estimate)) > config.craft_max_batch_sales_percent:
                 problems.append("Партия превышает допустимую долю оценённых суточных продаж")
-        if config.craft_liquidity_enabled and disenchant:
+        if config.craft_liquidity_enabled and not config.own_data_only and disenchant:
             for output in disenchant["yields"]:
                 estimate = output["liquidity"]["conservative_sales_per_day"]
                 expected = Decimal(output["expected_count"]) * opportunity.quantity * request.batches
@@ -786,7 +811,10 @@ class Workspace:
                 if self.collectors.due():
                     self.submit("collector_delivery", self.deliver_collectors)
                     continue
-                if settings.auto_refresh and not settings.development_mode and time.monotonic() - self.last_refresh >= settings.refresh_seconds:
+                source_kind = self.source_updates.due()
+                if source_kind:
+                    self.submit("source_"+source_kind, lambda kind=source_kind: self.source_updates.run(kind))
+                elif settings.auto_refresh and not settings.development_mode and not settings.own_data_only and time.monotonic() - self.last_refresh >= settings.refresh_seconds:
                     self.last_refresh = time.monotonic()
                     self.submit("pricetable", lambda: self.refresh(RefreshRequest(dataset="pricetable")))
                 elif not settings.development_mode and time.monotonic() - self.last_maintenance >= 3600:
