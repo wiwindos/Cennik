@@ -17,6 +17,8 @@ function S:FinishPurchase(state,manual)
     rule.bought=rule.bought+p.quantity; rule.spent=rule.spent+p.cost
     C.db.sniper.spent=C.db.sniper.spent+p.cost
     if self:Remaining(rule)==0 then rule.enabled=false end
+    if C.Accounting then C.Accounting:Purchase("sniper:" .. p.attempt_id,p.item_link or p.item_id,p.quantity,p.cost,
+      {source="auction",confirmation=manual and "manual" or "client",details={rule_id=p.rule_id,item_key=p.key}}) end
   end
   self:Emit("purchase",{state=state,rule_id=p.rule_id,attempt_id=p.attempt_id,item_id=p.item_id,
     auction_id=p.auction_id,quantity=state=="bought" and p.quantity or 0,cost_copper=state=="bought" and p.cost or 0,

@@ -13,7 +13,8 @@ class Model(BaseModel):
 
 class AnalyticsConfig(Model):
     enabled_strategies: list[str] = Field(
-        default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph"]
+        default_factory=lambda: ["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph",
+                                 "buy_disenchant", "craft_disenchant", "npc_to_auction"]
     )
     strategy_settings: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
     history_reference_mode: Literal["local_history", "ahl_median30d"] = "local_history"
@@ -140,6 +141,8 @@ class Run(Model):
     started_at: AwareDatetime
     finished_at: AwareDatetime | None = None
     as_of: AwareDatetime
+    development_mode: bool = False
+    data_as_of: AwareDatetime | None = None
     generation: str
     config: AnalyticsConfig
     strategy_versions: dict[str, str]

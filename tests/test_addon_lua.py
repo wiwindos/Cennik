@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from auction_fixture import registry
 from lupa.lua51 import LuaRuntime
 from test_addon import exchange as exchange
 from test_addon import exported
@@ -26,11 +27,12 @@ def runtime(package):
             {
                 "format_version": 1,
                 "device_id": "test-device",
+                "auctioneer_registry": registry(),
                 "packages": [package.model_dump(mode="json")],
             }
         )
     )
-    lua.execute(f"Game.now={int(package.created_at.timestamp()) + 1}; Cennik:Initialize()")
+    lua.execute(f"Game.now={int(package.created_at.timestamp()) + 1}; CennikImport.auctioneer_registry.fetched_at=Game.now; Cennik:Initialize()")
     lua.execute(
         't=Cennik.db.tasks[next(Cennik.db.tasks)]; Cennik.db.binding={market=t.market,realm=GetRealmName(),faction="alliance",character=UnitName("player")}; t.conditions_confirmed=true'
     )
@@ -531,7 +533,7 @@ def test_opportunity_wrapped_title_and_summary_grow_row_and_remain_in_tooltip(ex
       Cennik.UI:Refresh()
       local row=Cennik.UI.opportunityRows[1]
       assert(row.cennikTitle:GetText():find(Game.localized[t.item_id],1,true))
-      assert(row.cennikSummary:GetText():find('Торговля с NPC',1,true))
+      assert(row.cennikSummary:GetText():find('Аукцион → NPC',1,true))
       assert(row:GetHeight()>=182 and Cennik.UI.opportunityScroll:GetVerticalScrollRange()>0)
       assert(row.cennikTitle.parent==row and row.cennikSummary.parent==row)
       GameTooltip={SetOwner=function() end,SetHyperlink=function(_,link) Game.tooltipLink=link end,

@@ -15,7 +15,6 @@ import duckdb
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
-from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse
 
 from cennik.addon.api import addon_router
@@ -100,12 +99,10 @@ def create_app(settings: Settings | None = None, api_key: str | None = None, *, 
             value["workspace"] = str(root)
         return value
 
-    static = Path(__file__).parent / "static"
-    app.mount("/static", StaticFiles(directory=static), name="static")
-
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(static / "index.html")
+        return {"service": "AHledger Archive API",
+                "message": "Старый интерфейс удалён. Запустите локальный Cennik через start_cennik.cmd (порт 8766)."}
 
     router = APIRouter(prefix="/api", dependencies=[Depends(authorize)])
 

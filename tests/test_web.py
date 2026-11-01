@@ -26,8 +26,9 @@ def test_startup_is_idle_and_does_not_create_queue_or_spawn_downloader(tmp_path,
         assert client.get("/healthz").json()["downloads_autostart"] is False
         status = client.get("/api/status", headers=HEADERS).json()
         assert status["run"]["state"] == "idle" and status["jobs"] == {}
-        assert client.get("/").status_code == 200
-        assert client.get("/static/app.js").status_code == 200
+        assert client.get("/").json()["service"] == "AHledger Archive API"
+        for asset in ("index.html", "app.js", "app.css", "analytics.js"):
+            assert client.get("/static/" + asset).status_code == 404
     assert not (root / "state.sqlite").exists()
 
 

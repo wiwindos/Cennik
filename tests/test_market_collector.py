@@ -23,6 +23,7 @@ def collector(exchange):
         InitiateScan=function() C_AuctionHouse.ReplicateItems() end}}
       Cennik.db.collector={enabled=true,market=t.market,next_at=0}
       Cennik.MarketCollector:Initialize()
+      Game.advance(3)
     """)
     return lua
 

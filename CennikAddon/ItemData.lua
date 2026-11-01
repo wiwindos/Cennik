@@ -97,6 +97,8 @@ function N:Quote(task,item)
   if quote and quote.blocked and quote.scope==self:Scope() and C:Now()-quote.observed_at<=self.maxAge then return nil end
   if quote and quote.scope==self:Scope() and quote.observed_at<=C:Now() and C:Now()-quote.observed_at<=self.maxAge
     and C:Integer(quote.batch_quantity) and C:Integer(quote.batch_price_copper,true) then return quote end
+  -- Direct resale needs a fresh scoped price, not an assumed database fallback.
+  if task.strategy_id=="npc_to_auction" then return nil end
   -- User-authorized stable NPC buy-price fallback from the frozen database snapshot.
   -- Never substitute an AH price or a mutable purchase cap for an NPC price.
   for _,material in ipairs(task.opportunity.details.materials or {}) do
@@ -139,9 +141,26 @@ function N:Capture()
       if info then price,quantity,available,purchasable,extended=info.price,info.stackCount,info.numAvailable,info.isPurchasable,info.hasExtendedCost end
     end
     if item and C:Integer(price,true) and C:Integer(quantity) and purchasable~=false and extended~=true then
+      local itemInfo=C.Items:Read(item)
       C.db.npc_quotes[item]={batch_price_copper=price,batch_quantity=quantity,unit_price_copper=math.ceil(price/quantity),
-        available=available and available>=0 and available or nil,observed_at=C:Now(),scope=self:Scope(),source="Открытый торговец"}
+        available=available and available>=0 and available or nil,observed_at=C:Now(),scope=self:Scope(),source="Открытый торговец",name=itemInfo and itemInfo.name}
     elseif item then C.db.npc_quotes[item]={blocked=true,observed_at=C:Now(),scope=self:Scope()} end
+    if item and C.CollectorStatus and C.CollectorStatus:IsEnabled() and C.db.npc_quotes[item]
+      and C:MarketBindingMatches(C.db.collector and C.db.collector.market or C.db.current_market) then
+      local fields={};for f in (UnitGUID and UnitGUID("npc") or ""):gmatch("[^-]+") do fields[#fields+1]=f end
+      local npc=tonumber(fields[6]);local key=tostring(npc or "unknown") .. ":" .. item
+      C.db.collector_npc=C.db.collector_npc or {};C.db.collector_npc_count=C.db.collector_npc_count or 0
+      if C.db.collector_npc[key] or C.db.collector_npc_count<5000 then
+        if not C.db.collector_npc[key] then C.db.collector_npc_count=C.db.collector_npc_count+1 end
+        local quote=C.db.npc_quotes[item]
+        C.db.collector_observation_sequence=(C.db.collector_observation_sequence or 0)+1
+        C.db.collector_npc[key]={item_id=item,npc_id=npc,npc_name=npc and UnitName("npc") or nil,
+          observation_id=C.db.device_id .. ":observation:" .. C.db.collector_observation_sequence,
+          map_id=C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player"),
+          batch_price_copper=quote.batch_price_copper,batch_quantity=quote.batch_quantity,
+          available=quote.available,blocked=quote.blocked,observed_at=math.floor(C:Now())}
+      elseif C.CollectorStatus then C.CollectorStatus:Set("OBSERVATION_LIMIT") end
+    end
   end
   C:Refresh()
 end

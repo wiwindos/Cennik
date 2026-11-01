@@ -40,6 +40,7 @@ function E:Start() -- called only from the player's Buy button
   if lot.cost>GetMoney() or lot.cost>C.db.packages[task.package_id].budget-C.db.packages[task.package_id].spent then return false end
   self.serial=self.serial+1
   local pending={task_id=task.task_id,item_id=lot.item_id,quantity=lot.quantity,cost=lot.cost,auction_id=lot.auction_id,
+    item_key=C:Clone(lot.key),item_link=lot.item_link,
     commodity=lot.commodity,limit=lot.limit,attempt_id=C.db.device_id .. "/" .. (C.db.sequence+1),
     stage=lot.commodity and "await_quote" or "buying",started_at=C:Now(),validation=current}
   if task.strategy_id=="vendor_arbitrage" then
@@ -101,7 +102,7 @@ function E:Finish(state,details)
     if line.source=="auction" and (task.bought[line.item_id] or 0)<line.quantity then complete=false end
   end
   C:State(task,complete and "completed" or (task.spent>0 and "partially_bought" or "pending_scan"),
-    complete and "Закупка AH завершена; крафт/продажа не выполнялись" or "Подготовьте следующий шаг вручную")
+    complete and "Закупка AH завершена; крафт, распыление и продажа не выполнялись" or "Подготовьте следующий шаг вручную")
 end
 function E:Stop()
   local p=C.db.pending

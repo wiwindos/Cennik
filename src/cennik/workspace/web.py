@@ -12,16 +12,26 @@ from fastapi.staticfiles import StaticFiles
 
 from cennik.addon.api import addon_router
 from cennik.api.routes import analytics_router
+from cennik.collector.auctioneers import Review
+from cennik.collector.protocol import Connection
+from cennik.collector.server import Invitation
 from cennik.core.models import AnalyticsConfig
+from cennik.engines.disenchant import DisenchantRules
+from cennik.engines.npc_catalog import NpcPriceDocument
 from cennik.strategies.craft_graph import CraftGraphSettings
 
+from .accounting import JournalRevision, LedgerEvent
+from .bulk import BulkCreate, BulkSelection
 from .models import ImportRequest, ItemFacts, PlanRequest, RefreshRequest, WorkspaceSettings
+from .production import ClientRoster, OrderCreate
+from .runtime import revision
 from .service import Workspace
 from .sniper import SnipeBudget, SnipeImport, SnipeMaterials, SnipeRule
 
 
-def create_app(root: Path) -> FastAPI:
-    workspace = Workspace(root)
+def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
+    loaded_revision = revision()
+    workspace = workspace or Workspace(root)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -41,7 +51,9 @@ def create_app(root: Path) -> FastAPI:
         except ValueError:
             loopback = False
         origin = request.headers.get("origin")
-        if (not loopback or request.url.hostname not in {"localhost", "127.0.0.1", "::1"}
+        if remote and not getattr(request.state, "cennik_owner", False):
+            return JSONResponse({"detail": "Нужна авторизация владельца"}, status_code=401)
+        if not remote and (not loopback or request.url.hostname not in {"localhost", "127.0.0.1", "::1"}
             or origin is not None and origin != str(request.base_url).rstrip("/")):
             return JSONResponse({"detail": "Доступ только с этой машины и страницы Cennik"}, status_code=403)
         if int(request.headers.get("content-length", "0")) > 64_000_000:
@@ -69,15 +81,120 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "local_mode": True, "workspace": str(workspace.root), "profile": "cennik-next"}
+        return {"status": "ok", "local_mode": not remote, "workspace": str(workspace.root), "profile": "cennik-server-market" if remote else "cennik-next",
+                "runtime_revision": loaded_revision, "restart_required": loaded_revision != revision()}
 
     @app.get("/api/v2/overview")
     def overview():
         return workspace.overview()
 
+    @app.get("/api/v2/production")
+    def production():
+        return workspace.production.overview()
+
+    @app.get("/api/v2/collectors")
+    def collectors():
+        return workspace.collectors.overview()
+
+    @app.put("/api/v2/collectors/connection")
+    def collector_connection(value: Connection):
+        result = workspace.collectors.configure(value)
+        workspace.submit("collector_registry", workspace.update_collector_imports, coalesce=True, defer=True)
+        return result
+
+    @app.post("/api/v2/collectors/send", status_code=202)
+    def collector_send():
+        return workspace.submit("collector_delivery", workspace.deliver_collectors, coalesce=True, defer=True)
+
+    @app.get("/api/v2/collectors/members")
+    def collector_members():
+        return workspace.collectors.admin()
+
+    @app.get("/api/v2/collectors/auctioneers")
+    def collector_auctioneers():
+        return workspace.collectors.admin(path="/v1/admin/auctioneers")
+
+    @app.post("/api/v2/collectors/auctioneers/{identity}/review", status_code=202)
+    def collector_auctioneer_review(identity: str, value: Review):
+        def execute():
+            result = workspace.collectors.review_auctioneer(identity, value)
+            workspace.update_collector_imports()
+            return {**result, "note": "Решение сохранено. Аддоны применят обновление после синхронизации приложения и /reload"}
+        return workspace.submit("auctioneer_review", execute, defer=True)
+
+    @app.post("/api/v2/collectors/members")
+    def collector_invite(value: Invitation):
+        return workspace.collectors.invite(value.label)
+
+    @app.delete("/api/v2/collectors/members/{identity}")
+    def collector_revoke(identity: str):
+        return workspace.collectors.revoke(identity)
+
+    @app.put("/api/v2/production/clients")
+    def production_clients(value: ClientRoster):
+        if remote:
+            raise ValueError("Рабочие клиенты настраиваются в панели сервера")
+        return workspace.production.save_clients(value)
+
+    @app.post("/api/v2/production/orders", status_code=202)
+    def production_create(value: OrderCreate):
+        def execute():
+            result = workspace.production.create(value)
+            return {**result, "sync": workspace.synchronize(include_scans=False)}
+        return workspace.submit("production_order", execute)
+
+    @app.post("/api/v2/production/orders/{identity}/close")
+    def production_close(identity: str):
+        return workspace.production.close_order(identity)
+
+    @app.get("/api/v2/accounting")
+    def accounting_overview(days: int = Query(default=30, ge=0, le=36500), character: str = "",
+                            item_id: int | None = Query(default=None, gt=0), kind: str = "",
+                            offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500)):
+        return workspace.accounting.overview(days=days, character=character, item_id=item_id, kind=kind, offset=offset, limit=limit)
+
+    @app.get("/api/v2/accounting/events/{identity}")
+    def accounting_event(identity: str):
+        return workspace.accounting.load(identity)
+
+    @app.post("/api/v2/accounting/events")
+    def accounting_manual(event: LedgerEvent):
+        return workspace.accounting.create_manual(event)
+
+    @app.post("/api/v2/accounting/events/{identity}/revise")
+    def accounting_revision(identity: str, value: JournalRevision):
+        return workspace.accounting.revise(identity, value)
+
+    @app.get("/api/v2/bulk")
+    def bulk_listing():
+        return workspace.bulk.listing()
+
+    @app.get("/api/v2/bulk/{identity}")
+    def bulk_detail(identity: str):
+        return workspace.bulk.detail(identity)
+
+    @app.post("/api/v2/bulk", status_code=202)
+    def bulk_create(value: BulkCreate):
+        def execute():
+            result = workspace.bulk.create(value)
+            return {**result, "sync": workspace.synchronize(include_scans=False)}
+        return workspace.submit("bulk_export", execute)
+
+    @app.post("/api/v2/bulk/{identity}/evaluate")
+    def bulk_evaluate(identity: str, value: BulkSelection):
+        return workspace.bulk.detail(identity, value.choices)
+
+    @app.post("/api/v2/bulk/{identity}/publish", status_code=202)
+    def bulk_publish(identity: str, value: BulkSelection):
+        def execute():
+            result = workspace.bulk.publish(identity, value)
+            return {**result, "sync": workspace.synchronize(include_scans=False)}
+        return workspace.submit("bulk_publish", execute)
+
     @app.get("/api/v2/settings")
     def settings():
         return {"workspace": workspace.settings(), "analytics": workspace.store.settings(),
+            "development": workspace.development_report(),
             "schemas": {"workspace": WorkspaceSettings.model_json_schema(), "analytics": AnalyticsConfig.model_json_schema(),
                         "craft_graph": CraftGraphSettings.model_json_schema()}}
 
@@ -87,6 +204,7 @@ def create_app(root: Path) -> FastAPI:
 
     @app.post("/api/v2/refresh", status_code=202)
     def refresh(value: RefreshRequest):
+        workspace.require_live_updates()
         return workspace.submit(value.dataset, lambda: workspace.refresh(value))
 
     @app.post("/api/v2/recalculate", status_code=202)
@@ -94,12 +212,56 @@ def create_app(root: Path) -> FastAPI:
     def recalculate():
         return workspace.submit("analytics", workspace.calculate)
 
+    @app.get("/api/v2/disenchant/rules")
+    def disenchant_rules():
+        return workspace.analytics.disenchant.snapshot().metadata()
+
+    @app.get("/api/v2/npc/catalog/document")
+    def npc_catalog_document():
+        return workspace.npc_catalog.snapshot()
+
+    @app.post("/api/v2/npc/catalog/preview")
+    def preview_npc_catalog(value: NpcPriceDocument):
+        return workspace.npc_catalog.preview(value)
+
+    @app.put("/api/v2/npc/catalog")
+    def update_npc_catalog(value: NpcPriceDocument):
+        if not workspace.analytics.lock.acquire(blocking=False):
+            raise RuntimeError("Дождитесь завершения расчёта перед сменой справочника NPC")
+        try:
+            return workspace.npc_catalog.install(value)
+        finally:
+            workspace.analytics.lock.release()
+
+    @app.get("/api/v2/disenchant/rules/document")
+    def disenchant_document():
+        return workspace.analytics.disenchant.snapshot()
+
+    @app.post("/api/v2/disenchant/rules/preview")
+    def preview_disenchant_rules(value: DisenchantRules):
+        return workspace.analytics.disenchant.preview(value)
+
+    @app.put("/api/v2/disenchant/rules")
+    def update_disenchant_rules(value: DisenchantRules):
+        if not workspace.analytics.lock.acquire(blocking=False):
+            raise RuntimeError("Дождитесь завершения расчёта перед сменой правил распыления")
+        try:
+            return workspace.analytics.disenchant.install(value)
+        finally:
+            workspace.analytics.lock.release()
+
+    @app.post("/api/v2/disenchant/rules/check", status_code=202)
+    def check_disenchant_rules():
+        return workspace.submit("disenchant_rules_check", workspace.check_disenchant_rules)
+
     @app.post("/api/v2/sync", status_code=202)
     def synchronize():
         return workspace.submit("sync", workspace.synchronize)
 
     @app.post("/api/v2/install-addon", status_code=202)
     def install_addon():
+        if remote:
+            raise ValueError("Установите аддон через Cennik Worker на игровом ПК")
         return workspace.submit("install_addon", workspace.install_addon)
 
     @app.post("/api/v2/backup", status_code=202)

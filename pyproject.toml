@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = ["httpx>=0.28,<1", "pydantic>=2.10,<3", "duckdb>=1.2,<2", "pyarrow>=19,<25", "zstandard>=0.23,<1", "typer>=0.15,<1", "rich>=13,<15", "pytz>=2025.1"]
 
 [project.optional-dependencies]
+collector = ["pystray>=0.19,<1", "Pillow>=12.3,<13"]
+collector-build = ["PyInstaller>=6,<7"]
 web = ["fastapi>=0.143,<0.144", "uvicorn>=0.54,<0.55"]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1", "mypy>=1.14,<2", "lupa>=2,<3"]
 
@@ -21,7 +23,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 ahledger = ["static/*.html", "static/*.css", "static/*.js"]
-cennik = ["licenses/*.txt", "THIRD_PARTY.md"]
+cennik = ["licenses/*.txt", "THIRD_PARTY.md", "reference/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

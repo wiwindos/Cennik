@@ -364,7 +364,6 @@ def test_api_authorized_manual_pipeline_validation_and_isolation(analytics_root)
         client.put("/api/analytics/settings",json={"active_market":"market-b"},headers=HEADERS)
         assert client.get("/api/analytics/opportunities",headers=HEADERS).json()["items"] == []
         assert client.get("/api/analytics/opportunities/"+identity,headers=HEADERS).status_code == 404
-        assert client.get("/static/analytics.js").status_code == 200
 
 
 def test_no_data_not_zero_profitable_deals(analytics_root):
@@ -398,7 +397,7 @@ def test_real_archive_builder_to_cennik_api(state,settings,spec,history):
         result = client.get("/api/analytics/status",headers=HEADERS).json()
         assert result["published_run"]["status"] == "completed"
         assert result["published_run"]["diagnostics"]["observed_items"] == 1
-        assert result["generation"] == before
+        assert result["generation"] == before + ":disenchant:" + client.app.state.analytics.disenchant.snapshot().sha256
     assert fingerprint(state.root / "analytics/ahledger.duckdb") == before
 
 

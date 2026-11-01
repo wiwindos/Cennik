@@ -13,6 +13,7 @@ from pydantic import Field, model_validator
 
 from ahledger.util import dumps
 from cennik.core.models import Model
+from cennik.markets import MARKET_PATTERN
 
 from .models import MARKET
 
@@ -22,7 +23,7 @@ MAX_INTEGER = 2**53 - 1
 
 class SnipeRule(Model):
     id: str = Field(default_factory=lambda: uuid4().hex, pattern=r"^[A-Za-z0-9_-]{1,80}$")
-    market: Literal["forever.pvp.alliance.us"] = "forever.pvp.alliance.us"
+    market: str = Field(default=MARKET, pattern=MARKET_PATTERN)
     item_id: int = Field(gt=0, le=2**31-1)
     quantity: int = Field(default=1, ge=1, le=1000000)
     mode: Literal["any", "limit", "median3d"] = "any"
@@ -150,6 +151,8 @@ class SniperBook:
         return {"budget_copper": value}
 
     def save(self, rule: SnipeRule):
+        if rule.market != self.w.market_key:
+            raise ValueError("Цель относится к другому серверу/рынку")
         with self.w.store.connection() as db:
             count = db.execute("SELECT count(*) FROM sniper_rules").fetchone()[0]
             exists = db.execute("SELECT payload FROM sniper_rules WHERE id=?", [rule.id]).fetchone()
@@ -169,6 +172,8 @@ class SniperBook:
 
     def preview(self, text: str):
         budget, rules = decode_rules(text)
+        if any(rule.market != self.w.market_key for rule in rules):
+            raise ValueError("Импорт содержит цели другого сервера/рынка")
         current = {r["id"]: r for r in self.wire()["rules"]}
         for rule in rules:
             self.check_identity(dumps(current[rule.id]) if rule.id in current else None, rule)
@@ -178,6 +183,8 @@ class SniperBook:
 
     def apply(self, text: str):
         budget, rules = decode_rules(text)
+        if any(rule.market != self.w.market_key for rule in rules):
+            raise ValueError("Импорт содержит цели другого сервера/рынка")
         with self.w.store.connection() as db:
             current = {r[0] for r in db.execute("SELECT id FROM sniper_rules")}
             if len(current | {r.id for r in rules}) > 500:
@@ -199,7 +206,7 @@ class SniperBook:
         generation = self.w.market.generation()
         if self._catalog and self._catalog["generation"] == generation:
             return self._catalog
-        with self.w.market.lock, WorkspaceProvider(self.w.market, MARKET, datetime.now(UTC)) as provider:
+        with self.w.market.lock, WorkspaceProvider(self.w.market, self.w.market_key, datetime.now(UTC)) as provider:
             recipes = provider.recipes()
             items = self.w.market.rows("SELECT item_id,name,vendor_buy_copper FROM items ORDER BY item_id LIMIT 20001")
         self._catalog = {"workspace_id": self.w.identity, "generation": generation,
@@ -231,7 +238,7 @@ class SniperBook:
 
     def add_materials(self, value: SnipeMaterials):
         preview = self.material_preview(value)
-        rules = [SnipeRule(item_id=r["item_id"], quantity=r["quantity"], use_bags=value.use_bags,
+        rules = [SnipeRule(market=self.w.market_key, item_id=r["item_id"], quantity=r["quantity"], use_bags=value.use_bags,
             mode=value.mode, discount_bps=value.discount_bps) for r in preview["lines"] if not r["npc"]]
         if not rules:
             raise ValueError("В этом рецепте нет материалов для поиска на аукционе")
@@ -249,15 +256,15 @@ class SniperBook:
         rule = next((r for r in self.wire()["rules"] if r["id"] == identity), None)
         if not rule:
             raise ValueError("Цель не найдена")
-        end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = self.w.evaluation_now().replace(hour=0, minute=0, second=0, microsecond=0)
         start = end - timedelta(days=3)
         item = rule["item_id"]
         # A one-item query avoids reading the full historical archive for a watch list.
-        rows = self.w.market.rows("SELECT observed_at,median_copper,raw_id FROM price_history WHERE item_id=? AND market=? AND observed_at>=? AND observed_at<? AND median_copper>0", [item, MARKET, start, end])
+        rows = self.w.market.rows("SELECT observed_at,median_copper,raw_id FROM price_history WHERE item_id=? AND market=? AND observed_at>=? AND observed_at<? AND median_copper>0", [item, self.w.market_key, start, end])
         source = "AHledger history"
         paths = [str(self.w.market.root / r["quote_path"]) for r in self.w.market.rows(
             "SELECT quote_path FROM scan_registry WHERE complete AND quote_path IS NOT NULL AND market=? AND observed_at>=? AND observed_at<?",
-            [MARKET, start, end])]
+            [self.w.market_key, start, end])]
         if paths:
             own = self.w.market.rows("SELECT CAST(observed_at AS TIMESTAMPTZ) observed_at,median_copper,raw_id FROM read_parquet(?) WHERE item_id=? AND median_copper>0", [paths, item])
             if len({r["observed_at"].astimezone(UTC).date() for r in own}) == 3:

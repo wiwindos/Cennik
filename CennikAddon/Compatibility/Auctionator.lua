@@ -3,7 +3,9 @@ local A = {externalUntil=0, sending=false}
 C.Adapter = A
 function A:Open() return AuctionHouseFrame and AuctionHouseFrame:IsShown() end
 function A:Ready(owner)
+  if C.AuctionContext and not C.AuctionContext:Check(owner=="collector" and "collect" or "buy") then return false end
   return not self.error and self:Open() and not self.shopping and not self.fullScan
+    and (owner=="bulk" or not (C.Bulk and C.Bulk.active))
     and (owner=="sniper" or not (C.Sniper and C.Sniper.current))
     and not (C.MarketCollector and C.MarketCollector.packing)
     and GetTime() >= self.externalUntil and C_AuctionHouse.IsThrottledMessageSystemReady()
@@ -24,6 +26,7 @@ function A:Initialize()
   for _, name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","SearchForItemKeys","RequestMoreBrowseResults","ReplicateItems","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PlaceBid"}) do
     if api[name] then hooksecurefunc(api,name,function()
       if not A.sending then
+        if C.Bulk and C.Bulk.active then C.Bulk:Cancel("Пользователь или другой аддон начал операцию AH") end
         A.externalUntil = GetTime() + 3
         if C.db.pending and (C.db.pending.stage == "buying" or C.db.pending.stage == "unknown") then
           C.db.pending.external_conflict = true
@@ -62,6 +65,8 @@ function A:ReceiveEvent(event)
   elseif event == self.fullEnd or event == self.fullFailed then self.fullScan = false end
 end
 function A:Call(name,...)
+  if C.collectorOnly and name~="CancelCommoditiesPurchase" then return false end
+  if C.AuctionContext and name~="CancelCommoditiesPurchase" and not C.AuctionContext:Check("buy") then return false end
   self.sending = true
   local ok, result = pcall(C_AuctionHouse[name],...)
   self.sending = false

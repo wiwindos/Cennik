@@ -264,23 +264,6 @@ def build_db(ctx: typer.Context, restore_state: bool = False):
             state.close()
 
 
-@app.command("local")
-def local(
-    ctx: typer.Context,
-    database: Annotated[Path | None, typer.Option(help="Импортировать готовую DuckDB без изменения исходного файла")] = None,
-    port: Annotated[int, typer.Option(min=1024, max=65535)] = 8765,
-    open_browser: bool = True,
-):
-    """Открыть локальное приложение без Docker, HTTPS и секретного ключа."""
-    from .local import launch_local
-
-    settings = ctx.obj.model_copy(update={"data_dir": ctx.obj.data_dir.resolve()})
-    try:
-        launch_local(settings, source=database, port=port, open_browser=open_browser)
-    except (ValueError, OSError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
 @app.command("update-fetch", hidden=True)
 def update_fetch(ctx: typer.Context, update_id: Annotated[str, typer.Option()]):
     from .update import batch_root, fetch_update

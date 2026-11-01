@@ -21,6 +21,7 @@ from ahledger.parsers import Parsed
 from ahledger.util import dumps
 from cennik.core.models import PriceObservation
 from cennik.data.duckdb import DuckDBProvider
+from cennik.markets import neutral_market
 
 from .models import MARKET
 
@@ -40,7 +41,9 @@ def atomic_bytes(path: Path, content: bytes) -> None:
 
 
 class MarketDatabase:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, market_key=MARKET, market_info=None):
+        self.market_key = market_key
+        self.market_info = market_info or {}
         self.root, self.path = root, root / "market.duckdb"
         root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -68,9 +71,10 @@ class MarketDatabase:
         self.db.execute("ALTER TABLE scan_registry ADD COLUMN IF NOT EXISTS offers_path VARCHAR")
         self.db.execute("CREATE TABLE IF NOT EXISTS source_sales_daily AS SELECT * FROM price_snapshots WHERE false")
         self.db.execute("CREATE TABLE IF NOT EXISTS source_heads(source VARCHAR PRIMARY KEY,observed_at TIMESTAMPTZ,raw_id VARCHAR)")
-        if not self.db.execute("SELECT 1 FROM markets WHERE market=?", [MARKET]).fetchone():
+        if not self.db.execute("SELECT 1 FROM markets WHERE market=?", [self.market_key]).fetchone():
             self.db.execute("INSERT INTO markets(market,game,ruleset,faction,region,label,market_status) VALUES(?,?,?,?,?,?,?)",
-                            [MARKET, "forever", "pvp", "alliance", "us", "PvP Alliance US", "NO_SCANS"])
+                            [self.market_key, "forever", self.market_info.get("ruleset", "pvp"), market_key.split(".")[-2],
+                             market_key.split(".")[-1], self.market_info.get("label", market_key), "NO_SCANS"])
         self.revalidate_empty_scans()
 
     def revalidate_empty_scans(self) -> int:
@@ -123,8 +127,9 @@ class MarketDatabase:
     def generation(self) -> str:
         return str(self.rows("SELECT revision FROM workspace_revision")[0]["revision"])
 
-    def archive(self, kind: str, identity: str, payload: dict, observed: datetime) -> Path:
-        path = self.root / "archive" / kind / MARKET / observed.strftime("%Y/%m/%d") / (identity + ".json.zst")
+    def archive(self, kind: str, identity: str, payload: dict, observed: datetime, *, market: str | None = None) -> Path:
+        market = market or self.market_key
+        path = self.root / "archive" / kind / market / observed.strftime("%Y/%m/%d") / (identity + ".json.zst")
         if not path.exists():
             atomic_bytes(path, zstd.ZstdCompressor(level=6).compress(dumps(payload).encode()))
         return path
@@ -132,7 +137,7 @@ class MarketDatabase:
     def parquet(self, kind: str, identity: str, rows: list[dict], observed: datetime, schema=None) -> str | None:
         if not rows:
             return None
-        path = self.root / "archive" / kind / MARKET / observed.strftime("%Y/%m/%d") / (identity + ".parquet")
+        path = self.root / "archive" / kind / self.market_key / observed.strftime("%Y/%m/%d") / (identity + ".parquet")
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix(".parquet.tmp")
@@ -181,6 +186,10 @@ class MarketDatabase:
             meta = {"id": identity, "sha256": hashlib.sha256(body).hexdigest(), "retrieved_at": observed.isoformat(),
                     "http_status": 200, "archive_path": str(path.relative_to(self.root))}
             tables = normalized(spec, parsed, meta)
+            for rows in tables.values():
+                for row in rows:
+                    if spec.market is not None and "market" in row and row["market"] == spec.market:
+                        row["market"] = self.market_key
             self.db.execute("BEGIN")
             try:
                 head = self.db.execute("SELECT observed_at FROM source_heads WHERE source='AHL1'").fetchone()
@@ -210,7 +219,7 @@ class MarketDatabase:
                     PARTITION BY source,item_id ORDER BY observed_at DESC,retrieved_at DESC)>1)""")
                 self.db.execute("INSERT INTO applied_ingestions VALUES(?,?)", [identity, observed])
                 self.db.execute("UPDATE workspace_revision SET revision=revision+1")
-                self.db.execute("UPDATE markets SET market_status='scanned' WHERE market=?", [MARKET])
+                self.db.execute("UPDATE markets SET market_status='scanned' WHERE market=?", [self.market_key])
                 self.db.execute("COMMIT")
             except Exception:
                 self.db.execute("ROLLBACK")
@@ -218,7 +227,7 @@ class MarketDatabase:
         return True
 
     def import_scan(self, scan: dict) -> dict:
-        if scan.get("format_version") != 1 or scan.get("market") != MARKET:
+        if scan.get("format_version") != 1 or scan.get("market") not in {self.market_key, neutral_market(self.market_key)}:
             raise ValueError("Неподдерживаемый формат или рынок скана")
         if not isinstance(scan.get("data"), str) or len(scan["data"]) > 48_000_000:
             raise ValueError("Неверный размер данных скана")
@@ -227,6 +236,21 @@ class MarketDatabase:
             raise ValueError("Время скана находится в будущем; проверьте часы")
         payload = dumps(scan).encode()
         identity = hashlib.sha256(payload).hexdigest()
+        from cennik.collector.auctioneers import scan_scope
+        registry_path = self.root / "collectors/auctioneer_registry.json"
+        registry = json.loads(registry_path.read_text("utf-8")) if registry_path.exists() else {}
+        scope = scan_scope(scan, registry)
+        if scope != "ordinary" or scan.get("market") != self.market_key:
+            category = "neutral_auctions" if scope == "neutral" else "unclassified_auctions"
+            marker = self.root / "collectors/scan_receipts" / (identity+".json")
+            with self.lock:
+                reused = marker.exists()
+                if not reused:
+                    path = self.archive(category, identity, scan, observed,
+                        market=neutral_market(self.market_key) if scope == "neutral" else "unclassified")
+                    atomic_bytes(marker, dumps({"scan_id": identity, "path": str(path.relative_to(self.root)), "scope": scope}).encode())
+            return {"scan_id": identity, "complete": False, "archived_only": True, "auction_type": scope,
+                    "rows": scan.get("count", 0), "warnings": ["Снимок сохранён отдельно и не меняет рабочие цены"], "reused": reused}
         with self.lock:
             if self.db.execute("SELECT 1 FROM scan_registry WHERE scan_id=?", [identity]).fetchone():
                 return {"scan_id": identity, "reused": True}
@@ -283,7 +307,7 @@ class MarketDatabase:
                             central.append(Decimal(row["buyout"]) / row["quantity"])
                         if len(central) == 2:
                             break
-                    snapshots.append({"item_id": item, "market": MARKET, "observed_at": observed.isoformat(),
+                    snapshots.append({"item_id": item, "market": self.market_key, "observed_at": observed.isoformat(),
                         "source": "Cennik replicate", "quantity": quantity,
                         "min_copper": ordered[0]["buyout"] // ordered[0]["quantity"], "median_copper": int(sum(central) / 2),
                         "raw_id": identity, "sha256": identity, "retrieved_at": now()})
@@ -298,7 +322,7 @@ class MarketDatabase:
             self.db.execute("BEGIN")
             try:
                 self.db.execute("INSERT INTO scan_registry(scan_id,market,observed_at,received_at,row_count,valid_rows,complete,source,path,sha256,warnings,quote_path,offers_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [identity, MARKET, observed, now(), len(lines), len(offers), complete, "Cennik replicate",
+                    [identity, self.market_key, observed, now(), len(lines), len(offers), complete, "Cennik replicate",
                      str(path.relative_to(self.root)), identity, dumps(warnings), quote_path, offers_path])
                 latest_row = self.db.execute("SELECT observed_at FROM source_heads WHERE source='Cennik replicate'").fetchone()
                 latest = latest_row[0] if latest_row else None
@@ -312,7 +336,7 @@ class MarketDatabase:
                         self.db.unregister("scan_offers")
                     self.insert_rows("price_snapshots", snapshots)
                     self.insert_rows("items", items)
-                    self.db.execute("UPDATE markets SET market_status='scanned' WHERE market=?", [MARKET])
+                    self.db.execute("UPDATE markets SET market_status='scanned' WHERE market=?", [self.market_key])
                 if complete:
                     self.db.execute("UPDATE workspace_revision SET revision=revision+1")
                 self.db.execute("COMMIT")

@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from auction_fixture import approve_workspace, context
 
 from ahledger.models import JobSpec
 from ahledger.parsers import Parsed
@@ -16,6 +17,7 @@ from cennik.workspace.web import create_app
 @pytest.fixture
 def workspace(tmp_path):
     value = Workspace(tmp_path / "fresh")
+    approve_workspace(value)
     try:
         yield value
     finally:
@@ -24,6 +26,7 @@ def workspace(tmp_path):
 
 def scan(*, offset=0, count=2, divisible=True):
     return {"format_version": 1, "scan_id": f"fixture-{offset}-{count}", "market": MARKET,
+        "realm": "FixtureRealm", "auction_context": context(),
         "observed_at": int((datetime.now(UTC) - timedelta(seconds=30-offset)).timestamp()),
         "full": True, "count": count, "data": ";".join(["2589:4:40:0:4:1"] * count),
         "variants": [{"link": "item:2589:0:0:0", "name": "Льняная ткань", "divisible": divisible, "vendor_sell": 13}]}
@@ -285,6 +288,10 @@ async def test_local_web_settings_and_origin_isolation(tmp_path):
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             response = await client.get("/")
             assert response.status_code == 200 and "next.js" in response.text
+            for asset in ("next.js", "next-sniper.js", "next.css"):
+                assert (await client.get("/static/" + asset)).status_code == 200
+            for asset in ("index.html", "app.js", "app.css", "analytics.js"):
+                assert (await client.get("/static/" + asset)).status_code == 404
             settings = (await client.get("/api/v2/settings")).json()
             assert len(settings["schemas"]["analytics"]["properties"]) >= 25
             assert "max_nodes" in settings["schemas"]["craft_graph"]["properties"]

@@ -61,6 +61,8 @@ class Bridge:
         )
         self.exchange = exchange
         self.extra_import: dict = {}
+        self.write_import = True
+        self.import_payload: dict = {}
         self.report_handler: Callable[[ReportBatch], list[str]] | None = None
         self.client = None if exchange is not None else httpx.Client(
             base_url=server.rstrip("/"),
@@ -136,7 +138,8 @@ class Bridge:
             "acknowledged_event_ids": sorted(acknowledged),
         }
         imported.update({k: v for k, v in self.extra_import.items()
-                         if k in {"market_collector", "acknowledged_scan_ids", "sniper_book", "sniper_catalog", "acknowledged_sniper_event_ids"}})
+                         if k in {"market_collector", "acknowledged_scan_ids", "sniper_book", "sniper_catalog", "acknowledged_sniper_event_ids", "bulk_checks", "accounting", "production", "client_id", "collector_delivery", "auctioneer_registry", "market_binding"}})
+        self.import_payload = imported
         text = (
             "-- Written by Cennik Bridge; loaded on /reload.\nCennikImport = "
             + lua_literal(imported)
@@ -144,10 +147,8 @@ class Bridge:
         )
         if len(text.encode("utf-8")) > 8_000_000:
             raise ValueError("Lua import exceeds 8 MB; reduce the exported selection")
-        atomic_write(
-            self.addon_dir / "ImportedData.lua",
-            text,
-        )
+        if self.write_import:
+            atomic_write(self.addon_dir / "ImportedData.lua", text)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(self.state_path, json.dumps(self.state, ensure_ascii=False, indent=2))
         return {"packages": len(packages), "acknowledged_events": len(acknowledged)}
@@ -159,7 +160,7 @@ class Bridge:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default="http://127.0.0.1:8765")
+    parser.add_argument("--server", required=True, help="URL серверного Archive API; локальный Cennik синхронизируется через веб")
     parser.add_argument("--addon-dir", required=True, type=Path)
     parser.add_argument("--saved-variables", required=True, type=Path)
     parser.add_argument("--market", required=True)

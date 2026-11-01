@@ -1,0 +1,27 @@
+[Unit]
+Description=Cennik full analytics server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cennik
+Group=cennik
+WorkingDirectory=/opt/cennik
+EnvironmentFile=/etc/cennik/server.env
+Environment=PYTHONUTF8=1
+ExecStart=/opt/cennik/venv/bin/python -m cennik.server --root /var/lib/cennik-server --host 127.0.0.1 --port 8770 --origin ${CENNIK_PUBLIC_ORIGIN}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+StateDirectory=cennik-server
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cennik-server
+
+[Install]
+WantedBy=multi-user.target

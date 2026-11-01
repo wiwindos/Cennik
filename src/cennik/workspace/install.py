@@ -3,12 +3,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .data import atomic_bytes
+from ahledger.util import atomic_write as atomic_bytes
 
 
-def install_addon(game_root: str, backup_root: Path) -> dict:
+def install_addon(game_root: str, backup_root: Path, *, source: Path | None = None) -> dict:
     game = Path(game_root).resolve(strict=True)
-    source = Path(__file__).resolve().parents[3] / "CennikAddon"
+    source = source or Path(__file__).resolve().parents[3] / "CennikAddon"
     if not (source / "CennikAddon.toc").is_file():
         raise ValueError("Исходники аддона не найдены рядом с проектом")
     addons = (game / "Interface/AddOns").resolve(strict=True)

@@ -92,6 +92,8 @@ function V:Validate(task,ownPending)
   local ok,reason=C:CheckTask(task,ownPending)
   if not ok then return rejected("requires_manual_check",reason) end
   local o=task.opportunity
+  local disenchant=o and o.details and o.details.disenchant
+  local npcResale=task.strategy_id=="npc_to_auction"
   if not o or o.execution_status~="indicative" then return rejected("requires_manual_check","Неверный исходный контракт") end
   local remainingCost,total,npc,vendorRevenue=0,task.spent or 0,0,task.vendor_bought_revenue or 0
   local missingState,missingReason
@@ -106,7 +108,7 @@ function V:Validate(task,ownPending)
       local quote=C.NPC:Quote(task,line.item_id)
       result.materials[#result.materials+1]={item_id=line.item_id,needed=line.quantity,source="npc",quote=quote}
       if not quote then miss("requires_manual_check","Не подтверждена текущая цена NPC: " .. C.Items:Name(line.item_id) .. ". Откройте торговца или введите цену в «Цены / лимиты».")
-      elseif quote.available and quote.available<line.quantity then miss("insufficient_supply","У NPC недостаточно " .. C.Items:Name(line.item_id))
+      elseif quote.available and quote.available<(npcResale and math.ceil(line.quantity/quote.batch_quantity)*quote.batch_quantity or line.quantity) then miss("insufficient_supply","У NPC недостаточно " .. C.Items:Name(line.item_id))
       else
         local cost=C.NPC:Cost(quote,line.quantity)
         if cost==nil then miss("requires_manual_check","NPC-стоимость вне точного диапазона copper")
@@ -140,7 +142,31 @@ function V:Validate(task,ownPending)
     result.revenue_basis="NPC: " .. table.concat(names,", ") .. "; лишние единицы не добавлены к прибыли"
   elseif task.strategy_id=="historical_discount" then result.revenue_basis="Текущий минимум AH; история — только ориентир скидки"
   else result.revenue_basis="Текущий минимум AH; будущая продажа не подтверждена" end
-  if task.strategy_id~="vendor_arbitrage" then
+  if disenchant then
+    gross=0
+    result.disenchant_materials={}
+    if not disenchant.rules or not disenchant.rules.sha256 or not disenchant.yields or #disenchant.yields==0 then
+      return rejected("requires_manual_check","Нет версии правил или выходных материалов распыления")
+    end
+    for _,output in ipairs(disenchant.yields) do
+      local scan=task.scans[output.material_item_id]
+      if not self:Fresh(scan) then return rejected("pending_scan","Нужен свежий скан материала распыления #" .. output.material_item_id) end
+      local sale
+      for _,row in ipairs(scan.rows) do
+        if row.ownership_known and not row.owned and row.quantity>0 and row.unit_price>0 then
+          sale=sale and math.min(sale,row.unit_price) or row.unit_price
+        end
+      end
+      if not sale then return rejected("requires_manual_check","Неизвестна цена материала распыления #" .. output.material_item_id) end
+      if not C:Integer(output.expected_units_numerator) or not C:Integer(output.expected_units_denominator)
+        or not C:Integer(sale*o.quantity) then return rejected("requires_manual_check","Выход распыления вне точного диапазона") end
+      local value=self:Part(sale*o.quantity,output.expected_units_numerator,output.expected_units_denominator)
+      if not value or not C:Integer(value,true) then return rejected("requires_manual_check","Неверный выход распыления") end
+      gross=gross+value
+      result.disenchant_materials[#result.disenchant_materials+1]={item_id=output.material_item_id,unit_price_copper=sale,expected_gross_copper=value}
+    end
+    result.revenue_basis="Ожидаемый выход распыления по модели " .. (disenchant.rules.version or "") .. "; отдельное распыление может дать убыток"
+  elseif task.strategy_id~="vendor_arbitrage" then
     local scan=task.scans[task.item_id]
     if not self:Fresh(scan) then return rejected("pending_scan","Нужен свежий скан результата") end
     local sale
@@ -170,6 +196,12 @@ function V:Validate(task,ownPending)
     result.break_even_unit_copper=math.ceil(breakEven/o.quantity)
   end
   if result.profit_copper<task.min_profit_copper then return rejected("not_profitable","По текущим ценам прибыль ниже порога после комиссии") end
+  if npcResale then
+    local get=C_Item and C_Item.GetItemInfo or GetItemInfo
+    local bindType
+    if get then local _,_,_,_,_,_,_,_,_,_,_,_,_,binding=get(task.item_id); bindType=binding end
+    if bindType==1 or bindType==4 then return rejected("requires_manual_check","Предмет привязывается при получении или является заданием; перепродажа запрещена") end
+  end
   if task.strategy_id=="historical_discount" then
     local reference=o.details.history and o.details.history.copper
     local maxCost=reference and self:Part(reference*o.quantity,task.discount_denominator-task.discount_numerator,task.discount_denominator)
@@ -181,8 +213,8 @@ function V:Validate(task,ownPending)
   if not package or remainingCost+npc>package.budget-package.spent or remainingCost+npc>GetMoney() then
     return rejected("requires_manual_check","Текущая экономика рассчитана; не хватает золота или общего бюджета (включая NPC)")
   end
-  if (npc>0 or task.strategy_id=="simple_craft" or task.strategy_id=="craft_graph") and not task.conditions_confirmed then return rejected("requires_manual_check","Подтвердите доступ к профессии, рецепту, NPC и откаты") end
-  result.state=#result.plans==0 and "completed" or "ready_to_buy"
-  result.reason="Закупка проверена по текущим лотам; крафт и продажа не выполнялись"
+  if (npc>0 or task.strategy_id=="simple_craft" or task.strategy_id=="craft_graph" or disenchant or npcResale) and not task.conditions_confirmed then return rejected("requires_manual_check",npcResale and "Подтвердите передаваемость, доступ к NPC и достаточный запас для всей партии" or disenchant and "Подтвердите распыляемость предмета, навык, доступ к рецепту и случайный выход материалов" or "Подтвердите доступ к профессии, рецепту, NPC и откаты") end
+  result.state=npcResale and "ready_at_npc" or #result.plans==0 and "completed" or "ready_to_buy"
+  result.reason=npcResale and "Экономика проверена. Купите предмет у NPC и выставьте на AH вручную; покупка ещё не подтверждена" or "Закупка проверена по текущим лотам; крафт и продажа не выполнялись"
   return result
 end

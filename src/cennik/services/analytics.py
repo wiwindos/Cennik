@@ -12,9 +12,10 @@ import duckdb
 
 from ahledger.util import digest, dumps, exclusive_lock
 from cennik.core.interfaces import EvaluationContext, Strategy
-from cennik.core.models import AnalyticsSettings, Opportunity, Run
+from cennik.core.models import AnalyticsSettings, Opportunity, Run, utc
 from cennik.core.performance import Performance
 from cennik.data.duckdb import DuckDBProvider, fingerprint
+from cennik.engines.disenchant import DisenchantCatalog
 from cennik.engines.prices import PriceEngine
 from cennik.storage.sqlite import Store
 from cennik.strategies import default_registry
@@ -54,10 +55,13 @@ def rank(opportunity: Opportunity, context: EvaluationContext) -> Opportunity:
 class AnalyticsService:
     def __init__(self, root: Path, registry: StrategyRegistry | None = None, *,
                  provider_factory=None, database: Path | None = None,
-                 generation_reader: Callable[[], str] | None = None, store_path: Path | None = None):
+                 generation_reader: Callable[[], str] | None = None, store_path: Path | None = None,
+                 development_clock: Callable[[], datetime | None] | None = None):
         self.root, self.path = root, database or root / "analytics/ahledger.duckdb"
         self.provider_factory = provider_factory or DuckDBProvider
         self.generation_reader = generation_reader
+        self.development_clock = development_clock
+        self.disenchant = DisenchantCatalog(root / "references/disenchant")
         self.directory = root / "cennik"
         self.store = Store(store_path or self.directory / "cennik.sqlite")
         self.registry = registry or default_registry()
@@ -73,7 +77,7 @@ class AnalyticsService:
 
     def generation(self, *, refresh: bool = False) -> str:
         if self.generation_reader is not None:
-            return self.generation_reader()
+            return self.generation_reader() + ":disenchant:" + self.disenchant.snapshot().sha256
         if not self.path.is_file():
             raise DataNotReady("Готовая DuckDB отсутствует. Постройте базу существующей кнопкой AHledger.")
         stat = self.path.stat()
@@ -82,7 +86,7 @@ class AnalyticsService:
         identity = (stat.st_mtime_ns, stat.st_size, wal_stat.st_mtime_ns if wal_stat else 0, wal_stat.st_size if wal_stat else 0)
         if refresh or self._identity is None or self._identity[:4] != identity:
             self._identity = (*identity, fingerprint(self.path))
-        return self._identity[4]
+        return self._identity[4] + ":disenchant:" + self.disenchant.snapshot().sha256
 
     def markets(self) -> list[dict]:
         if not self.path.is_file():
@@ -124,8 +128,14 @@ class AnalyticsService:
                 raise DataNotReady("Выбранный рынок отсутствует в текущем поколении DuckDB.")
             strategies = self.registry.selected(settings.config.enabled_strategies)
             versions = {s.id: s.version for s in strategies}
+            real_now = datetime.now(UTC)
+            development_at = self.development_clock() if self.development_clock else None
+            requested_at = as_of or development_at
+            evaluation_at = utc(requested_at) if requested_at is not None else real_now
+            cache_context = {"development_as_of": evaluation_at.isoformat()} if development_at is not None else {}
             identity = digest(dumps({"market": settings.active_market, "generation": generation,
                                      "config": settings.config.model_dump(mode="json"),
+                                     **cache_context,
                                      "strategies": versions, "engine_version": "0.2.0"}).encode())
             cached = self.store.cached(identity, summary=True)
             if cached:
@@ -136,7 +146,9 @@ class AnalyticsService:
                 return {"run": cached.model_dump(mode="json"), "reused": True}
             now = datetime.now(UTC)
             run = Run(run_id=uuid.uuid4().hex, market=settings.active_market, started_at=now,
-                      as_of=as_of or now, generation=generation, config=settings.config,
+                      as_of=evaluation_at, development_mode=development_at is not None,
+                      data_as_of=real_now if development_at is not None else None,
+                      generation=generation, config=settings.config,
                       strategy_versions=versions)
             self.store.begin(run, identity)
         except Exception:
@@ -174,7 +186,8 @@ class AnalyticsService:
         performance = self._performance or Performance()
         self._performance = performance
         try:
-            with self.provider_factory(self.path, run.market, run.as_of) as provider:
+            options = {"data_as_of": run.data_as_of} if run.development_mode else {}
+            with self.provider_factory(self.path, run.market, run.as_of, **options) as provider:
                 prices = PriceEngine(provider, run.config, performance.measure)
                 run.diagnostics["quality"] = prices.quality
                 run.diagnostics["observed_items"] = len(prices.current)
@@ -182,7 +195,9 @@ class AnalyticsService:
                     raise DataNotReady("Для выбранного рынка нет наблюдаемых цен. Это отсутствие данных, а не отсутствие прибыльных возможностей.")
                 with performance.measure("items"):
                     items = provider.items()
-                context = EvaluationContext(provider, run.config, run.run_id, run.started_at, prices, items)
+                rules = self.disenchant.snapshot()
+                run.diagnostics["disenchant_rules"] = rules.metadata()
+                context = EvaluationContext(provider, run.config, run.run_id, run.started_at, prices, items, disenchant=rules)
                 run.diagnostics["rejections"] = context.diagnostics
                 unique: dict[tuple, Opportunity] = {}
                 for strategy in self.registry.selected(run.config.enabled_strategies):
@@ -192,7 +207,7 @@ class AnalyticsService:
                         self._rank_candidates(values, strategy, context, unique, run)
                 opportunities = sorted(unique.values(), key=lambda o: (-o.rating, o.id))
             with performance.measure("final_fingerprint"):
-                final_generation = self.generation(refresh=True) if self.generation_reader else fingerprint(self.path)
+                final_generation = self.generation(refresh=True)
             if final_generation != run.generation:
                 raise DataNotReady("Поколение DuckDB изменилось во время расчёта; запустите пересчёт вручную.")
             run.status, run.signal_count = "completed", len(opportunities)
@@ -216,8 +231,12 @@ class AnalyticsService:
             candidate = Opportunity.model_validate(value.model_dump())
             if (candidate.market != run.market or candidate.run_id != run.run_id
                 or candidate.strategy_id != strategy.id or candidate.strategy_version != strategy.version
-                or candidate.observed_at > run.as_of):
+                or candidate.observed_at > (run.data_as_of or run.as_of)):
                 raise ValueError("Strategy returned an opportunity outside its run context")
+            if run.development_mode:
+                candidate.details["development"] = {"enabled": True, "as_of": run.as_of.isoformat(),
+                    "data_as_of": run.data_as_of.isoformat() if run.data_as_of else None,
+                    "note": "All saved evidence with a frozen clock; not a historical replay or live signal"}
             key = (candidate.strategy_id, candidate.item_id, candidate.action,
                    candidate.details.get("spell_id"), candidate.details.get("version_hash"))
             if key not in unique:
@@ -245,10 +264,13 @@ class AnalyticsService:
         published = self.store.latest(settings.active_market, published=True, summary=True)
         if latest and latest.error and latest.config == settings.config and latest.generation == generation:
             error = latest.error
-        age = max(0, int((datetime.now(UTC) - observed).total_seconds())) if observed else None
+        development_at = self.development_clock() if self.development_clock else None
+        evaluation_at = development_at or datetime.now(UTC)
+        age = max(0, int((evaluation_at - observed).total_seconds())) if observed else None
         return {"ready": ready, "active_market": settings.active_market, "generation": generation,
                 "observed_at": observed, "data_age_seconds": age,
                 "observation_stale": age is not None and age > settings.config.max_price_age_seconds,
+                "development_mode": development_at is not None, "evaluation_at": evaluation_at,
                 "running": self.lock.locked() or (latest is not None and latest.status == "running"),
                 "progress": self._performance.snapshot() if self._performance else None,
                 "latest_run": latest.model_dump(mode="json") if latest else None,

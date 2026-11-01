@@ -6,7 +6,7 @@
   const money=n=>n===null||n===undefined?"—":`${Math.floor(n/10000)} з ${Math.floor(n%10000/100)} с ${n%100} м`;
   const modes={any:"Любая цена",limit:"Предел за штуку",median3d:"Скидка к медиане 3 дней"};
   const priority={high:"Высокий",normal:"Обычный",low:"Низкий"};
-  async function api(path,method="GET",value){const r=await fetch("/api/v2/sniper"+path,{method,headers:{"Content-Type":"application/json"},...(value===undefined?{}:{body:JSON.stringify(value)})});const data=await r.json();if(!r.ok)throw Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail));return data;}
+  async function api(path,method="GET",value){const r=await fetch((window.CennikPrefix||"")+"/api/v2/sniper"+path,{method,headers:{"Content-Type":"application/json"},...(value===undefined?{}:{body:JSON.stringify(value)})});const data=await r.json();if(!r.ok)throw Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail));return data;}
   function message(value,error=false){const e=document.getElementById("message");e.hidden=false;e.className=error?"error":"";e.textContent=value;}
   async function render(){
     book=await api("");preview=null;
@@ -48,7 +48,7 @@
   document.addEventListener("submit",async event=>{
     if(event.target.id!=="sniper-form")return;event.preventDefault();if(saving)return;saving=true;const submit=event.target.querySelector('button.primary');submit.disabled=true;try{
       const f=event.target.elements;
-      const rule={id:f.rule_id.value||crypto.randomUUID().replaceAll("-",""),market:"forever.pvp.alliance.us",item_id:Number(f.item_id.value),quantity:Number(f.quantity.value),mode:f.mode.value,unit_limit_copper:f.mode.value==="limit"?readCopper(f):0,discount_bps:Math.round(Number(f.discount.value)*100),priority:f.priority.value,use_bags:f.use_bags.checked};
+      const rule={id:f.rule_id.value||crypto.randomUUID().replaceAll("-",""),market:window.CennikMarket||"forever.pvp.alliance.us",item_id:Number(f.item_id.value),quantity:Number(f.quantity.value),mode:f.mode.value,unit_limit_copper:f.mode.value==="limit"?readCopper(f):0,discount_bps:Math.round(Number(f.discount.value)*100),priority:f.priority.value,use_bags:f.use_bags.checked};
       for(const key of ["item_level","item_suffix","pet_id"])rule[key]=f[key].value===""?null:Number(f[key].value);
       await api("/rules","PUT",rule);await refresh();message("Цель сохранена. Нажмите «Передать в игру», затем /reload.");
     }catch(e){message(e.message,true);}finally{saving=false;submit.disabled=false;}
@@ -63,8 +63,8 @@
       if(b.dataset.snipeMaterials){await materialsDialog(b);return;}
       switch(b.dataset.sniper){
         case "new":fill();break;
-        case "search":{const q=document.getElementById('sniper-query').value;const r=await fetch('/api/v2/items?q='+encodeURIComponent(q));const data=await r.json();if(!r.ok)throw Error(data.detail);document.getElementById('sniper-search').innerHTML=data.items.map(i=>`<button data-snipe-item="${i.item_id}">${h(i.name||i.item_id)} #${i.item_id}</button>`).join(' ')||'Предмет не найден в локальном каталоге. Используйте ID или поиск Auctionator в игре.';break;}
-        case "sync":{const r=await fetch("/api/v2/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});const v=await r.json();if(!r.ok)throw Error(v.detail);message("Синхронизация запущена. После завершения выполните /reload в игре.");break;}
+        case "search":{const q=document.getElementById('sniper-query').value;const r=await fetch((window.CennikPrefix||'')+'/api/v2/items?q='+encodeURIComponent(q));const data=await r.json();if(!r.ok)throw Error(data.detail);document.getElementById('sniper-search').innerHTML=data.items.map(i=>`<button data-snipe-item="${i.item_id}">${h(i.name||i.item_id)} #${i.item_id}</button>`).join(' ')||'Предмет не найден в локальном каталоге. Используйте ID или поиск Auctionator в игре.';break;}
+        case "sync":{const r=await fetch((window.CennikPrefix||"")+"/api/v2/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});const v=await r.json();if(!r.ok)throw Error(v.detail);message("Синхронизация запущена. После завершения выполните /reload в игре.");break;}
         case "export":{const v=await api("/export"),url=URL.createObjectURL(new Blob([JSON.stringify(v,null,2)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download="cennik-sniper.json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);break;}
         case "copy":await navigator.clipboard.writeText((await api("/export")).text);message("Список скопирован");break;
         case "preview":preview=await api("/preview","POST",{text:document.getElementById("sniper-import").value});document.getElementById("sniper-preview").textContent=`Добавить: ${preview.items.filter(r=>r.action==="add").length}; обновить: ${preview.items.filter(r=>r.action==="update").length}. ${preview.note}`;document.getElementById("sniper-apply").disabled=false;break;

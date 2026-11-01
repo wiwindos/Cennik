@@ -9,7 +9,11 @@ function GetMouseFoci() return Game.mouseFoci or {} end
 function date(format,value) return tostring(value) end
 function GetRealmName() return "FixtureRealm" end
 function UnitFactionGroup() return "Alliance" end
-function UnitName() return "FixturePlayer" end
+function UnitName(unit) return unit=="npc" and "FixtureAuctioneer" or "FixturePlayer" end
+function UnitGUID(unit) if unit=="npc" then return "Creature-0-1-1-1-12345-000000001" end end
+C_Map={GetBestMapForUnit=function() return 84 end,
+  GetPlayerMapPosition=function() return {GetXY=function() return .5,.6 end} end,
+  GetMapInfo=function() return {name="FixtureCity"} end}
 SlashCmdList={}
 function CreateFrame(kind,name,parent,template)
   local f={kind=kind,scripts={},events={},shown=true,parent=parent,points={}}

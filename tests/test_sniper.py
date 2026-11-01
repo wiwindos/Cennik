@@ -247,8 +247,10 @@ def test_python_lua_portable_round_trip_and_no_executable_import(exchange):
     assert budget == 500000
     assert rules[0] in imported
     assert lua.eval("Cennik.Sniper:Preview('return os.execute(1)')")[0] is None
-    with pytest.raises(ValueError):
-        decode_rules(text.replace(MARKET, "forever.pvp.horde.us"))
+    foreign = text.replace(MARKET, "forever.pvp.horde.us")
+    assert decode_rules(foreign)[1][0].market == "forever.pvp.horde.us"
+    lua.globals().portable = foreign
+    assert lua.eval("Cennik.Sniper:Preview(portable)")[0] is None
 
 
 def test_reference_three_completed_days_equal_weights_and_no_future_points(workspace):

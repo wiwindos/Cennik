@@ -28,7 +28,7 @@ function S:Emit(kind,fields)
 end
 function S:Validate(def)
   if type(def)~="table" or type(def.id)~="string" or #def.id>80 or not def.id:match("^[%w_-]+$") then return nil,"Неверный ID цели" end
-  if def.market~="forever.pvp.alliance.us" or not C:Integer(def.item_id) or def.item_id>2147483647 then return nil,"Другой рынок или неверный ID предмета" end
+  if def.market~=C.db.current_market or not C:Integer(def.item_id) or def.item_id>2147483647 then return nil,"Другой рынок или неверный ID предмета" end
   if not C:Integer(def.quantity) or def.quantity>1000000 or not weights[def.priority] then return nil,"Неверное количество или приоритет" end
   if def.mode~="any" and def.mode~="limit" and def.mode~="median3d" then return nil,"Неизвестный режим цены" end
   if not C:Integer(def.unit_limit_copper,true) or not C:Integer(def.discount_bps,true) or def.discount_bps>10000 then return nil,"Неверная цена или скидка" end
@@ -364,7 +364,7 @@ function S:Tick(elapsed)
     else local rule=self:Choose(); if not rule then return end; self:Begin(rule) end
     p=self.current; if not p then return end
   end
-  local market=p.rule and p.rule.definition.market or "forever.pvp.alliance.us"
+  local market=p.rule and p.rule.definition.market or C.db.current_market
   if p.kind~="lookup" and not C:MarketBindingMatches(market) then self:Notice("Подтвердите рынок персонажа"); self.current=nil; return end
   if p.more then
     if p.pages>=10 or not C_AuctionHouse[p.more] then self:CancelSearch("Неполные результаты; покупка не готова"); return end

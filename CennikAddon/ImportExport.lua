@@ -1,7 +1,20 @@
 local _, C = ...
 function C:Import()
   local imported = CennikImport
+  if type(imported)=="table" and imported.format_version==2 then
+    imported=imported.routes and imported.routes[GetRealmName() .. ":" .. UnitName("player")]
+    CennikImport=imported
+    if not imported then self.db.current_run=nil;self.db.queue={}; print("Cennik: этому персонажу не назначен маршрут импорта"); return end
+  end
   if type(imported) ~= "table" or imported.format_version ~= 1 then return end
+  if imported.collector_only then imported.packages={} end
+  if imported.client_id and self.db.client_id~=imported.client_id then
+    if self.db.pending then print("Cennik: сначала разрешите результат покупки до подключения аккаунта"); return end
+    self.db.client_id=imported.client_id
+    -- New identities affect future events only; queued historical events retain IDs.
+    self.db.device_id=imported.device_id
+  end
+  if imported.production and imported.production.client.role=="crafter" then self.db.current_run=nil;self.db.queue={} end
   if imported.device_id and imported.device_id ~= self.db.device_id then
     -- First load can happen before Bridge writes its device id. Adopt it only
     -- while no task, report or uncertain purchase has ever been created.
@@ -33,7 +46,7 @@ function C:Import()
       self.db.current_market, self.db.current_run = package.market, package.run_id
       self.db.packages[package.package_id] = self.db.packages[package.package_id] or {budget=package.max_budget_copper,spent=0}
       for _, task in ipairs(package.tasks) do
-        if task.format_version == 1 and task.market == package.market and task.run_id == package.run_id
+        if (task.format_version == 1 or task.format_version == 2 or task.format_version == 3) and task.market == package.market and task.run_id == package.run_id
           and type(task.task_id) == "string" and C:Integer(task.expires_at_epoch) and type(task.lines) == "table" then
           -- Imports never reset purchases, unknown operations or locally amended limits.
           if not self.db.tasks[task.task_id] and not (self.db.deleted_tasks and self.db.deleted_tasks[task.task_id]) then

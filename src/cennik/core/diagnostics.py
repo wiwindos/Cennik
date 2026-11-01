@@ -36,6 +36,7 @@ def summarize_run(run: Run, *, metadata: dict | None = None, signals: dict | Non
         "summary_only": True,
         "performance": diagnostics.get("performance", {}),
         "observed_items": diagnostics.get("observed_items", 0),
+        "disenchant_rules": diagnostics.get("disenchant_rules"),
         "rejections": diagnostics.get("rejections", {}),
         "strategy_signals": signals if signals is not None else diagnostics.get("strategy_signals", {}),
         "quality": {name: quality[name] for name in (

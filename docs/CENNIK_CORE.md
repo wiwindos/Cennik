@@ -1,9 +1,13 @@
 # Cennik Core: current recipes and CraftGraph
 
-Cennik extends the existing AHledger application. Build/download/recovery commands
-are unchanged. Open the existing web panel, choose one market in **Cennik Analytics**,
-then click **Пересчитать аналитику**. The market selection is saved immediately.
-Downloading or rebuilding AHledger does not recalculate Cennik.
+Cennik Local starts with `start_cennik.cmd` on port 8766. Use **Settings** to select
+strategies and **Recalculate** to calculate opportunities. See
+[Cennik Local](CENNIK_LOCAL.md) for the current UI, storage and source settings.
+
+This document describes the shared analytics engine and the retained Archive API.
+Local API routes have the `/api/v2/analytics` prefix; the Archive API retains
+`/api/analytics`. Build/download/recovery commands are unchanged. The old web panel
+and its local launcher have been removed.
 
 ## Runtime and persistence
 
@@ -182,8 +186,9 @@ is a ranking proxy, not an execution forecast. Grade, fees and all limits are vi
 
 ## Configuration and API
 
-All routes inherit the existing `X-API-Key` dependency. The old endpoints and UI
-remain available. No new endpoint accepts SQL, Python, shell commands or URLs.
+Archive API routes inherit the existing `X-API-Key` dependency. Its endpoints
+remain available; the old UI has been removed. Local Cennik uses loopback and
+origin checks. No endpoint accepts SQL, Python, shell commands or URLs.
 
 | Route | Behavior |
 | --- | --- |
@@ -201,7 +206,7 @@ Decimal input values may be JSON strings. A PUT replaces the full document; omit
 config fields use defaults. The web panel preserves other settings when changing a
 market, commission or discount.
 
-Defaults for new settings: all four strategies enabled; discount 15%; auction cut 5%; history window
+Defaults for new settings: all seven strategies enabled; discount 15%; auction cut 5%; history window
 30 days; at least 4 covered days spanning 3 days; latest history gap <=3 days;
 current price age <=86400 seconds; relative MAD <=0.30; capped volatility <=0.50;
 temporal outlier cap 0.10; recent median decline <=15%; minimum profit 1 copper.
@@ -239,10 +244,10 @@ stored summary. The UI shows reason/count tables and never prints the full run J
 
 ```powershell
 venv/Scripts/python.exe -m pytest -q
-venv/Scripts/python.exe -m ruff check src tests tools/check_cennik_sample.py tools/check_web_ui.py
+venv/Scripts/python.exe -m ruff check src tests tools/check_cennik_sample.py tools/check_workspace_ui.py
 venv/Scripts/python.exe -m mypy src
-node --check src/ahledger/static/analytics.js
-venv/Scripts/python.exe tools/check_web_ui.py
+node --check src/ahledger/static/next.js
+node --check src/ahledger/static/next-sniper.js
 venv/Scripts/python.exe tools/check_cennik_sample.py <sample>/analytics/ahledger.duckdb --output data/reports/cennik-sample.json
 ```
 

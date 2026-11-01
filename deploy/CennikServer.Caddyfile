@@ -1,0 +1,7 @@
+# Set CENNIK_DOMAIN to the real domain pointing to this VPS.
+{$CENNIK_DOMAIN} {
+    request_body {
+        max_size 64MB
+    }
+    reverse_proxy 127.0.0.1:8770
+}

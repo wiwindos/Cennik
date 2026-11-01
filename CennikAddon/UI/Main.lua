@@ -18,10 +18,10 @@ local function money(value)
   return (value<0 and "−" or "") .. GetMoneyString(math.abs(value),true)
 end
 local function percent(value) return value and string.format("%.2f%%",value) or "неизвестно" end
-local states={pending_scan="Нужен скан",scanning="Сканирование",scan_failed="Скан не завершён",
+local states={ready_at_npc="Можно покупать у NPC вручную",pending_scan="Нужен скан",scanning="Сканирование",scan_failed="Скан не завершён",
   requires_manual_check="Нужна проверка условий",insufficient_supply="Недостаточно товара",limits_exceeded="Нужно изменить лимиты",
   not_profitable="Невыгодно",ready_to_buy="Можно закупать",partially_bought="Закуплено частично",completed="Закупка завершена",cancelled="Отменено"}
-local strategies={vendor_arbitrage="Торговля с NPC",simple_craft="Крафт",craft_graph="Цепочка крафта",historical_discount="Историческая скидка"}
+local strategies={vendor_arbitrage="Аукцион → NPC",simple_craft="Крафт",craft_graph="Цепочка крафта",historical_discount="Историческая скидка",buy_disenchant="Покупка → распыление",craft_disenchant="Крафт → распыление",npc_to_auction="NPC → аукцион"}
 local risks={aggregated_prices_no_executable_lot="Серверная цена не подтверждала конкретный лот",partial_coverage="Частичное покрытие рынка",
   material_depth_unknown="Сервер не знал объём материалов по минимальной цене",profession_skill_recipe_access_unconfirmed="Доступ к профессии и рецепту не подтверждён",
   result_sale_unconfirmed="Продажа готового товара не подтверждена",result_tradeability_unconfirmed="Передаваемость результата не подтверждена",
@@ -159,12 +159,22 @@ function U:Details(task,structured)
   add("Продажи/сутки — оценка источника: " .. tostring(price.sales_estimated_per_day or "неизвестно") .. "; дата: " .. tostring(price.sales_observed_at or "неизвестно") .. "; источник: " .. tostring(price.sales_source or price.source or "неизвестно"),"source")
   add("Оценка спроса не подтверждает сделки и не гарантирует быструю продажу.","source")
   local liquidity=o.details.liquidity
+  local disenchant=o.details.disenchant
+  if disenchant then
+    add("Распыление: временная модель " .. tostring(disenchant.rules.version) .. "; отдельный результат случаен. Проверьте распыляемость и навык.","conditions")
+    for _,output in ipairs(disenchant.yields) do
+      add("Материал " .. C.Items:Name(output.material_item_id) .. ": " .. output.min_count .. "–" .. output.max_count .. "; шанс " .. tostring(tonumber(output.chance)*100) .. "%; ожидается " .. output.expected_quantity .. " на партию", "source")
+    end
+  end
   if liquidity and liquidity.enabled then
     local basis=liquidity.method=="latest_source" and "последняя оценка источника" or ("история: дней " .. tostring(liquidity.covered_days) .. "/" .. tostring(liquidity.window_days))
     add("Фильтр ликвидности: пройден при расчёте; " .. basis .. "; оценка " .. tostring(liquidity.conservative_sales_per_day) .. "/сутки; предложение/продажи " .. tostring(liquidity.supply_to_daily_sales) .. " (не срок продажи)","source")
   end
   add("Покупки / NPC:","materials")
   local recipe=o.details.recipe
+  if task.strategy_id=="npc_to_auction" then
+    add("Покупка у NPC → продажа на AH: получите свежую цену у торговца или подтвердите её в «Цены / лимиты». Проверьте запас всей партии и передаваемость. Покупка и выставление выполняются вручную.","conditions")
+  end
   if recipe then add("Рецепт: " .. (recipe.result_item_id and C.Items:Name(recipe.result_item_id) or ("#" .. tostring(recipe.spell_id))) .. "; профессия " .. tostring(recipe.profession) .. "; навык " .. tostring(recipe.skill_required) .. "; получение " .. tostring(recipe.acquisition),"conditions") end
   for _, line in ipairs(task.lines) do
     local availability="NPC: текущая цена неизвестна; откройте торговца или введите цену"
@@ -177,7 +187,7 @@ function U:Details(task,structured)
       else availability="AH: цена и достаточное количество ещё не проверены" end
     else
       local quote=C.NPC:Quote(task,line.item_id)
-      if quote then availability="NPC: " .. money(quote.batch_price_copper) .. " за " .. quote.batch_quantity .. " шт.; " .. quote.source .. (quote.from_database and "; стабильная цена из исходных данных" or ("; " .. date("%H:%M:%S",quote.observed_at) .. "; цена действительна 15 минут")) end
+      if quote then availability="NPC: " .. money(quote.batch_price_copper) .. " за " .. quote.batch_quantity .. " шт.; " .. quote.source .. (quote.from_database and "; стабильная цена из исходных данных" or ("; " .. date("%H:%M:%S",quote.observed_at) .. "; цена действительна 15 минут")) .. (task.strategy_id=="npc_to_auction" and ("; запас: " .. tostring(quote.available or "не подтверждён числом — проверьте всю партию")) or "") end
     end
     local item=C.Items:Link(line.item_id) .. " (#" .. line.item_id .. ")"
     add(item .. " × " .. line.quantity .. "; предел " .. money(line.unit_limit_copper) .. "; " .. availability,"materials")
@@ -384,6 +394,32 @@ function U:TaskPreview(task,x,y,width,height)
   self:AttachScrollChild(scroll,body)
   self.taskPreview=view
 end
+function U:BulkPanel()
+  button(self.body,"Проверить пакет",0,0,180,function()
+    local ok,reason=C.Bulk:Start(); if not ok then U.notice=reason end; U:Refresh()
+  end)
+  button(self.body,"Остановить",190,0,120,function() C.Bulk:Cancel("Остановлено игроком"); U:Refresh() end)
+  button(self.body,"Рабочие задания",320,0,170,function() U:SelectSection("Opportunities") end)
+  local db=C.db.bulk_checks or {}
+  local p=db.packet
+  local lines={"Отдельная проверка цен и объёма. Покупок нет; рабочие задания не изменяются."}
+  if p then
+    lines[#lines+1]="Пакет из веба: " .. p.batch_id .. "; уникальных предметов: " .. #p.item_ids
+    lines[#lines+1]="Подтвердите рынок, откройте AH и нажмите «Проверить пакет»."
+  else lines[#lines+1]="Выберите возможности в вебе, отправьте на проверку и выполните /reload." end
+  lines[#lines+1]=C.Bulk.message or ""
+  local report=C.Bulk.active and C.Bulk.report or (db.reports and db.reports[#db.reports])
+  if report then
+    lines[#lines+1]="Проверено предметов: " .. #report.items .. "; состояние: " .. (report.status or "scanning")
+    lines[#lines+1]="После завершения: /reload → синхронизация в вебе → выбор → обычные задания."
+    for i=math.max(1,#report.items-8),#report.items do
+      local r=report.items[i]
+      lines[#lines+1]="#" .. r.item_id .. ": " .. (r.status=="complete" and ("строк " .. #r.rows) or (r.reason or "Неполно"))
+    end
+  end
+  lines[#lines+1]="NPC-цены и наличие остаются неподтверждёнными. Цены AH — снимок, не резерв."
+  self:Text(table.concat(lines,"\n"),0,-36,625,self.body:GetHeight()-45)
+end
 function U:Opportunities()
   button(self.body,"Проверить выбранные",0,0,180,function()
     local tasks={}
@@ -410,7 +446,8 @@ function U:Opportunities()
   end
   table.sort(rows,function(a,b) return a.task_id<b.task_id end)
   self.opportunityCount=#rows
-  label(self.body,"Заданий: " .. #rows .. ". Нажмите строку.",340,-6,290)
+  button(self.body,"Проверка из веба",340,0,180,function() U:SelectSection("Bulk") end)
+  label(self.body,"Заданий: " .. #rows,530,-6,100)
   local listHeight=math.min(120,math.max(56,math.floor(self.body:GetHeight()*0.30)))
   local actionY=listHeight+40
   local scroll=U:Widget("ScrollFrame",self.body,"UIPanelScrollFrameTemplate","opportunity-list")
@@ -460,7 +497,9 @@ function U:Opportunities()
   local task=self:Task()
   if task then
     button(self.body,"Проверить",0,-actionY,110,function() U:ShowTaskDetails(task); C.Scanner:Start(task) end)
-    button(self.body,"В очередь",115,-actionY,110,function() local _,reason=C.BuyQueue:Add(task); if reason then U.notice=reason; U:Refresh() end end)
+    if task.strategy_id~="npc_to_auction" then
+      button(self.body,"В очередь",115,-actionY,110,function() local _,reason=C.BuyQueue:Add(task); if reason then U.notice=reason; U:Refresh() end end)
+    else label(self.body,"NPC: вручную",115,-actionY-6,110) end
     button(self.body,"Поиск",230,-actionY,110,function()
       local ok,reason=C.Adapter:Shopping(task.needs_variant_item_id or task.item_id)
       if not ok then U.notice=reason; U:Refresh() end
@@ -479,7 +518,7 @@ function U:Opportunities()
     end)
     local conditions=U:Widget("CheckButton",self.body,"UICheckButtonTemplate")
     conditions:SetPoint("TOPLEFT",0,-actionY-28); conditions:SetChecked(task.conditions_confirmed)
-    label(self.body,"Профессия, рецепт, NPC проверены",32,-actionY-34,280)
+    label(self.body,task.strategy_id=="npc_to_auction" and "NPC, запас и передаваемость проверены" or task.opportunity.details.disenchant and "Распыление, навык и риск проверены" or "Профессия, рецепт, NPC проверены",32,-actionY-34,280)
     conditions:SetScript("OnClick",function() task.conditions_confirmed=conditions:GetChecked(); task.validation=nil; C.BuyQueue.ticket=nil; C:State(task,"pending_scan","Повторите проверку цен") end)
     button(self.body,"Скрыть задание",470,-actionY-28,155,function()
       local ok,reason=C:HideTask(task)
@@ -617,12 +656,14 @@ function U:Render()
   self.bindingNote:SetTextColor(bound and 0.3 or 1,bound and 1 or 0.82,bound and 0.3 or 0)
   self.bindButton:SetText(bound and "Рынок подтверждён" or "Подтвердить рынок")
   self.noticeNote:SetText(self.notice or "")
-  if self.section=="Sniper" and self.SniperPanel then self:SniperPanel()
+  if self.section=="Bulk" then self:BulkPanel()
+  elseif self.section=="Sniper" and self.SniperPanel then self:SniperPanel()
   elseif self.section=="Hidden" then self:HiddenTasks()
   elseif self.section=="Market" and C.MarketCollector then
     local collector=C.MarketCollector
     label(self.body,"Массовый скан через Auctionator; снимки хранятся постоянно в локальном Cennik",0,0,625)
     button(self.body,"Сканировать сейчас",0,-34,180,function() collector:Start(); U:Refresh() end)
+    button(self.body,"Сбор: статус / диагностика",0,-64,250,function() C.CollectorUI:Show() end)
     button(self.body,C.db.collector.enabled and "Автосбор: включён" or "Автосбор: выключен",190,-34,200,function()
       C.db.collector.enabled=not C.db.collector.enabled; U:Refresh()
     end)
@@ -635,9 +676,15 @@ function U:Render()
     self:Text((collector.message or "Ожидание") .. "\n\nВ очереди: " .. #(C.db.market_scans or {}) .. "/" .. collector.maxQueue ..
       "\nСледующий запрос не ранее: " .. date("%H:%M:%S",C.db.collector.next_at or 0) ..
       "\n\nПосле /reload дождитесь импорта в вебе. Ещё один /reload загрузит подтверждение архива и освободит очередь." ..
-      "\nЗаполнение очереди приостанавливает новые запросы, старые снимки не удаляются.",0,-75,625,self.body:GetHeight()-80)
+      "\nЗаполнение очереди приостанавливает новые запросы, старые снимки не удаляются.",0,-100,625,self.body:GetHeight()-105)
   elseif self.section=="History" then
     local lines={"Запись команды не доказывает покупку. Синхронизация отчётов после /reload."}
+    if C.Accounting and C.Accounting.db then
+      local ledger=C.Accounting.db
+      lines[#lines+1]="Учёт: " .. #ledger.events .. " операций ожидают передачи в веб → «Учёт»."
+      if ledger.unbound then lines[#lines+1]="Для автоматического учёта подтвердите рынок персонажа." end
+      if ledger.overflow then lines[#lines+1]="Очередь учёта переполнялась: пропущено " .. (ledger.missed or 0) .. "; нужна сверка." end
+    end
     for index=#C.db.history,math.max(1,#C.db.history-150),-1 do
       local e=C.db.history[index]
       local task=C.db.tasks[e.task_id]
