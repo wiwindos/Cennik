@@ -20,3 +20,25 @@ CraftGraph reuses the existing adapted `cheapest_material`, `auction_net`, share
 price quality and Opportunity helpers. The bounded hyperedge search is local code;
 none of the reviewed sources supplies a compatible versioned, integer-batch solver
 with AHledger provenance. No additional upstream code or dependency was imported.
+
+Disenchant reference data (reviewed 2026-10-24): item metadata and numeric yield
+estimates from AHledger's public catalog and 0.9.6 release model are compiled into
+`reference/disenchant.json`. The original evidence, release SHA256 and comparisons
+are recorded in `research/disenchant-2026-10-24/REPORT.ru.txt`. The Lua implementation
+was evaluated only in the isolated research environment; no AHledger source code
+is embedded in Cennik. The runtime evaluates explicit per-item numeric pools using
+local Decimal arithmetic. Data attribution is displayed in the source panel and
+opportunity details; AHledger data must not be presented as our own scans or resold
+as a feed. The source-available addon's All Rights Reserved license is not treated
+as permission to redistribute its implementation.
+
+NPC reference data (2026-10-24): `reference/npc_catalog.json` contains numeric
+buy/sell values and item names from the public auctionhouse.fyi items endpoint.
+The original response SHA-256, retrieval time, build and source description are
+retained. Source: https://auctionhouse.fyi/api/v1/items. Its source description
+includes a Classic Era ItemSparse fallback; these are client reference values,
+not observed merchant offers. No auctionhouse.fyi, GoldCap or Everloot source
+code was copied. GoldCap data is not bundled. No open redistribution licence
+for auctionhouse.fyi data was established by the research; this local development
+reference does not assert one. Recheck data availability and reuse terms when
+preparing public distribution. Research: `research/npc-api-comparison-2026-10-24/`.

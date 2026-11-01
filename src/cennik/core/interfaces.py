@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from .models import AnalyticsConfig, Item, Opportunity, PriceObservation, Recipe
 
 if TYPE_CHECKING:
+    from cennik.engines.disenchant import DisenchantRules
     from cennik.engines.prices import PriceEngine
 
 
@@ -31,6 +32,7 @@ class EvaluationContext:
     prices: PriceEngine
     items: dict[int, Item]
     diagnostics: dict[str, dict[str, int]] = field(default_factory=dict)
+    disenchant: DisenchantRules | None = None
 
     def reject(self, strategy: str, reason: str) -> None:
         counts = self.diagnostics.setdefault(strategy, {})

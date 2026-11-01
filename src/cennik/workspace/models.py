@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from cennik.core.models import Model
 
@@ -8,6 +8,8 @@ MARKET = "forever.pvp.alliance.us"
 
 
 class WorkspaceSettings(Model):
+    development_mode: bool = False
+    development_as_of: AwareDatetime | None = None
     auto_scan: bool = True
     auto_import: bool = True
     auto_refresh: bool = False

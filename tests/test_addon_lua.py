@@ -531,7 +531,7 @@ def test_opportunity_wrapped_title_and_summary_grow_row_and_remain_in_tooltip(ex
       Cennik.UI:Refresh()
       local row=Cennik.UI.opportunityRows[1]
       assert(row.cennikTitle:GetText():find(Game.localized[t.item_id],1,true))
-      assert(row.cennikSummary:GetText():find('Торговля с NPC',1,true))
+      assert(row.cennikSummary:GetText():find('Аукцион → NPC',1,true))
       assert(row:GetHeight()>=182 and Cennik.UI.opportunityScroll:GetVerticalScrollRange()>0)
       assert(row.cennikTitle.parent==row and row.cennikSummary.parent==row)
       GameTooltip={SetOwner=function() end,SetHyperlink=function(_,link) Game.tooltipLink=link end,

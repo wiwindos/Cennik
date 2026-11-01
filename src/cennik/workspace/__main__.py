@@ -9,6 +9,7 @@ from pathlib import Path
 
 import uvicorn
 
+from .runtime import revision
 from .web import create_app
 
 
@@ -24,6 +25,10 @@ def main():
             running = json.load(response)
         if running.get("workspace") != str(args.root.resolve()) or running.get("profile") != "cennik-next":
             raise RuntimeError("Порт занят другим приложением; выберите --port")
+        if running.get("runtime_revision") != revision():
+            raise SystemExit("Запущена прежняя версия Cennik. Закройте её консоль (Ctrl+C), "
+                             "затем снова запустите start_cennik.cmd. Повторный запуск без "
+                             "остановки открывает старый сервер и не применяет обновления.")
         if not args.no_browser:
             webbrowser.open(url)
         print("Cennik уже работает: " + url)

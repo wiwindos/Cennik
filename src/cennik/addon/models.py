@@ -7,7 +7,7 @@ from cennik.core.models import Model, Opportunity
 
 MAX_INTEGER = 2**53 - 1  # Lua's exact integer range on the game client
 Money = int
-StrategyId = Literal["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph"]
+StrategyId = Literal["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction"]
 
 
 class ExportRequest(Model):
@@ -27,7 +27,7 @@ class PurchaseLine(Model):
 
 
 class Task(Model):
-    format_version: Literal[1] = 1
+    format_version: Literal[1, 2, 3] = 1
     task_id: str
     opportunity_id: str
     run_id: str

@@ -1,9 +1,21 @@
 # Cennik Addon v0.1
 
+For the current local application, start `start_cennik.cmd` and follow
+[Cennik Local](CENNIK_LOCAL.md). This document describes the shared procurement
+protocol and the standalone remote Bridge; the old web panel has been removed.
+
 The addon executes procurement checks for published Cennik results. It does not
-calculate strategies, change DuckDB, craft items, sell to NPCs or post auctions.
-The four supported strategy IDs are `vendor_arbitrage`, `historical_discount`,
-`simple_craft`, `craft_graph`. Server `Opportunity.execution_status` stays
+calculate strategies, change DuckDB, sell to NPCs or post auctions. Since 0.11.0,
+the separate `/cennik production` window prepares addressed mail/trade hand-offs
+and starts an available craft or disenchant on an explicit player click.
+[Two-account production](CENNIK_PRODUCTION.md) describes setup, routing and verification.
+The seven supported strategy IDs are `vendor_arbitrage`, `historical_discount`,
+`simple_craft`, `craft_graph`, `buy_disenchant`, `craft_disenchant`, `npc_to_auction`. Disenchant tasks
+use task format v2 and require CennikAddon 0.7.0; packages/reports retain format v1.
+NPC resale tasks use v3 and require CennikAddon 0.8.0; their NPC procurement is manual.
+Earlier addons ignore unsupported task formats rather than treating them as gear resale. Live
+checks value the expected output materials, require fresh material scans and a
+player confirmation of disenchant eligibility/skill. Server `Opportunity.execution_status` stays
 `indicative`; addon states and reported transactions are stored separately.
 
 ## Audited basis and compatibility
@@ -140,14 +152,19 @@ whole original Opportunity, risks, source generation and fixed chain are retaine
 Copy `CennikAddon/` to the game's `Interface/AddOns/CennikAddon/` beside the supplied
 working Auctionator. Do not replace Auctionator with an unrelated version.
 
-Start local Cennik with the existing `start_local.cmd`. From the repository:
+Start local Cennik with `start_cennik.cmd` (port 8766). Set the game folder and
+account in Settings, then use **Synchronize with game** in the web interface.
+The built-in synchronization handles scans, sniper settings and execution reports;
+it does not require a separate Bridge process. See [Cennik Local](CENNIK_LOCAL.md).
+
+The standalone Bridge is retained for an explicitly configured remote Archive API.
+From the repository:
 
 ```powershell
-bridge/start_bridge.cmd --addon-dir "<game>/Interface/AddOns/CennikAddon" --saved-variables "<game>/WTF/Account/<account>/SavedVariables/CennikAddon.lua" --market forever.pvp.alliance.us
+bridge/start_bridge.cmd --server "https://<archive-api>" --addon-dir "<game>/Interface/AddOns/CennikAddon" --saved-variables "<game>/WTF/Account/<account>/SavedVariables/CennikAddon.lua" --market forever.pvp.alliance.us
 ```
 
-There are no network/game paths hardcoded into the bridge except the loopback
-server default `http://127.0.0.1:8765`. `--watch` explicitly starts sync every ten
+The standalone Bridge requires an explicit `--server`. `--watch` starts sync every ten
 seconds; it never updates prices, recalculates analytics or sends game controls.
 For a remote server use `--server https://...` and `CENNIK_API_KEY` in the environment.
 Keyless mode is accepted only for a loopback server whose health reports local mode.
@@ -286,6 +303,26 @@ spending, in-flight operation, budgets and duplicate guards persist in SavedVari
 Imports never reset them; a renewal changes only expiry. Unsent reports are retained
 until acknowledged; the in-game journal keeps its last 500 events separately.
 
+## Bulk research (addon 0.9.0)
+
+Separate `bulk_checks` imports carry item IDs, packet identity and bounds.
+`Bulk.lua` performs sequential, read-only AH queries and returns price/depth
+reports through SavedVariables. It does not emit task transitions or purchase
+events. Acknowledgements retain retry safety. Only the final selection in the
+web becomes existing working tasks, which still require live revalidation.
+See [the bulk workflow](CENNIK_BULK.md) for reload steps and limits.
+
+## Accounting (addon 0.10.0)
+
+Independent observers record confirmed purchases, vendor transactions,
+crafting/disenchanting bag deltas, auction postings and collected mail.
+SavedVariables contain an acknowledged outbox; the workspace stores a separate
+file journal. It does not extend SQL schemas or change task execution states.
+FIFO lots carry actual costs through crafting, transfers and partial sales.
+Ambiguous observations require review, and revisions retain original records.
+See [the accounting guide](CENNIK_ACCOUNTING.md) for supported events, limitations
+and the reload workflow. Live Forever acceptance remains pending.
+
 ## Existing-server API and storage
 
 All routes inherit the existing X-API-Key dependency (or loopback-only local mode).
@@ -310,10 +347,10 @@ DuckDB price observations.
 
 ```powershell
 venv/Scripts/python.exe -m pytest -q
-venv/Scripts/python.exe -m ruff check src tests tools/check_web_ui.py
+venv/Scripts/python.exe -m ruff check src tests tools/check_workspace_ui.py
 venv/Scripts/python.exe -m mypy src
-node --check src/ahledger/static/analytics.js
-venv/Scripts/python.exe tools/check_web_ui.py --local
+node --check src/ahledger/static/next.js
+node --check src/ahledger/static/next-sniper.js
 ```
 
 Python tests cover export adapters, gates, authorization, idempotency, reports,
@@ -323,7 +360,8 @@ events and hardware restrictions. Tests cover price levels, NPC separation,
 group depth versus one-item purchases, fee/discount boundaries, variants, partial scans, budget, expiry, wrong
 market/run, separate quote confirmation, timeout/late success, reload, external
 conflicts, duplicate import, frame reuse and immutable report snapshots.
-The browser check exports a fixture graph through the actual web API. Tests never
+The current browser check is `tools/check_workspace_ui.py`; pass the Node,
+Playwright, browser and output paths described by its `--help`. Tests never
 purchase anything or upload fixture market observations into the real source.
 
 Live acceptance remains pending by the user's choice:

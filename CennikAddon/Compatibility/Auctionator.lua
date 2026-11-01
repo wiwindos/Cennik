@@ -4,6 +4,7 @@ C.Adapter = A
 function A:Open() return AuctionHouseFrame and AuctionHouseFrame:IsShown() end
 function A:Ready(owner)
   return not self.error and self:Open() and not self.shopping and not self.fullScan
+    and (owner=="bulk" or not (C.Bulk and C.Bulk.active))
     and (owner=="sniper" or not (C.Sniper and C.Sniper.current))
     and not (C.MarketCollector and C.MarketCollector.packing)
     and GetTime() >= self.externalUntil and C_AuctionHouse.IsThrottledMessageSystemReady()
@@ -24,6 +25,7 @@ function A:Initialize()
   for _, name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","SearchForItemKeys","RequestMoreBrowseResults","ReplicateItems","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PlaceBid"}) do
     if api[name] then hooksecurefunc(api,name,function()
       if not A.sending then
+        if C.Bulk and C.Bulk.active then C.Bulk:Cancel("Пользователь или другой аддон начал операцию AH") end
         A.externalUntil = GetTime() + 3
         if C.db.pending and (C.db.pending.stage == "buying" or C.db.pending.stage == "unknown") then
           C.db.pending.external_conflict = true

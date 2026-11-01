@@ -59,6 +59,13 @@ def test_settings_prevent_accidental_high_rates():
         Settings(requests_per_second=100)
 
 
+def test_removed_local_launcher_is_not_a_cli_command(tmp_path):
+    result = CliRunner().invoke(app, ["--data-dir", str(tmp_path / "unused"), "local"])
+    assert result.exit_code == 2
+    assert "No such command" in result.output
+    assert not (tmp_path / "unused").exists()
+
+
 def test_market_selection_limits_new_jobs_and_keeps_existing_queue(state, settings):
     selected = "forever.pvp.horde.us"
     other = "forever.normal.alliance.us"

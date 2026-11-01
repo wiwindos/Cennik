@@ -66,7 +66,7 @@ class AddonExchange:
 
     @staticmethod
     def task(opportunity: Opportunity, run: Run, request: ExportRequest, created: datetime) -> Task:
-        supported = {"vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph"}
+        supported = {"vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction"}
         if opportunity.strategy_id not in supported:
             raise ValueError("Unsupported addon strategy")
         if any(
@@ -81,7 +81,7 @@ class AddonExchange:
         ):
             raise ValueError("Opportunity exceeds Lua's exact integer range")
         lines = []
-        if opportunity.strategy_id in {"vendor_arbitrage", "historical_discount"}:
+        if opportunity.strategy_id in {"vendor_arbitrage", "historical_discount", "buy_disenchant"}:
             entries: list[dict[str, Any]] = [
                 {
                     "item_id": opportunity.item_id,
@@ -117,6 +117,8 @@ class AddonExchange:
                 )
             )
         cost = sum(line.quantity * line.unit_limit_copper for line in lines)
+        if opportunity.strategy_id == "npc_to_auction":
+            cost = opportunity.required_capital_copper  # exact pack price, not rounded unit price * pack size
         if not 0 < cost <= MAX_INTEGER:
             raise ValueError("Procurement cost exceeds supported integer range")
         fee = Fraction(run.config.auction_cut_percent / 100)
@@ -127,6 +129,7 @@ class AddonExchange:
             )
         expires = created + timedelta(seconds=request.expires_in_seconds)
         return Task(
+            format_version=3 if opportunity.strategy_id == "npc_to_auction" else 2 if opportunity.strategy_id in {"buy_disenchant", "craft_disenchant"} else 1,
             task_id=uuid5(NAMESPACE_URL, f"cennik/{run.run_id}/{opportunity.id}").hex,
             opportunity_id=opportunity.id,
             run_id=run.run_id,
@@ -181,8 +184,8 @@ class AddonExchange:
                                 "Возможность больше не относится к опубликованному расчёту активного рынка."
                             )
                         if db.execute(
-                            "SELECT 1 FROM addon_tasks WHERE opportunity_id=? AND run_id=?",
-                            [identity, run.run_id],
+                            "SELECT 1 FROM addon_tasks WHERE run_id=? AND (opportunity_id=? OR json_extract(payload,'$.opportunity.details.original_opportunity_id')=?)",
+                            [run.run_id, identity, identity],
                         ).fetchone():
                             raise ExchangeConflict(
                                 "Эта возможность уже экспортирована. Bridge повторно получает существующее задание; дублирование закупки запрещено."

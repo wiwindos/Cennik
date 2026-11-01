@@ -7,6 +7,7 @@ function S:Cancel(reason)
   self.active,self.current = false,nil
 end
 function S:Start(task,callback)
+  if C.Bulk and C.Bulk.active then return false end
   if C.Sniper and C.Sniper.current then C.Sniper:CancelSearch("Проверка задания") end
   if self.active then return false end
   task.validation,task.scans,task.needs_variant_item_id=nil,{},nil
@@ -18,7 +19,10 @@ function S:Start(task,callback)
   self.task,self.callback,self.ids,self.index,self.token = task,callback,{},0,self.token+1
   local seen = {}
   local function add(id) if not seen[id] then seen[id]=true; table.insert(S.ids,id) end end
-  add(task.item_id)
+  local disenchant=task.opportunity.details.disenchant
+  if disenchant then
+    for _,output in ipairs(disenchant.yields or {}) do add(output.material_item_id) end
+  else add(task.item_id) end
   for _, line in ipairs(task.lines) do if line.source == "auction" then add(line.item_id) end end
   self.active = true
   C:State(task,"scanning")

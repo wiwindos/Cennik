@@ -21,7 +21,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 ahledger = ["static/*.html", "static/*.css", "static/*.js"]
-cennik = ["licenses/*.txt", "THIRD_PARTY.md"]
+cennik = ["licenses/*.txt", "THIRD_PARTY.md", "reference/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

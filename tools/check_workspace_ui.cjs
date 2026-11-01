@@ -90,6 +90,25 @@ const path = require("node:path");
     await page.getByRole("button",{name:"Сохранить настройки",exact:true}).click();
     await page.getByText("Настройки сохранены.",{exact:false}).waitFor();
     await page.screenshot({path:path.join(process.argv[4],"settings.png"),fullPage:true});
+    await page.locator('[data-setting="development_mode"]').check();
+    await page.getByRole("button",{name:"Сохранить настройки",exact:true}).click();
+    await page.waitForFunction(()=>document.getElementById('sourcebar').textContent.includes('Режим разработки'));
+    assert.ok(await page.locator('[data-action="prices"]').isDisabled());
+    await page.locator('[data-action="calculate"]').click();
+    await page.waitForFunction(async()=>{
+      const overview=await (await fetch('/api/v2/overview')).json();
+      return overview.jobs[0]?.state==='completed'&&overview.analytics.latest_run?.development_mode;
+    });
+    await page.locator('[data-setting="development_mode"]').uncheck();
+    await page.getByRole("button",{name:"Сохранить настройки",exact:true}).click();
+    await page.waitForFunction(()=>!document.getElementById('sourcebar').textContent.includes('Режим разработки')).catch(async error=>{
+      const debug=await page.evaluate(async()=>({message:document.getElementById('message').textContent,
+        checkbox:document.querySelector('[data-setting="development_mode"]').checked,
+        overview:await (await fetch('/api/v2/overview')).json()}));
+      throw Error(JSON.stringify(debug)+' '+error);
+    });
+    await page.waitForFunction(()=>!document.querySelector('[data-action="prices"]').disabled);
+    assert.ok(await page.locator('[data-action="prices"]').isEnabled());
     for(const width of [320,736,1024]) {
       await page.setViewportSize({width,height:900});
       for(const name of ["opportunities","market","archive","execution","sources","settings","sniper"]) {

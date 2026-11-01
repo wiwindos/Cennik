@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--playwright", required=True)
     parser.add_argument("--browser", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--focus", choices=["all", "sniper"], default="all")
+    parser.add_argument("--focus", choices=["all", "sniper", "disenchant", "npc", "npc-catalog", "npc-legacy"], default="all")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cennik-next-ui-") as temporary:
@@ -30,6 +30,37 @@ def main():
             "full": True, "count": 120, "data": ";".join(["2589:4:40:0:4:1:2"]*120),
             "variants": [{"link": "item:2589:0:0:0", "name": "UI fixture: Linen Cloth",
                 "divisible": True, "vendor_sell": 13}]})
+        if args.focus == "disenchant":
+            from ahledger.models import JobSpec
+            from ahledger.parsers import parse
+            from cennik.core.models import AnalyticsSettings
+
+            spec = JobSpec(dataset="pricetable", url="https://fixture.invalid/prices", market=MARKET)
+            stamp = int(datetime.now(UTC).timestamp()) - 5
+            body = (f"AHL1|forever/pvp/alliance/us|{stamp}|4\n"
+                    "4239:50:50:100:50:50:50:50:1000\n"
+                    "10940:100:100:100:100:100:100:100:1000\n"
+                    "10938:200:200:100:200:200:200:200:1000\n"
+                    "2589:10:10:100:10:10:10:10:1000\n").encode()
+            workspace.market.import_api(spec, parse(spec, body), body, {})
+            settings = workspace.store.settings()
+            settings.config.craft_liquidity_enabled = False
+            workspace.analytics.update_settings(AnalyticsSettings(active_market=MARKET, config=settings.config))
+        if args.focus in {"npc", "npc-catalog", "npc-legacy"}:
+            from ahledger.models import JobSpec
+            from ahledger.parsers import parse
+            from cennik.workspace.models import ItemFacts
+
+            if args.focus == "npc":
+                workspace.update_facts(2589, ItemFacts(vendor_buy_copper=20))
+            spec = JobSpec(dataset="pricetable", url="https://fixture.invalid/prices", market=MARKET)
+            stamp = int(datetime.now(UTC).timestamp()) - 5
+            body = f"AHL1|forever/pvp/alliance/us|{stamp}|1\n2589:101:101:100:101:101:101:101:2000\n".encode()
+            workspace.market.import_api(spec, parse(spec, body), body, {})
+        if args.focus == "npc-legacy":
+            settings = workspace.store.settings()
+            settings.config.enabled_strategies.remove("npc_to_auction")
+            workspace.analytics.update_settings(settings)
         workspace.calculate()
         # Isolated catalogue fixture: direct cloth reagent + NPC thread, no network.
         workspace.sniper._catalog = {"workspace_id": workspace.identity, "generation": workspace.market.generation(),
@@ -47,7 +78,10 @@ def main():
                 if server.started:
                     break
                 time.sleep(.1)
-            subprocess.run([args.node, str(Path(__file__).with_suffix(".cjs")), args.playwright,
+            script = Path(__file__).with_name("check_disenchant_ui.cjs") if args.focus == "disenchant" else Path(__file__).with_suffix(".cjs")
+            if args.focus in {"npc", "npc-catalog", "npc-legacy"}:
+                script = Path(__file__).with_name("check_npc_ui.cjs")
+            subprocess.run([args.node, str(script), args.playwright,
                 args.browser, str(args.output), args.focus], check=True, timeout=120)
         finally:
             server.should_exit = True

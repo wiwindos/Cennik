@@ -12,7 +12,7 @@ class CraftLiquidity:
         self.history = (context.prices.sales_history(context.config.craft_sales_window_days)
                         if context.config.craft_liquidity_enabled and context.config.craft_liquidity_source == "history" else {})
 
-    def check(self, price: PriceObservation, quantity: int) -> tuple[dict[str, Any], str | None]:
+    def check(self, price: PriceObservation, quantity: int | Decimal) -> tuple[dict[str, Any], str | None]:
         config, as_of = self.context.config, self.context.provider.as_of
         points = self.history.get(price.item_id, [])
         estimates = [p.sales_estimated_per_day for p in points if p.sales_estimated_per_day is not None]

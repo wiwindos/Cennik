@@ -249,7 +249,7 @@ class SniperBook:
         rule = next((r for r in self.wire()["rules"] if r["id"] == identity), None)
         if not rule:
             raise ValueError("Цель не найдена")
-        end = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = self.w.evaluation_now().replace(hour=0, minute=0, second=0, microsecond=0)
         start = end - timedelta(days=3)
         item = rule["item_id"]
         # A one-item query avoids reading the full historical archive for a watch list.

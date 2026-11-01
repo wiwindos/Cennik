@@ -4,3 +4,10 @@ textarea{width:100%;max-width:100%;resize:vertical;font:13px/1.5 ui-monospace,mo
 .sniper-price{border:0;padding:0;margin:0;min-width:0}.sniper-price legend{font-size:13px;padding:0;margin-bottom:6px}.coin-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .filters label:has(#sniper-budget){display:grid;min-width:0;max-width:100%}.stack>label{min-width:0}input[type=file]{width:100%;min-width:0}
 dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;width:620px;max-width:calc(100vw - 28px);max-height:85vh;overflow:auto;padding:24px}dialog::backdrop{background:#102a3a88}dialog .actions{margin:18px 0}dialog li{padding:6px 0}
+#content{min-width:0}.table-wrap{min-width:0;max-width:100%}.bulk-results{min-width:900px}.bulk-results td:first-child{min-width:230px}.bulk-results input[type=number]{width:92px;min-width:92px}.bulk-results th,.bulk-results td{word-break:normal;overflow-wrap:normal}
+
+.account-table{min-width:800px}.account-table th,.account-table td{word-break:normal;overflow-wrap:normal}.account-table td:first-child{min-width:150px}.account-table button{white-space:nowrap}
+
+.production-table{min-width:720px}.production-table th,.production-table td{word-break:normal;overflow-wrap:normal}.production-table td:first-child{min-width:180px}
+
+.collectors-table{min-width:1100px}.collectors-table th,.collectors-table td{word-break:normal;overflow-wrap:normal}.collectors-table td:first-child{min-width:140px}.collectors-table button{white-space:nowrap}

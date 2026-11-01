@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.6.7"
+C.VERSION = "0.12.0"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -46,6 +46,7 @@ function C:Emit(task, kind, state, details, item, quantity, cost)
   table.insert(self.db.events,event)
   table.insert(self.db.history,event)
   if #self.db.history>500 then table.remove(self.db.history,1) end
+  if self.Accounting then self.Accounting:TaskPurchase(event,task) end
   return event
 end
 function C:BindMarket(market)
@@ -55,6 +56,7 @@ function C:BindMarket(market)
     return false,"Рынок должен соответствовать фракции персонажа"
   end
   self.db.binding = {market=market, realm=GetRealmName(), faction=faction, character=UnitName("player")}
+  if self.Accounting and self.Accounting.db then self.Accounting:Opening() end
   self:Refresh()
   return true
 end
@@ -65,8 +67,15 @@ function C:MarketBindingMatches(market)
     and binding.character==UnitName("player"))
 end
 function C:CheckTask(task, ownPending)
+  if self.Bulk and self.Bulk.active then return false,"Дождитесь завершения массовой проверки" end
   if task.hidden then return false,"Задание скрыто игроком" end
   local details=task.opportunity and task.opportunity.details
+  if task.strategy_id=="npc_to_auction" and task.format_version~=3 then
+    return false,"Устаревший формат задания NPC → AH; создайте новый пакет"
+  end
+  if (task.strategy_id=="buy_disenchant" or task.strategy_id=="craft_disenchant") and task.format_version~=2 then
+    return false,"Устаревший формат задания распыления; создайте новый пакет"
+  end
   if details and details.workspace_plan_id and details.quantity_model~="forever_units_v1" then
     return false,"План использует прежнюю модель количества. Пересчитайте партию в вебе и передайте новое задание"
   end
@@ -101,8 +110,12 @@ function C:Initialize()
     self.db.quantity_model="forever_units_v1"
   end
   self.Adapter:Initialize()
+  if self.CollectorStatus then self.CollectorStatus:Initialize() end
   if self.MarketCollector then self.MarketCollector:Initialize() end
   if self.Sniper then self.Sniper:Initialize() end
+  if self.Bulk then self.Bulk:Initialize() end
+  if self.Accounting then self.Accounting:Initialize() end
+  if self.Production then self.Production:Initialize() end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame
@@ -123,12 +136,16 @@ SLASH_CENNIK1 = "/cennik"
 SlashCmdList.CENNIK = function(message)
   message=(message or ""):match("^%s*(.-)%s*$"):lower()
   local market = message:match("^market%s+(.+)$")
+  if message=="collector" or message=="сбор" then C.CollectorUI:Show();return end
+  if message=="diagnostics" or message=="диагностика" then C.CollectorUI:Show(true);return end
+  if message=="production" or message=="производство" then C.Production:Show();return end
   if market then
     local ok, reason = C:BindMarket(market)
     print(ok and "Cennik: рынок подтверждён" or ("Cennik: " .. reason))
   elseif C.Adapter:Open() then
     C.UI:Attach(); C.UI:Show()
-    if message=="sniper" or message=="снайпер" then C.UI:SelectSection("Sniper")
+    if message=="bulk" then C.UI:SelectSection("Bulk")
+    elseif message=="sniper" or message=="снайпер" then C.UI:SelectSection("Sniper")
     else C.UI:Refresh() end
   else print("Cennik: откройте аукцион. Диагностика: " .. (C.Adapter.error or "Auctionator 340, современный AH")) end
 end
