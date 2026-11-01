@@ -1,0 +1,25 @@
+{
+	admin 127.0.0.1:2019
+	default_sni 205.172.56.135
+}
+http://205.172.56.135 {
+	handle /.well-known/acme-challenge/* {
+		respond 404
+	}
+	handle {
+		redir https://205.172.56.135:8443{uri} permanent
+	}
+}
+https://205.172.56.135, https://205.172.56.135:8443 {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+	request_body {
+		max_size 64MB
+	}
+	reverse_proxy 127.0.0.1:8770
+}

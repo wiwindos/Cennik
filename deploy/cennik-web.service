@@ -1,0 +1,26 @@
+[Unit]
+Description=Cennik HTTPS reverse proxy
+After=network-online.target cennik-server.service
+Wants=network-online.target
+[Service]
+Type=notify
+User=cennik-web
+Group=cennik-web
+Environment=XDG_DATA_HOME=/var/lib/cennik-caddy/production
+Environment=XDG_CONFIG_HOME=/var/lib/cennik-caddy/config
+ExecStart=/usr/local/bin/cennik-caddy run --config /etc/cennik-web/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/cennik-caddy reload --config /etc/cennik-web/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+StateDirectory=cennik-caddy
+StateDirectoryMode=0700
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cennik-caddy
+UMask=0077
+[Install]
+WantedBy=multi-user.target
