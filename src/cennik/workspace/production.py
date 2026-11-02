@@ -139,6 +139,7 @@ class Production:
 
     def steps(self, o: Opportunity, task_id=""):
         result = []
+        names = (o.details.get("graph_catalog") or {}).get("names", {})
         source = o.details.get("steps") or []
         if not source and o.details.get("recipe"):
             recipe = o.details["recipe"]
@@ -147,7 +148,7 @@ class Production:
             recipe = step["recipe"]
             result.append({"step_id": f"{task_id}.{index}", "task_id": task_id, "strategy_id": o.strategy_id,
                 "kind": "craft", "spell_id": recipe["spell_id"], "item_id": recipe["result_item_id"],
-                "item_name": o.item_name if recipe["result_item_id"] == o.item_id else str(recipe["result_item_id"]),
+                "item_name": o.item_name if recipe["result_item_id"] == o.item_id else names.get(str(recipe["result_item_id"])) or str(recipe["result_item_id"]),
                 "profession": recipe.get("profession"), "crafts": step["batches"],
                 "qty_min": recipe["qty_min"], "inputs": recipe["inputs"]})
         de = o.details.get("disenchant")

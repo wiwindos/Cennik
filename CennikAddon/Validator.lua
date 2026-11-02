@@ -93,6 +93,8 @@ function V:Validate(task,ownPending)
   if not ok then return rejected("requires_manual_check",reason) end
   local o=task.opportunity
   local disenchant=o and o.details and o.details.disenchant
+  local leveling=task.strategy_id=="profession_leveling" and o and o.details.leveling
+  local npcOutput=leveling and leveling.exit=="npc"
   local npcResale=task.strategy_id=="npc_to_auction"
   if not o or o.execution_status~="indicative" then return rejected("requires_manual_check","Неверный исходный контракт") end
   local remainingCost,total,npc,vendorRevenue=0,task.spent or 0,0,task.vendor_bought_revenue or 0
@@ -130,7 +132,8 @@ function V:Validate(task,ownPending)
   end
   result.ah_cost_copper=remainingCost
   if missingReason then return rejected(missingState,missingReason) end
-  total=total+remainingCost+npc
+  if leveling and not C:Integer(leveling.fixed_cost_copper,true) then return rejected("requires_manual_check","Неизвестна стоимость обучения") end
+  total=total+remainingCost+npc+(leveling and leveling.fixed_cost_copper or 0)
   if not C:Integer(total) then return rejected("requires_manual_check","Стоимость вне точного диапазона copper") end
   local gross
   if task.strategy_id=="vendor_arbitrage" then
@@ -142,7 +145,14 @@ function V:Validate(task,ownPending)
     result.revenue_basis="NPC: " .. table.concat(names,", ") .. "; лишние единицы не добавлены к прибыли"
   elseif task.strategy_id=="historical_discount" then result.revenue_basis="Текущий минимум AH; история — только ориентир скидки"
   else result.revenue_basis="Текущий минимум AH; будущая продажа не подтверждена" end
-  if disenchant then
+  if npcOutput then
+    local get=C_Item and C_Item.GetItemInfo or GetItemInfo
+    if not get then return rejected("requires_manual_check","Клиент не сообщает цену продажи NPC") end
+    local _,_,_,_,_,_,_,_,_,_,sell=get(task.item_id)
+    if not C:Integer(sell,true) then return rejected("requires_manual_check","Загрузите сведения о готовом предмете для проверки NPC-цены") end
+    gross=sell*o.quantity
+    result.revenue_basis="Продажа изготовленного предмета NPC по цене игрового клиента"
+  elseif disenchant then
     gross=0
     result.disenchant_materials={}
     if not disenchant.rules or not disenchant.rules.sha256 or not disenchant.yields or #disenchant.yields==0 then
@@ -180,7 +190,7 @@ function V:Validate(task,ownPending)
     gross=sale*o.quantity; result.sale_unit_copper=sale
   end
   if not C:Integer(gross,true) then return rejected("requires_manual_check","Выручка вне точного диапазона copper") end
-  local cut=task.strategy_id=="vendor_arbitrage" and 0 or self:Part(gross,task.fee_numerator,task.fee_denominator)
+  local cut=(task.strategy_id=="vendor_arbitrage" or npcOutput) and 0 or self:Part(gross,task.fee_numerator,task.fee_denominator)
   if cut==nil then return rejected("requires_manual_check","Неизвестна комиссия") end
   local net=gross-cut
   result.complete=true
@@ -188,14 +198,14 @@ function V:Validate(task,ownPending)
   result.gross_revenue_copper,result.net_revenue_copper,result.fee_copper=gross,net,cut
   result.profit_copper=net-total; result.roi_percent=result.profit_copper*100/total
   result.margin_percent=gross>0 and result.profit_copper*100/gross or nil
-  local feeRate=task.strategy_id=="vendor_arbitrage" and 0 or task.fee_numerator
+  local feeRate=(task.strategy_id=="vendor_arbitrage" or npcOutput) and 0 or task.fee_numerator
   local breakEven=self:Part(total,task.fee_denominator,task.fee_denominator-feeRate)
   if breakEven then
     local after=task.strategy_id=="vendor_arbitrage" and breakEven or breakEven-self:Part(breakEven,feeRate,task.fee_denominator)
     if after<total then breakEven=breakEven+1 end
     result.break_even_unit_copper=math.ceil(breakEven/o.quantity)
   end
-  if result.profit_copper<task.min_profit_copper then return rejected("not_profitable","По текущим ценам прибыль ниже порога после комиссии") end
+  if result.profit_copper<task.min_profit_copper then return rejected("not_profitable",leveling and "Превышен допустимый убыток прокачки" or "По текущим ценам прибыль ниже порога после комиссии") end
   if npcResale then
     local get=C_Item and C_Item.GetItemInfo or GetItemInfo
     local bindType
@@ -210,10 +220,11 @@ function V:Validate(task,ownPending)
   if total>task.max_total_cost_copper then result.blockers[#result.blockers+1]="Превышен общий предел затрат задания" end
   if #result.blockers>0 then return rejected("limits_exceeded",table.concat(result.blockers,"; ") .. ". Экономика рассчитана; покупка заблокирована.") end
   local package=C.db.packages[task.package_id]
-  if not package or remainingCost+npc>package.budget-package.spent or remainingCost+npc>GetMoney() then
+  local requiredMoney=remainingCost+npc+(leveling and leveling.fixed_cost_copper or 0)
+  if not package or requiredMoney>package.budget-package.spent or requiredMoney>GetMoney() then
     return rejected("requires_manual_check","Текущая экономика рассчитана; не хватает золота или общего бюджета (включая NPC)")
   end
-  if (npc>0 or task.strategy_id=="simple_craft" or task.strategy_id=="craft_graph" or disenchant or npcResale) and not task.conditions_confirmed then return rejected("requires_manual_check",npcResale and "Подтвердите передаваемость, доступ к NPC и достаточный запас для всей партии" or disenchant and "Подтвердите распыляемость предмета, навык, доступ к рецепту и случайный выход материалов" or "Подтвердите доступ к профессии, рецепту, NPC и откаты") end
+  if (npc>0 or task.strategy_id=="simple_craft" or task.strategy_id=="craft_graph" or disenchant or npcResale or leveling) and not task.conditions_confirmed then return rejected("requires_manual_check",npcResale and "Подтвердите передаваемость, доступ к NPC и достаточный запас для всей партии" or disenchant and "Подтвердите распыляемость предмета, навык, доступ к рецепту и случайный выход материалов" or "Подтвердите доступ к профессии, рецепту, NPC и откаты") end
   result.state=npcResale and "ready_at_npc" or #result.plans==0 and "completed" or "ready_to_buy"
   result.reason=npcResale and "Экономика проверена. Купите предмет у NPC и выставьте на AH вручную; покупка ещё не подтверждена" or "Закупка проверена по текущим лотам; крафт и продажа не выполнялись"
   return result

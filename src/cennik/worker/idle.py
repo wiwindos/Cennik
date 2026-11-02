@@ -105,16 +105,27 @@ class WindowsGame:
         return True
 
     def jump(self, target):
+        return self.press(target, "SPACE")
+
+    def press(self, target, key):
         if not self.ready(target):
             raise ValueError("Выбранное окно недоступно или активно")
         hwnd = target["hwnd"]
-        code = 1 | (0x39 << 16)
-        if not self.user.PostMessageW(hwnd, 0x100, 0x20, code):
-            raise OSError("Не удалось отправить Space")
+        if key == "SPACE":
+            virtual, scan = 0x20, 0x39
+        elif key in [f"F{i}" for i in range(1, 13)]:
+            number = int(key[1:])
+            virtual = 0x6F + number
+            scan = 0x3A + number if number <= 10 else 0x56 + number - 10
+        else:
+            raise ValueError("Поддерживаются Space и F1–F12")
+        code = 1 | (scan << 16)
+        if not self.user.PostMessageW(hwnd, 0x100, virtual, code):
+            raise OSError("Не удалось отправить клавишу")
         try:
             time.sleep(0.08)
         finally:
-            self.user.PostMessageW(hwnd, 0x101, 0x20, code | (1 << 30) | (1 << 31))
+            self.user.PostMessageW(hwnd, 0x101, virtual, code | (1 << 30) | (1 << 31))
 
 
 class IdleProbe:

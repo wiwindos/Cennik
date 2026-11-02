@@ -88,6 +88,7 @@ function M:Initialize()
   end
 end
 function M:Available()
+  if C.Automation and C.Automation.quiescing then return false,"Подготовка безопасного сохранения","BUSY" end
   local state=C.db.collector
   if not state or not C:MarketBindingMatches(state.market or C.db.current_market) then return false,"Подтвердите рынок персонажа","UNBOUND" end
   if not C.Adapter:Open() then return false,"Откройте аукцион","WAIT_AUCTION" end

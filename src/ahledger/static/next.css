@@ -15,3 +15,5 @@ dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);bor
 
 .server-shell{max-width:1120px;margin:28px auto;padding:0 20px;display:grid;gap:20px}.server-shell textarea{width:100%;box-sizing:border-box}.server-shell pre{white-space:pre-wrap;overflow-wrap:anywhere}.server-shell a{color:var(--accent,#287a80)}
 body[data-server-mode="true"] #prod-clients,body[data-server-mode="true"] details:has(#collector-connection),body[data-server-mode="true"] label:has([data-setting="game_root"]),body[data-server-mode="true"] label:has([data-setting="account"]),body[data-server-mode="true"] label:has([data-setting="auto_import"]),body[data-server-mode="true"] [data-action="install"]{display:none}
+
+.leveling-table{min-width:980px}.leveling-table th,.leveling-table td{word-break:normal;overflow-wrap:normal}.leveling-table td:first-child{min-width:180px}.leveling-table button{white-space:nowrap}

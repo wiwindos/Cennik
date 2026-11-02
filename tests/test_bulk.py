@@ -25,8 +25,12 @@ def opportunity(identity="one", strategy="simple_craft", item=4238):
     if strategy == "npc_to_auction":
         details["materials"] = [{"item_id": item, "quantity": 1, "source": "npc", "unit_price_copper": 30}]
     if strategy == "craft_graph":
-        details["steps"] = [{"batches": 1, "required_quantity": 1, "output_quantity": 1, "surplus_quantity": 0,
-                             "inputs": [{"item_id": 2589, "quantity": 3}]}]
+        from test_craft_graph import offer, recipe
+
+        from cennik.engines.craft_graph import CraftGraph, wire_steps
+        root = recipe(100,item,[(2589,3)])
+        graph = CraftGraph([root],{2589:offer(2589,10)})
+        details.update(steps=wire_steps(graph.plan(root)),graph_catalog=graph.snapshot(root))
     return Opportunity(id=identity, run_id="bulk-fixture", strategy_id=strategy, strategy_version="fixture",
         market=MARKET, item_id=item, item_name="Bulk fixture " + identity, action="fixture", observed_at=now,
         generated_at=now, buy_price_copper=10, reference_price_copper=100, quantity=1, required_capital_copper=10,

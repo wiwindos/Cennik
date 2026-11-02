@@ -113,6 +113,9 @@ def test_profiles_are_isolated_and_only_one_ahl_source_is_enabled(server):
     w = app.state.catalog.workspace(p.id)
     other_w = app.state.catalog.workspace(other.id)
     assert w.root != other_w.root and w.market_key != other_w.market_key
+    assert w.settings().auto_recalculate and other_w.settings().auto_recalculate
+    other_w.save_settings(other_w.settings().model_copy(update={"auto_recalculate": False}))
+    assert not other_w.settings().auto_recalculate
     with pytest.raises(RuntimeError, match="другой сервер"):
         other_w.require_live_updates()
     p2 = p.model_copy(update={"label": "Новое имя"})
@@ -151,6 +154,9 @@ def test_collector_registry_scopes_and_crowd_scan_reaches_only_its_market(server
             break
         time.sleep(.05)
     assert len(w.market.rows("SELECT * FROM working_offers")) == 1
+    w.future.result(timeout=10)
+    latest = w.store.latest(p.market, summary=True)
+    assert latest is not None and latest.status == "completed"
     assert list((app.state.hub.root / "raw" / p.id / "scan").glob("*.zst"))
 
 

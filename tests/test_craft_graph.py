@@ -41,9 +41,9 @@ def test_integer_batches_surplus_and_actual_purchase_cost():
 
 def test_chooses_purchase_over_costlier_intermediate_and_ignores_sale_price():
     bar, result = recipe(1, 2, [(1, 3)], qty=2), recipe(2, 3, [(2, 3)])
-    graph = CraftGraph([bar, result], {1: offer(1, 10), 2: offer(2, 19)})
+    graph = CraftGraph([bar, result], {1: offer(1, 10), 2: offer(2, 14)})
     plan = graph.plan(result)
-    assert plan.cost_copper == 57 and len(plan.steps) == 1
+    assert plan.cost_copper == 42 and len(plan.steps) == 1
 
 
 def test_alternative_producers_missing_market_price_and_npc_leaf():
@@ -56,13 +56,14 @@ def test_alternative_producers_missing_market_price_and_npc_leaf():
     assert plan.purchases[0].offer.source == "npc"
 
 
-def test_shared_inputs_are_charged_in_full_without_shared_surplus_optimization():
+def test_shared_inputs_are_rounded_once_and_reused_across_branches():
     bar = recipe(1, 2, [(1, 3)], qty=2)
     thread = recipe(2, 3, [(2, 1)])
     final = recipe(3, 4, [(2, 1), (3, 1)])
     plan = CraftGraph([bar, thread, final], {1: offer(1, 10)}).plan(final)
-    assert plan.cost_copper == 60 and sum(p.quantity for p in plan.purchases) == 6
-    assert len(plan.steps) == 4
+    assert plan.cost_copper == 30 and sum(p.quantity for p in plan.purchases) == 3
+    assert len(plan.steps) == 3
+    assert plan.steps[0].required_quantity == plan.steps[0].output_quantity == 2
 
 
 def test_cycles_cannot_manufacture_free_profit():

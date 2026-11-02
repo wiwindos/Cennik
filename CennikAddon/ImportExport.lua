@@ -50,7 +50,7 @@ function C:Import()
       self.db.current_market, self.db.current_run = package.market, package.run_id
       self.db.packages[package.package_id] = self.db.packages[package.package_id] or {budget=package.max_budget_copper,spent=0}
       for _, task in ipairs(package.tasks) do
-        if (task.format_version == 1 or task.format_version == 2 or task.format_version == 3) and task.market == package.market and task.run_id == package.run_id
+        if (task.format_version == 1 or task.format_version == 2 or task.format_version == 3 or task.format_version == 4) and task.market == package.market and task.run_id == package.run_id
           and type(task.task_id) == "string" and C:Integer(task.expires_at_epoch) and type(task.lines) == "table" then
           -- Imports never reset purchases, unknown operations or locally amended limits.
           if not self.db.tasks[task.task_id] and not (self.db.deleted_tasks and self.db.deleted_tasks[task.task_id]) then

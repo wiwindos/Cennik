@@ -22,7 +22,7 @@ function S:Start(task,callback)
   local disenchant=task.opportunity.details.disenchant
   if disenchant then
     for _,output in ipairs(disenchant.yields or {}) do add(output.material_item_id) end
-  else add(task.item_id) end
+  elseif not (task.strategy_id=="profession_leveling" and task.opportunity.details.leveling.exit=="npc") then add(task.item_id) end
   for _, line in ipairs(task.lines) do if line.source == "auction" then add(line.item_id) end end
   self.active = true
   C:State(task,"scanning")

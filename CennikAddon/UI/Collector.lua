@@ -4,6 +4,7 @@ C.CollectorUI=U
 local colors={error="|cffff7777",collect="|cff77ccff",ready="|cff77dd99",pause="|cffffcc66",wait="|cffdddddd"}
 local menuItems={
   {id="production",label="Производство / крафт"},
+  {id="professions",label="Обновить данные профессий"},
   {id="role",label="Роль персонажа"},
   {id="collector",label="Статус сбора и ошибки",collector=true},
   {id="diagnostics",label="Отчёт для поддержки",collector=true},
@@ -11,6 +12,7 @@ local menuItems={
   {id="sniper",label="Снайпер",auction=true,section="Sniper"},
   {id="bulk",label="Массовая проверка из веба",auction=true,section="Bulk"},
   {id="market",label="Подтвердить текущий рынок"},
+  {id="automation",label="Автоцикл: статус"},
 }
 function U:MenuReason(item)
   if C.collectorOnly and not item.collector then return "В режиме сборщика доступны только сбор и диагностика" end
@@ -26,9 +28,13 @@ function U:MenuAction(item)
     if not C.UI.frame then self.menuNote:SetText(C.Adapter.error or "Не удалось открыть вкладку Cennik. Проверьте Auctionator");return false end
     if item.section then C.UI:SelectSection(item.section) else C.UI:SelectSection("Opportunities") end
   elseif item.id=="production" then C.Production:Show()
+  elseif item.id=="professions" then C.Professions:Capture()
   elseif item.id=="role" then C.CharacterRole:Show()
   elseif item.id=="collector" then self:Show(false)
   elseif item.id=="diagnostics" then self:Show(true)
+  elseif item.id=="automation" then
+    if C.Automation and C.Automation.config and not C.Automation.db.local_pause then C.Automation:Stop() end
+    self:Show(false)
   elseif item.id=="market" then
     local ok,message=C:BindMarket(C.db.current_market)
     self.menuNote:SetText(ok and "Рынок подтверждён для этого персонажа" or message)
@@ -42,6 +48,7 @@ function U:RefreshMenu(resetHint)
   local count=0
   for index,item in ipairs(menuItems) do
     local b=self.menuButtons[index]
+    b:SetText(item.id=="automation" and C.Automation and C.Automation.config and not C.Automation.db.local_pause and "Остановить автоцикл" or item.label)
     if not C.collectorOnly or item.collector then
       count=count+1;b:ClearAllPoints();b:SetPoint("TOPLEFT",16,-38-(count-1)*32)
       b:SetEnabled(not self:MenuReason(item));b:Show()

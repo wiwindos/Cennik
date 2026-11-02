@@ -194,6 +194,7 @@ function S:CancelSearch(reason)
   self.searchStatus=reason
 end
 function S:Pause()
+  if C.Automation and C.Automation.db then C.Automation.db.resume_rules={} end
   for _,rule in pairs(C.db.sniper.rules) do rule.enabled=false end
   self:CancelSearch("Снайпер приостановлен")
   if self.overlay and self.overlay:IsShown() then self.overlayRequested=true end
@@ -230,6 +231,7 @@ function S:Traffic()
   self.window=recent; return #recent
 end
 function S:CanSend()
+  if C.Automation and C.Automation.quiescing then return false end
   return not self.manualHold and not self.foreignTab and C.Adapter:Ready("sniper") and not C.db.pending and not C.Scanner.active
     and not (C.MarketCollector and (C.MarketCollector.requested_at or C.MarketCollector.packing))
     and GetTime()>=(self.pauseUntil or 0) and GetTime()-(self.lastSend or -100)>=self.interval

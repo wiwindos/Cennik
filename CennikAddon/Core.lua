@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.18.1"
+C.VERSION = "0.20.0"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -71,10 +71,16 @@ function C:MarketBindingMatches(market)
 end
 function C:CheckTask(task, ownPending)
   if self.collectorOnly then return false,"Включён режим сборщика: стратегии и закупки недоступны" end
+  if self.Automation and self.Automation.quiescing then return false,"Подготовка безопасного сохранения; дождитесь завершения автоцикла" end
   local planReason=self.Production and self.Production:PurchaseBlock(task.task_id)
   if planReason then return false,planReason end
   if self.Bulk and self.Bulk.active then return false,"Дождитесь завершения массовой проверки" end
   if task.hidden then return false,"Задание скрыто игроком" end
+  if task.strategy_id=="profession_leveling" then
+    if not self.Professions then return false,"Обновите CennikAddon для прокачки профессий" end
+    local valid,note=self.Professions:CheckTask(task)
+    if not valid then return false,note end
+  end
   local details=task.opportunity and task.opportunity.details
   if task.strategy_id=="npc_to_auction" and task.format_version~=3 then
     return false,"Устаревший формат задания NPC → AH; создайте новый пакет"
@@ -160,6 +166,7 @@ function C:Initialize()
   if self.Accounting then self.Accounting:Initialize() end
   if self.Production and not self.collectorOnly then self.Production:Initialize() end
   if self.CharacterRole then self.CharacterRole:Initialize() end
+  if self.Automation then self.Automation:Initialize() end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame
@@ -186,6 +193,7 @@ SlashCmdList.CENNIK = function(message)
   if message=="collector" or message=="сбор" then C.CollectorUI:Show();return end
   if message=="diagnostics" or message=="диагностика" then C.CollectorUI:Show(true);return end
   if message=="production" or message=="производство" then C.Production:Show();return end
+  if message=="professions" or message=="профессии" then C.Professions:Capture();return end
   if market then
     local ok, reason = C:BindMarket(market)
     print(ok and "Cennik: рынок подтверждён" or ("Cennik: " .. reason))

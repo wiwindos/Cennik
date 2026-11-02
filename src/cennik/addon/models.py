@@ -1,13 +1,13 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from cennik.core.models import Model, Opportunity
 
 MAX_INTEGER = 2**53 - 1  # Lua's exact integer range on the game client
 Money = int
-StrategyId = Literal["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction"]
+StrategyId = Literal["vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction", "profession_leveling"]
 
 
 class ExportRequest(Model):
@@ -27,7 +27,7 @@ class PurchaseLine(Model):
 
 
 class Task(Model):
-    format_version: Literal[1, 2, 3] = 1
+    format_version: Literal[1, 2, 3, 4] = 1
     task_id: str
     opportunity_id: str
     run_id: str
@@ -39,7 +39,7 @@ class Task(Model):
     action: str
     predicted_profit_copper: int
     max_total_cost_copper: int = Field(gt=0, le=MAX_INTEGER)
-    min_profit_copper: int = Field(gt=0, le=MAX_INTEGER)
+    min_profit_copper: int = Field(ge=-MAX_INTEGER, le=MAX_INTEGER)
     lines: list[PurchaseLine]
     opportunity: Opportunity
     fee_numerator: int
@@ -50,6 +50,14 @@ class Task(Model):
     expires_at: AwareDatetime
     expires_at_epoch: int
     allow_overbuy: bool = False  # Legacy package field; ignored by Forever's unit-based planner.
+
+    @model_validator(mode="after")
+    def profit_contract(self):
+        if self.strategy_id != "profession_leveling" and self.min_profit_copper <= 0:
+            raise ValueError("Для обычного задания нужен положительный порог прибыли")
+        if self.strategy_id == "profession_leveling" and (self.format_version != 4 or not self.opportunity.details.get("leveling")):
+            raise ValueError("Для прокачки нужен отдельный контракт версии 4")
+        return self
 
 
 class Package(Model):

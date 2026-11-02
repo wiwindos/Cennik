@@ -31,6 +31,7 @@ def icon_image(color="#2a9d8f"):
 
 def bind_entry_editing(entry):
     """Windows Ctrl shortcuts use physical keys, including under Russian layouts."""
+
     def paste(event=None):
         try:
             value = entry.clipboard_get()
@@ -131,7 +132,10 @@ class CollectorWindow:
             row=3, column=0, sticky="ew", pady=(6, 15)
         )
         self.game = tk.StringVar(value=agent.settings.get("game_root", ""))
-        self.url = tk.StringVar(value=agent.client.public_connection()["url"] or (getattr(agent,"pairing",None) or {}).get("url", ""))
+        self.url = tk.StringVar(
+            value=agent.client.public_connection()["url"]
+            or (getattr(agent, "pairing", None) or {}).get("url", "")
+        )
         self.token = tk.StringVar()
         self.autostart = tk.BooleanVar(value=startup_enabled(name=self.startup_name))
         ttk.Label(frame, text="Папка игры (рядом с Interface и WTF)").grid(
@@ -187,6 +191,9 @@ class CollectorWindow:
             row=16, column=0, sticky="w", pady=(14, 0)
         )
         if worker:
+            ttk.Button(frame, text="Автоцикл аукционера…", command=self.cycle_dialog).grid(
+                row=17, column=0, sticky="e", pady=(8, 0)
+            )
             ttk.Button(frame, text="Прыжок / Space…", command=self.idle_dialog).grid(
                 row=16, column=0, sticky="e", pady=(14, 0)
             )
@@ -226,6 +233,174 @@ class CollectorWindow:
         path = filedialog.askdirectory(title="Папка игры", parent=self.root)
         if path:
             self.game.set(path)
+
+    def cycle_dialog(self):
+        from cennik.worker.automation import KEYS
+
+        helper = self.agent.cycle
+        try:
+            windows = helper.engine().windows(
+                self.agent.settings.get("game_root") or self.game.get()
+            )
+            routes = [
+                r
+                for r in (self.agent.manifest or {}).get("clients", [])
+                if r["role"] == "auctioneer"
+            ]
+        except Exception as error:
+            messagebox.showerror("Автоцикл аукционера", str(error), parent=self.root)
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Cennik: автоцикл аукционера")
+        dialog.geometry("700x645")
+        frame = ttk.Frame(dialog, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text="Отдельный режим; по умолчанию выключен. Настройки относятся только к выбранному персонажу и окну.\n"
+            "Назначьте в игре две разные клавиши: макрос /reload и штатное «Взаимодействие с целью».\n"
+            "Окно может быть неактивным, но должно оставаться видимым. Верхний левый угол нельзя перекрывать.",
+            wraplength=650,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+        ttk.Label(frame, text="Окно игры").pack(anchor="w")
+        window = ttk.Combobox(
+            frame,
+            state="readonly",
+            values=[f"{w['title']} · PID {w['pid']} · {w['hwnd']}" for w in windows],
+        )
+        window.pack(fill="x")
+        if windows:
+            window.current(
+                next((i for i, w in enumerate(windows) if w == helper.settings.get("target")), 0)
+            )
+        ttk.Label(
+            frame, text="Персонаж-аукционер (обнаруживается после выбора роли и /reload)"
+        ).pack(anchor="w", pady=(10, 0))
+        character = ttk.Combobox(
+            frame, state="readonly", values=[r["character"] + " · " + r["realm"] for r in routes]
+        )
+        character.pack(fill="x")
+        if routes:
+            character.current(
+                next(
+                    (
+                        i
+                        for i, r in enumerate(routes)
+                        if r["id"] == helper.settings.get("client_id")
+                    ),
+                    0,
+                )
+            )
+        fields = ttk.Frame(frame)
+        fields.pack(fill="x", pady=12)
+        reload_key = tk.StringVar(value=helper.settings.get("reload_key", "F8"))
+        interact_key = tk.StringVar(value=helper.settings.get("interact_key", "F9"))
+        minutes = tk.StringVar(value=str(helper.settings.get("minutes", 15)))
+        delay = tk.StringVar(value=str(helper.settings.get("delay", 5)))
+        for i, (label, value, choices) in enumerate(
+            [
+                ("Клавиша /reload", reload_key, KEYS),
+                ("Клавиша взаимодействия", interact_key, KEYS),
+                ("Сохранение без нового полного скана, минут", minutes, None),
+                ("Задержка перед взаимодействием, секунд", delay, None),
+            ]
+        ):
+            ttk.Label(fields, text=label).grid(row=i, column=0, sticky="w", pady=3)
+            widget = (
+                ttk.Combobox(fields, state="readonly", values=choices, textvariable=value, width=10)
+                if choices
+                else ttk.Entry(fields, textvariable=value, width=12)
+            )
+            widget.grid(row=i, column=1, sticky="w", padx=14)
+        enabled = tk.BooleanVar(value=helper.settings.get("enabled", False))
+        ttk.Checkbutton(
+            frame,
+            text="Включить автоматическое сохранение и восстановление аукциона",
+            variable=enabled,
+        ).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="После сохранения настроек один раз сделайте /reload вручную. Затем откройте подтверждённого\n"
+            "аукциониста и оставьте его выбранной целью. Включите нужные цели снайпера и сбор.\n"
+            "Полный скан сохраняется после окончания обработки. После /reload ждём подтверждения сервера,\n"
+            "затем открываем NPC и восстанавливаем прежние цели. После трёх неудачных открытий — остановка.",
+            wraplength=650,
+            justify="left",
+        ).pack(anchor="w", pady=10)
+        result = tk.StringVar(value=helper.message)
+        ttk.Label(frame, textvariable=result, wraplength=650).pack(anchor="w", pady=5)
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="w", pady=8)
+
+        def apply():
+            try:
+                active = enabled.get()
+                parameters = {}
+                if active:
+                    if window.current() < 0 or character.current() < 0:
+                        raise ValueError(
+                            "Запустите окно игры и назначьте аукционера через /cennik role"
+                        )
+                    parameters = dict(
+                        target=windows[window.current()],
+                        route=routes[character.current()],
+                        game_root=self.agent.settings["game_root"],
+                        enabled=True,
+                        reload_key=reload_key.get(),
+                        interact_key=interact_key.get(),
+                        minutes=int(minutes.get()),
+                        delay=int(delay.get()),
+                    )
+                else:
+                    helper.disable()
+
+                def commit():
+                    with self.agent.lock:
+                        if active:
+                            helper.configure(**parameters)
+                        self.agent.write_import()
+                        self.agent.wake.set()
+                    return helper.message
+
+                pending = self.pool.submit(commit)
+                result.set(
+                    "Сохраняем настройки и адресный импорт. Дождитесь подтверждения перед /reload"
+                )
+                for b in buttons.winfo_children():
+                    if isinstance(b, ttk.Button):
+                        b.configure(state="disabled")
+
+                def finish():
+                    if not dialog.winfo_exists():
+                        return
+                    if not pending.done():
+                        dialog.after(100, finish)
+                        return
+                    try:
+                        result.set(pending.result())
+                    except Exception as error:
+                        result.set(str(error))
+                    for b in buttons.winfo_children():
+                        if isinstance(b, ttk.Button):
+                            b.configure(state="normal")
+
+                dialog.after(100, finish)
+            except Exception as error:
+                result.set(str(error))
+
+        def disable():
+            enabled.set(False)
+            apply()
+
+        def resume():
+            helper.reset()
+            self.agent.wake.set()
+            result.set("Остановка сброшена. Продолжим только при живом подтверждённом индикаторе")
+
+        ttk.Button(buttons, text="Сохранить", command=apply).pack(side="left")
+        ttk.Button(buttons, text="Выключить", command=disable).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Продолжить цикл", command=resume).pack(side="left")
 
     def idle_dialog(self):
         helper = self.agent.idle
@@ -283,10 +458,12 @@ class CollectorWindow:
         ttk.Button(buttons, text="Отправить Space сейчас", command=lambda: apply(True)).pack(
             side="left", padx=6
         )
+
         def disable():
             helper.disable()
             enabled.set(False)
             result.set(helper.message)
+
         ttk.Button(buttons, text="Выключить", command=disable).pack(side="left")
 
     def save(self):

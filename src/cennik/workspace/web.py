@@ -23,6 +23,7 @@ from cennik.strategies.craft_graph import CraftGraphSettings
 
 from .accounting import JournalRevision, LedgerEvent
 from .bulk import BulkCreate, BulkSelection
+from .leveling import LevelingPublish, LevelingQuery
 from .models import ImportRequest, ItemFacts, PlanRequest, RefreshRequest, WorkspaceSettings
 from .production import ClientRoster, OrderCreate
 from .runtime import revision
@@ -92,6 +93,21 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     @app.get("/api/v2/production")
     def production():
         return workspace.production.overview()
+
+    @app.get("/api/v2/leveling")
+    def leveling():
+        return workspace.leveling.overview()
+
+    @app.post("/api/v2/leveling/analyze")
+    def leveling_analyze(value: LevelingQuery):
+        return workspace.leveling.analyze(value)
+
+    @app.post("/api/v2/leveling/publish", status_code=202)
+    def leveling_publish(value: LevelingPublish):
+        def publish():
+            result = workspace.leveling.publish(value)
+            return {**result, "sync": workspace.synchronize(include_scans=False)}
+        return workspace.submit("profession_leveling", publish)
 
     @app.get("/api/v2/collectors")
     def collectors():

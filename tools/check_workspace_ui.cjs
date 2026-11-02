@@ -94,7 +94,8 @@ const path = require("node:path");
     await page.getByRole("button",{name:"Сохранить настройки",exact:true}).click();
     await page.waitForFunction(()=>document.getElementById('sourcebar').textContent.includes('Режим разработки'));
     assert.ok(await page.locator('[data-action="prices"]').isDisabled());
-    await page.locator('[data-action="calculate"]').click();
+    assert.equal(await page.locator('[data-action="calculate"]').count(),0);
+    await page.evaluate(async()=>{const r=await fetch('/api/v2/recalculate',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(!r.ok)throw Error(await r.text());});
     await page.waitForFunction(async()=>{
       const overview=await (await fetch('/api/v2/overview')).json();
       return overview.jobs[0]?.state==='completed'&&overview.analytics.latest_run?.development_mode;

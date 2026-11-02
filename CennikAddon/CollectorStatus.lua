@@ -94,6 +94,7 @@ function S:Summary()
     "Сервер: " .. (delivery.message or "подключение не настроено") .. (delivery.at and " · подтверждение от " .. date("%d.%m %H:%M:%S",delivery.at) or ""),
     "Статус сервера загружается через /reload и не является прямой связью из игры."}
   if d.last_error then out[#out+1]="Последняя ошибка: " .. d.last_error.code .. " · " .. d.last_error.message end
+  if C.Automation then out[#out+1]=C.Automation:Summary() end
   return table.concat(out,"\n")
 end
 function S:Report()

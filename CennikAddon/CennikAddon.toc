@@ -1,6 +1,6 @@
 ## Interface: 16001, 38000, 120100, 50504
 ## Title: Cennik
-## Version: 0.18.1
+## Version: 0.20.0
 ## Notes: Аналитика, сканы рынка и снайпер Cennik через Auctionator
 ## Dependencies: Auctionator
 ## SavedVariables: CennikAddonDB
@@ -21,6 +21,8 @@ Bulk.lua
 Accounting.lua
 AccountingCapture.lua
 Production.lua
+Professions.lua
+Automation.lua
 Validator.lua
 Scanner.lua
 BuyQueue.lua

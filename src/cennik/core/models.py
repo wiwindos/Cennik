@@ -122,7 +122,7 @@ class Opportunity(Model):
     reference_price_copper: int = Field(ge=0)
     quantity: int = Field(gt=0)
     required_capital_copper: int = Field(gt=0)
-    potential_profit_copper: int = Field(gt=0)
+    potential_profit_copper: int
     roi_percent: Decimal
     confidence: Literal["limited", "moderate", "strong"]
     risk_flags: list[str]
@@ -134,6 +134,12 @@ class Opportunity(Model):
     execution_status: Literal["indicative"] = "indicative"
     rating: Decimal = Decimal(0)
     details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def profit_contract(self):
+        if self.potential_profit_copper <= 0 and self.strategy_id != "profession_leveling":
+            raise ValueError("Обычная возможность должна иметь положительную прибыль")
+        return self
 
 
 class Run(Model):

@@ -18,12 +18,13 @@ from cennik.core.models import Model
 from cennik.markets import MarketBinding
 from cennik.workspace.install import install_addon
 
+from .automation import AuctionCycle
 from .idle import IdleProbe
 
 FIELDS = {"device_id", "binding", "events", "market_scans", "npc_quotes", "collector_status", "server_binding",
     "collector_npc", "collector_recipes", "collector_transforms", "auctioneer_proposals", "sniper", "bulk_checks", "accounting", "production"}
 
-VERSION = "0.3.3"
+VERSION = "0.4.1"
 
 
 def saved_batch(saved, stamp, previous):
@@ -95,6 +96,7 @@ class WorkerAgent(CollectorAgent):
         self.snapshot_sources: dict[str, str] = {}
         self.scan_progress = ""
         self.idle = IdleProbe(root)
+        self.cycle = AuctionCycle(root)
 
     def request(self, method, path, *, body=None, connection=None):
         c = connection or self.client.connection()
@@ -309,6 +311,7 @@ class WorkerAgent(CollectorAgent):
             payload = json.loads(path.read_text("utf-8"))
             if payload.get("client_id") != route["id"] or payload.get("market_collector", {}).get("market") != self.manifest["profile"]["market"]:
                 raise ValueError("Сервер прислал импорт другого персонажа или рынка")
+            payload["automation"] = self.cycle.wire(route)
             routes[route["realm"]+":"+route["character"]] = payload
         addon = Path(self.settings["game_root"]) / "Interface/AddOns/CennikAddon"
         self.owned_import(addon)
@@ -326,7 +329,8 @@ class WorkerAgent(CollectorAgent):
         with self.lock:
             if not self.settings.get("game_root") or self.settings["paused"]:
                 return
-            self.idle.tick(paused=self.settings["paused"])
+            self.cycle_tick()
+            self.idle.tick(paused=self.settings["paused"] or (self.cycle.settings.get("enabled", False) and not self.cycle.allow_idle))
             if not force and time.monotonic() < self.next_tick and self.client.next_attempt != 0:
                 return
             self.checked_at = int(time.time())
@@ -423,6 +427,8 @@ class WorkerAgent(CollectorAgent):
     def overview(self):
         pending = len(list((self.root / "requests").glob("*.json")))
         status = "Нужна настройка" if not self.settings.get("game_root") else "Приостановлено" if self.settings["paused"] else "Ошибка" if self.worker_error or self.errors else "Подтвердите код в вебе: "+self.pairing["code"] if self.pairing else "Работает"
+        if self.cycle.error_code and status == "Работает":
+            status = "Ошибка автоцикла"
         note = " · ".join((self.manifest or {}).get("notes",[]))
         if self.scan_progress:
             note = (note+" · " if note else "")+self.scan_progress
@@ -430,7 +436,9 @@ class WorkerAgent(CollectorAgent):
             note=note or "Войдите в персонажей, выберите роль через /cennik role, затем /reload"
         if self.idle.settings.get("enabled"):
             note=(note+" · " if note else "")+self.idle.message
-        return {"status": status, "error": self.worker_error or next(iter(self.errors.copy().values()), ""),
+        if self.cycle.settings.get("enabled"):
+            note=(note+" · " if note else "")+self.cycle.message
+        return {"status": status, "error": self.worker_error or next(iter(self.errors.copy().values()), "") or (self.cycle.message if self.cycle.error_code else ""),
             "paused": self.settings["paused"], "pending": pending, "rejected": 0, "checked_at": self.checked_at,
             "last_import": self.last_success, "delivery": {"at": self.last_success}, "local": [],
             "connection": self.client.public_connection(), "game_root": self.settings.get("game_root", ""), "notice":note,
@@ -439,5 +447,21 @@ class WorkerAgent(CollectorAgent):
     def report(self):
         return json.dumps({"application": "Cennik Worker", "version": VERSION, "id": self.settings["id"],
             "state": self.overview()["status"], "pending": self.overview()["pending"], "last_success": self.last_success,
-            "error_code": self.worker_error_code or ("PRIVATE_EXCHANGE_FAILED" if self.worker_error or self.errors else ""),
-            "error": self.worker_error, "details": self.error_details, "scan_progress": self.scan_progress}, ensure_ascii=False, indent=2)
+            "error_code": self.worker_error_code or self.cycle.error_code or ("PRIVATE_EXCHANGE_FAILED" if self.worker_error or self.errors else ""),
+            "error": self.worker_error, "details": self.error_details, "scan_progress": self.scan_progress,
+            "auction_cycle": self.cycle.report()}, ensure_ascii=False, indent=2)
+
+    def cycle_tick(self):
+        route = next((r for r in (self.manifest or {}).get("clients", []) if r["id"] == self.cycle.settings.get("client_id")), None)
+        stamp, delivered = None, False
+        if route:
+            path = Path(self.snapshot_sources.get(route["id"], str(Path(self.settings["game_root"]) / "WTF/Account" / route["account"] / "SavedVariables/CennikAddon.lua")))
+            if path.exists():
+                info = path.stat()
+                stamp = (info.st_size, info.st_mtime_ns)
+                previous = self.read("state-"+route["id"]+".json", {})
+                delivered = previous.get("stamp") == list(stamp) and not (self.root / "requests" / (route["id"]+".json")).exists()
+        # Observe local reload completion even during a server outage. Network
+        # failure blocks new inputs through the delivery gate, not observation.
+        delivered = delivered and not bool(self.worker_error or self.errors or self.pairing)
+        self.cycle.tick(paused=self.settings["paused"], route=route, stamp=stamp, delivered=delivered)

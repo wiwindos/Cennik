@@ -66,11 +66,11 @@ class AddonExchange:
 
     @staticmethod
     def task(opportunity: Opportunity, run: Run, request: ExportRequest, created: datetime) -> Task:
-        supported = {"vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction"}
+        supported = {"vendor_arbitrage", "historical_discount", "simple_craft", "craft_graph", "buy_disenchant", "craft_disenchant", "npc_to_auction", "profession_leveling"}
         if opportunity.strategy_id not in supported:
             raise ValueError("Unsupported addon strategy")
         if any(
-            v > MAX_INTEGER
+            abs(v) > MAX_INTEGER
             for v in (
                 opportunity.quantity,
                 opportunity.buy_price_copper,
@@ -119,6 +119,9 @@ class AddonExchange:
         cost = sum(line.quantity * line.unit_limit_copper for line in lines)
         if opportunity.strategy_id == "npc_to_auction":
             cost = opportunity.required_capital_copper  # exact pack price, not rounded unit price * pack size
+        leveling = opportunity.details.get("leveling") if opportunity.strategy_id == "profession_leveling" else None
+        if leveling:
+            cost += leveling["fixed_cost_copper"]
         if not 0 < cost <= MAX_INTEGER:
             raise ValueError("Procurement cost exceeds supported integer range")
         fee = Fraction(run.config.auction_cut_percent / 100)
@@ -129,7 +132,7 @@ class AddonExchange:
             )
         expires = created + timedelta(seconds=request.expires_in_seconds)
         return Task(
-            format_version=3 if opportunity.strategy_id == "npc_to_auction" else 2 if opportunity.strategy_id in {"buy_disenchant", "craft_disenchant"} else 1,
+            format_version=4 if leveling else 3 if opportunity.strategy_id == "npc_to_auction" else 2 if opportunity.strategy_id in {"buy_disenchant", "craft_disenchant"} else 1,
             task_id=uuid5(NAMESPACE_URL, f"cennik/{run.run_id}/{opportunity.id}").hex,
             opportunity_id=opportunity.id,
             run_id=run.run_id,
@@ -141,7 +144,7 @@ class AddonExchange:
             action=opportunity.action,
             predicted_profit_copper=opportunity.potential_profit_copper,
             max_total_cost_copper=cost,
-            min_profit_copper=run.config.min_profit_copper,
+            min_profit_copper=-leveling["max_loss_copper"] if leveling else run.config.min_profit_copper,
             lines=lines,
             opportunity=opportunity,
             fee_numerator=fee.numerator,

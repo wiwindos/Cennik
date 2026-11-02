@@ -21,7 +21,7 @@ local function percent(value) return value and string.format("%.2f%%",value) or 
 local states={ready_at_npc="Можно покупать у NPC вручную",pending_scan="Нужен скан",scanning="Сканирование",scan_failed="Скан не завершён",
   requires_manual_check="Нужна проверка условий",insufficient_supply="Недостаточно товара",limits_exceeded="Нужно изменить лимиты",
   not_profitable="Невыгодно",ready_to_buy="Можно закупать",partially_bought="Закуплено частично",completed="Закупка завершена",cancelled="Отменено"}
-local strategies={vendor_arbitrage="Аукцион → NPC",simple_craft="Крафт",craft_graph="Цепочка крафта",historical_discount="Историческая скидка",buy_disenchant="Покупка → распыление",craft_disenchant="Крафт → распыление",npc_to_auction="NPC → аукцион"}
+local strategies={vendor_arbitrage="Аукцион → NPC",simple_craft="Крафт",craft_graph="Цепочка крафта",historical_discount="Историческая скидка",buy_disenchant="Покупка → распыление",craft_disenchant="Крафт → распыление",npc_to_auction="NPC → аукцион",profession_leveling="Прокачка профессии"}
 local risks={aggregated_prices_no_executable_lot="Серверная цена не подтверждала конкретный лот",partial_coverage="Частичное покрытие рынка",
   material_depth_unknown="Сервер не знал объём материалов по минимальной цене",profession_skill_recipe_access_unconfirmed="Доступ к профессии и рецепту не подтверждён",
   result_sale_unconfirmed="Продажа готового товара не подтверждена",result_tradeability_unconfirmed="Передаваемость результата не подтверждена",

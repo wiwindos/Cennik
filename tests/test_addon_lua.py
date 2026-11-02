@@ -658,9 +658,9 @@ def test_scroll_children_keep_anchors_and_history_after_deferred_and_repeated_re
 def test_detail_and_history_scroll_children_have_nonzero_content_height(exchange):
     lua = runtime(exported(exchange, "vendor_arbitrage"))
     lua.execute('Cennik.UI:Attach(); Cennik.UI.focus=t.task_id; Cennik.UI:Show(); Game.advance(0)')
-    lua.execute('for _,e in ipairs(Cennik.UI.used) do if e.widget.kind=="Frame" and e.key:find("text%-Opportunities$") then detailsBox=e.widget end end')
+    lua.execute('Cennik.UI:ShowTaskDetails(t); detailsBox=Cennik.UI.taskDetails.blocks.status.frame')
     assert lua.eval("detailsBox:GetNumPoints()") > 0
-    assert lua.eval("detailsBox:GetHeight()") >= 140
+    assert lua.eval("Cennik.UI.taskDetails.body:GetHeight()") >= 140
     assert lua.eval("detailsBox:IsVisible()")
     lua.execute('for i=1,40 do Cennik:Emit(t,"state","pending_scan",{reason="Событие " .. i}) end; Cennik.UI.tabs.History:GetScript("OnClick")(); Game.advance(0)')
     lua.execute('for _,e in ipairs(Cennik.UI.used) do if e.widget.kind=="Frame" and e.key:find("text%-History$") then historyBox=e.widget end end')

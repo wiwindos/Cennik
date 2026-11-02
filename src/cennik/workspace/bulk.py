@@ -15,8 +15,11 @@ from pydantic import Field, model_validator
 from ahledger.util import atomic_json, dumps
 from cennik.addon.models import ExportRequest, Package
 from cennik.core.models import AnalyticsConfig, Model, Opportunity, Run
+from cennik.engines.craft_graph import MaterialOffer, PriceLevel
 from cennik.engines.economics import auction_net, roi
 from cennik.markets import MARKET_PATTERN
+
+from .graph_plans import auction_items, recalculate
 
 MAX_CANDIDATES = 200
 MAX_ITEMS = 200
@@ -124,6 +127,8 @@ def materials(o: Opportunity) -> list[dict]:
 
 def needed_items(o: Opportunity) -> set[int]:
     ids = {r["item_id"] for r in materials(o) if r["source"] == "auction"}
+    if o.strategy_id == "craft_graph":
+        ids.update(auction_items(o))
     if o.details.get("disenchant"):
         ids.update(r["material_item_id"] for r in o.details["disenchant"]["yields"])
     elif o.strategy_id not in {"vendor_arbitrage", "historical_discount"}:
@@ -294,6 +299,9 @@ class BulkChecks:
         current = int(datetime.now(UTC).timestamp())
         for item in needed_items(o):
             book = books.get(item)
+            if o.strategy_id == "craft_graph" and item != o.item_id and (book is None or book.status != "complete" or current-book.observed_at > MAX_AGE):
+                warnings.append(f"Покупка альтернативного компонента #{item} исключена: нет свежей полной проверки AH")
+                continue
             if book is None or book.status != "complete":
                 errors.append(f"Нет полной проверки #{item}")
             elif current - book.observed_at > MAX_AGE:
@@ -302,10 +310,35 @@ class BulkChecks:
             return {"opportunity_id": o.id, "item_name": o.item_name, "strategy_id": o.strategy_id,
                     "batches": batches, "complete": False, "problems": errors, "warnings": warnings,
                     "profit_copper": None, "available_batches": None, "budget_batches": None}
+        graph_plan = None
+        entries = materials(o)
+        if o.strategy_id == "craft_graph":
+            quotes = {}
+            for item_id in auction_items(o):
+                book = books.get(item_id)
+                if book is None or book.status != "complete" or current-book.observed_at > MAX_AGE:
+                    continue
+                skip, levels = used.get(item_id,0), []
+                for row in self._rows(book):
+                    ignored = min(skip,row.quantity)
+                    skip -= ignored
+                    if row.quantity > ignored:
+                        levels.append(PriceLevel(row.quantity-ignored,row.unit_price))
+                if levels:
+                    quotes[item_id] = MaterialOffer(item_id,levels[0].numerator,"auction",tuple(levels))
+            try:
+                graph_plan = recalculate(o,batches,quotes)
+            except ValueError as error:
+                return {"opportunity_id":o.id,"item_name":o.item_name,"strategy_id":o.strategy_id,"batches":batches,
+                    "complete":False,"problems":[str(error)],"warnings":warnings,"profit_copper":None,
+                    "available_batches":None,"budget_batches":None}
+            entries = graph_plan["materials"]
+            if graph_plan["search"]["limited"]:
+                warnings.append("Достигнут лимит поиска: выбран лучший найденный полный путь, минимум не доказан")
         capacities, total = [], 0
         vendor_gross = 0
-        for entry in materials(o):
-            item_id, required = entry["item_id"], entry["quantity"] * batches
+        for entry in entries:
+            item_id, required = entry["item_id"], entry["quantity"] if graph_plan else entry["quantity"] * batches
             if entry["source"] == "npc":
                 pack, cost = entry.get("npc_batch_quantity", 1), entry.get("npc_batch_price_copper")
                 cost = ((required + pack - 1) // pack) * cost if cost else required * entry["unit_price_copper"]
@@ -382,20 +415,32 @@ class BulkChecks:
         limit_batches = self.liquidity_limit(o)
         if limit_batches is not None and batches > limit_batches:
             errors.append("Партия превышает сохранённый лимит ликвидности выхода")
+        observed_items = ({o.item_id} | {r["item_id"] for r in lines if r["source"] == "auction"}) if graph_plan else needed_items(o)
         result = {"opportunity_id": o.id, "item_name": o.item_name, "strategy_id": o.strategy_id,
                   "batches": batches, "quantity": o.quantity * batches, "complete": not errors,
                   "problems": sorted(set(errors)), "warnings": sorted(set(warnings)), "materials": lines,
                   "cost_copper": total, "gross_copper": gross, "net_copper": net,
                   "profit_copper": net-total if not errors else None,
                   "available_batches": min(capacities) if capacities else None,
-                  "oldest_observed_at": min(books[i].observed_at for i in needed_items(o)),
-                  "disenchant_outputs": outputs, "budget_batches": None}
+                  "oldest_observed_at": min(books[i].observed_at for i in observed_items),
+                  "disenchant_outputs": outputs, "budget_batches": None,"graph":graph_plan}
         if inspect_capacity:
-            high = min(min(capacities) if capacities else 10000, 10000)
+            high = 10000 if graph_plan else min(min(capacities) if capacities else 10000, 10000)
             if limit is not None:
                 high = min(high, limit // o.quantity)
             if limit_batches is not None:
                 high = min(high, limit_batches)
+            if graph_plan:
+                left, right = 0, high
+                while left < right:
+                    middle = (left+right+1)//2
+                    trial = self.calculate(o,middle,books,dict(used),inspect_capacity=False,policy=(config,budget))
+                    if trial["complete"]:
+                        left = middle
+                    else:
+                        right = middle-1
+                high = left
+                result["available_batches"] = high
             low = 0
             while low < high:
                 middle = (low + high + 1) // 2
@@ -409,9 +454,9 @@ class BulkChecks:
                 trial = self.calculate(o, low, books, dict(used), inspect_capacity=False, policy=(config, budget))
                 result["at_budget"] = {k: trial[k] for k in ("batches", "quantity", "cost_copper", "profit_copper")}
         if not errors:
-            for entry in materials(o):
-                if entry["source"] == "auction":
-                    used[entry["item_id"]] = used.get(entry["item_id"], 0) + entry["quantity"] * batches
+            for line in lines:
+                if line["source"] == "auction":
+                    used[line["item_id"]] = used.get(line["item_id"], 0) + line["quantity"]
         return result
 
     def detail(self, identity: str, choices: list[BulkChoice] | None = None) -> dict:
@@ -487,7 +532,10 @@ class BulkChecks:
                                                  "yields": result["disenchant_outputs"]}
                         details["disenchant"]["yields"] = [{**y, "expected_quantity": str(Decimal(y["expected_count"]) * details["disenchant"]["quantity"])}
                                                             for y in details["disenchant"]["yields"]]
-                    if details.get("steps"):
+                    if o.strategy_id == "craft_graph":
+                        details.update(steps=result["graph"]["steps"],graph_model=result["graph"]["model"],
+                            graph_surplus=result["graph"]["surplus"],graph_search=result["graph"]["search"])
+                    elif details.get("steps"):
                         details["steps"] = [{**step, **{k: step[k]*choice.batches for k in
                             ("batches", "required_quantity", "output_quantity", "surplus_quantity") if k in step},
                             "inputs": [{**x, "quantity": x["quantity"] * choice.batches} for x in step.get("inputs", [])]}

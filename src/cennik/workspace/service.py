@@ -42,6 +42,7 @@ from .bulk import BulkChecks
 from .data import MarketDatabase, WorkspaceProvider, atomic_bytes, now
 from .development import DevelopmentProvider, coverage_report
 from .install import install_addon
+from .leveling import ProfessionLeveling
 from .models import MARKET, ItemFacts, PlanRequest, RefreshRequest, WorkspaceSettings
 from .npc import NpcReferenceProvider, NpcReferences
 from .production import Production
@@ -101,6 +102,7 @@ class Workspace:
         self.bulk = BulkChecks(self)
         self.accounting = Accounting(self)
         self.production = Production(self)
+        self.leveling = ProfessionLeveling(self)
         self.collectors = CollectorClient(self.root)
         seed = self.root.parent / "bridge/local.json"
         with self.store.connection() as db:
@@ -131,7 +133,7 @@ class Workspace:
     def settings(self) -> WorkspaceSettings:
         with self.store.connection() as db:
             row = db.execute("SELECT payload FROM workspace_settings WHERE id=1").fetchone()
-        return WorkspaceSettings.model_validate_json(row[0]) if row else WorkspaceSettings()
+        return WorkspaceSettings.model_validate_json(row[0]) if row else WorkspaceSettings(auto_recalculate=self.server_mode)
 
     def development_clock(self) -> datetime | None:
         settings = self.settings()
@@ -446,6 +448,10 @@ class Workspace:
         recipe_report = data.get("collector_recipes") or (data.get("production") or {}).get("recipes") or {}
         local_recipes = self.local_recipes.ingest(recipe_report)
         try:
+            self.leveling.ingest((data.get("production") or {}).get("profession_snapshot"), client)
+        except (ValueError, TypeError) as error:
+            self.log.warning("Profession snapshot ignored; ordinary exchange continues: %s", error)
+        try:
             self.collectors.capture(data, client.character if client else "Локальный сборщик")
         except (ValueError, TypeError, KeyError):
             self.collectors.failed("INVALID_SAVED_OBSERVATION")
@@ -615,6 +621,9 @@ class Workspace:
         return report
 
     def plan(self, request: PlanRequest):
+        from cennik.engines.craft_graph import MaterialOffer, PriceLevel
+
+        from .graph_plans import auction_items, recalculate
         opportunity = self.store.detail(self.market_key, request.opportunity_id)
         if opportunity is None:
             raise ValueError("Возможность не найдена")
@@ -626,6 +635,20 @@ class Workspace:
         generation = self.analytics.generation()
         entries: list[dict[str, Any]] = opportunity.details.get("materials", []) if opportunity.strategy_id in {"simple_craft", "craft_graph", "craft_disenchant", "npc_to_auction"} else [
             {"item_id": opportunity.item_id, "quantity": opportunity.quantity, "source": "auction"}]
+        graph_plan = None
+        if opportunity.strategy_id == "craft_graph":
+            quotes = {}
+            evaluated_at = self.evaluation_now()
+            max_depth_age = self.settings().max_depth_age_seconds
+            for item_id in auction_items(opportunity):
+                rows = self.market.rows("SELECT * FROM working_offers WHERE item_id=? AND buyout>0 AND NOT coalesce(owned,false) ORDER BY buyout::DECIMAL(38,6)/quantity,sequence", [item_id])
+                rows = [r for r in rows if r["quantity"] > 0 and r["divisible"] is not None and r["variant"]
+                    and (evaluated_at-r["observed_at"]).total_seconds() <= max_depth_age]
+                if rows:
+                    quotes[item_id] = MaterialOffer(item_id,(rows[0]["buyout"]+rows[0]["quantity"]-1)//rows[0]["quantity"],"auction",
+                        tuple(PriceLevel(r["quantity"],r["buyout"],r["quantity"]) for r in rows))
+            graph_plan = recalculate(opportunity,request.batches,quotes)
+            entries = graph_plan["materials"]
         lines, total, problems = [], 0, []
         heads = self.market.rows("SELECT source,observed_at FROM source_heads")
         own_at = next((row["observed_at"] for row in heads if row["source"] == "Cennik replicate"), None)
@@ -639,7 +662,7 @@ class Workspace:
         if not npc_resale and own_at and any(row["observed_at"] > own_at for row in heads):
             warnings.append("Сводные цены AHledger новее книги предложений. Повторите массовый скан перед решением")
         for entry in entries or []:
-            needed = entry["quantity"] * request.batches
+            needed = entry["quantity"] if graph_plan else entry["quantity"] * request.batches
             if entry["source"] == "npc":
                 cost = needed * entry["unit_price_copper"]
                 if npc_resale:
@@ -701,6 +724,8 @@ class Workspace:
                     problems.append("Недостаточная ликвидность материала распыления: " + str(output["material_item_id"]))
         net = gross if vendor else auction_net(gross, config.auction_cut_percent)
         profit = net - total if not problems else None
+        if graph_plan and graph_plan["search"]["limited"]:
+            warnings.append("Достигнут лимит поиска: показан лучший найденный полный путь; минимум затрат не доказан")
         result = {"id": uuid4().hex, "opportunity_id": opportunity.id, "generation": self.analytics.generation(),
             "created_at": now(), "depth_observed_at": own_at, "warnings": warnings,
             "development_mode": self.settings().development_mode,
@@ -712,7 +737,8 @@ class Workspace:
             "within_budget": not problems and total <= self.settings().budget_copper,
             "npc_stock_confirmed": False if npc_resale else None,
             "basis": "Закупка по справочной цене NPC; наличие и текущую цену проверить у торговца" if npc_resale else "Закупка по снимку; требуется адресная проверка в игре",
-            "sale_is_forecast": not vendor, "graph_note": "Стоимость рассчитана по справочной цене NPC и упаковкам; текущее наличие не подтверждено" if npc_resale else "Стоимость пересчитана для выбранного пути; альтернативные пути партии не оптимизировались" if opportunity.strategy_id == "craft_graph" else "Стоимость партии рассчитана по предложениям снимка"}
+            "sale_is_forecast": not vendor, "graph":graph_plan,
+            "graph_note": "Стоимость рассчитана по справочной цене NPC и упаковкам; текущее наличие не подтверждено" if npc_resale else "Цепочка пересчитана для всей партии: общие компоненты, целые крафты, остатки и доступные предложения; стоимость остатка не включена в прибыль" if graph_plan else "Стоимость партии рассчитана по предложениям снимка"}
         with self.store.connection() as db:
             db.execute("INSERT INTO workspace_plans VALUES(?,?,?)", [result["id"], result["created_at"], dumps(result)])
         return result
@@ -762,11 +788,18 @@ class Workspace:
                 "quantity": quantity, "unit_price_copper": unit, "source": line["source"], "cost_copper": line["cost_copper"]})
         details = {**original.details, "materials": materials, "workspace_plan_id": identity,
                    "original_opportunity_id": original.id, "quantity_model": "forever_units_v1"}
+        details.update(gross_revenue_copper=plan["gross_revenue_copper"],net_revenue_copper=plan["net_revenue_copper"],
+                       auction_cut_copper=plan["gross_revenue_copper"]-plan["net_revenue_copper"])
         if details.get("disenchant"):
             details["disenchant"] = {**details["disenchant"], "quantity": original.quantity * plan["batches"],
                 "yields": [{**y, "expected_quantity": str(Decimal(y["expected_count"]) * original.quantity * plan["batches"])}
                            for y in details["disenchant"]["yields"]]}
-        if details.get("steps"):
+        if original.strategy_id == "craft_graph":
+            if not plan.get("graph"):
+                raise ValueError("Пересчитайте партию: нужен новый совместный расчёт цепочки")
+            details.update(steps=plan["graph"]["steps"],graph_model=plan["graph"]["model"],
+                           graph_surplus=plan["graph"]["surplus"],graph_search=plan["graph"]["search"])
+        elif details.get("steps"):
             details["steps"] = [{**step, **{key: step[key] * plan["batches"] for key in
                 ("batches", "required_quantity", "output_quantity", "surplus_quantity") if key in step},
                 "inputs": [{**entry, "quantity": entry["quantity"] * plan["batches"]} for entry in step.get("inputs", [])]}
