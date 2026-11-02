@@ -447,7 +447,10 @@ function U:Opportunities()
   table.sort(rows,function(a,b) return a.task_id<b.task_id end)
   self.opportunityCount=#rows
   button(self.body,"Проверка из веба",340,0,180,function() U:SelectSection("Bulk") end)
-  label(self.body,"Заданий: " .. #rows,530,-6,100)
+  local crafter=C.Production.config and C.Production.config.client.role=="crafter"
+  button(self.body,crafter and "Крафт" or "Крафтеру",530,0,105,function()
+    if crafter then C.Production:Show() else C.Production:ChoosePlan(U.selected) end
+  end)
   local listHeight=math.min(120,math.max(56,math.floor(self.body:GetHeight()*0.30)))
   local actionY=listHeight+40
   local scroll=U:Widget("ScrollFrame",self.body,"UIPanelScrollFrameTemplate","opportunity-list")
@@ -655,7 +658,7 @@ function U:Render()
   local bound=C:MarketBindingMatches(C.db.current_market)
   self.bindingNote:SetTextColor(bound and 0.3 or 1,bound and 1 or 0.82,bound and 0.3 or 0)
   self.bindButton:SetText(bound and "Рынок подтверждён" or "Подтвердить рынок")
-  self.noticeNote:SetText(self.notice or "")
+  self.noticeNote:SetText(self.notice or (C.Production and C.Production.message) or "")
   if self.section=="Bulk" then self:BulkPanel()
   elseif self.section=="Sniper" and self.SniperPanel then self:SniperPanel()
   elseif self.section=="Hidden" then self:HiddenTasks()

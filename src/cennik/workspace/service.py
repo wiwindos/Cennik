@@ -25,6 +25,7 @@ from ahledger.models import JobSpec
 from ahledger.parsers import parse
 from ahledger.util import dumps
 from cennik.addon.bridge import Bridge
+from cennik.addon.limits import MAX_SAVED_BYTES, MAX_SAVED_TOKENS
 from cennik.addon.lua_data import Parser, lua_literal, read_saved_variables
 from cennik.addon.models import ExportRequest, Package, ReportBatch
 from cennik.addon.service import AddonExchange, ExchangeConflict
@@ -429,13 +430,13 @@ class Workspace:
         data: dict = {}
         before = saved.stat() if saved.exists() else None
         if before:
-            if before.st_size > 64_000_000:
-                raise ValueError("Сохранение больше 64 МБ; сканы не удалены, нужен импорт большего формата")
+            if before.st_size > MAX_SAVED_BYTES:
+                raise ValueError("Сохранение больше 256 МБ; сканы не удалены, передайте отчёт поддержки")
             text = saved.read_text("utf-8-sig")
             after = saved.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError("Игра записывает файл. Повторите синхронизацию")
-            data = read_saved_variables(text, max_bytes=64_000_000)
+            data = read_saved_variables(text, max_bytes=MAX_SAVED_BYTES, max_tokens=MAX_SAVED_TOKENS)
             if client and data.get("binding") and (data["binding"].get("character"), data["binding"].get("realm")) != (client.character, client.realm):
                 raise ValueError("SavedVariables относится к другому персонажу: " + client.character)
             scans = data.get("market_scans") or []
@@ -520,11 +521,15 @@ class Workspace:
             exchanged = bridge.synchronize()
             payload = bridge.import_payload
             if client:
+                # Accept hand-offs only after purchase reports have been imported.
+                # A stale response is harmless: the request has a durable receipt.
+                self.production.accept_plan_requests(client, data.get("production") or {})
+                payload["production"] = self.production.wire(client)
+                payload["packages"] = self.production.route_packages(client, payload["packages"])
                 # Future events are account-specific; old queued IDs and bridge
                 # acknowledgements are retained unchanged during migration.
                 payload["device_id"] = client.id
             if client and client.role != "auctioneer":
-                payload["packages"] = []
                 payload.pop("sniper_book", None)
                 payload.pop("sniper_catalog", None)
         finally:

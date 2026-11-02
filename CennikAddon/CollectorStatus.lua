@@ -19,10 +19,13 @@ S.codes={
   REQUESTED={"collect","Получаем полный снимок рынка","Оставьте аукцион открытым до окончания обработки"},
   PACKING={"collect","Обрабатываем строки снимка","Оставьте аукцион открытым"},
   READY={"ready","Снимок собран: ожидаем сохранения игрой","Данные попадут в приложение после /reload или штатного выхода"},
+  SCAN_SAVED={"ready","Снимок передан приложению","Подтверждение загрузки на сервер показано отдельно ниже; следующий скан — после разрешённого интервала"},
   SCAN_INTERRUPTED={"error","Аукцион закрыт до завершения скана","Частичный результат не заменяет полный рынок; повторим после разрешённого интервала"},
   SCAN_TIMEOUT={"error","Сервер не прислал полный ответ за 120 секунд","Проверьте связь; повторим после разрешённого интервала"},
   SCAN_REJECTED={"error","Сервер отклонил запрос аукциона","Ждём разрешённого интервала, частые повторы не отправляем"},
   SCAN_FAILED={"error","Не удалось завершить полный скан","Проверьте Auctionator и передайте отчёт поддержки"},
+  SCAN_PARTIAL={"error","Сохранён неполный снимок; рабочие цены не обновлены","Передайте сохранённое через /reload; повторим полный скан после разрешённого интервала"},
+  SCAN_TOO_LARGE={"error","Снимок превышает поддерживаемый объём","Предыдущие полные снимки сохранены; передайте отчёт поддержки"},
   OBSERVATION_LIMIT={"error","Очередь наблюдений заполнена","Сохраните данные через /reload или выход и дождитесь импорта приложения"},
   RECIPE_API_UNAVAILABLE={"error","Не удалось прочитать рецепты профессии","Передайте отчёт поддержки: интерфейс профессий этой сборки не распознан"},
   SAVED={"ready","Последние данные импортированы приложением","Это подтверждение локального архива, доставка на сервер отображается отдельно"}
@@ -73,17 +76,19 @@ function S:Finished(scan)
   if scan.full then self.db.last_success={at=scan.observed_at,rows=scan.count};self:Set("READY")
   elseif self.db.current and self.db.current.code=="SCAN_INTERRUPTED" then return
   elseif (scan.error or ""):find("120",1,true) then self:Set("SCAN_TIMEOUT")
-  else self:Set("SCAN_FAILED") end
+  else self:Set("SCAN_PARTIAL",tostring(scan.count or 0) .. " / " .. tostring(scan.reported_count or 0) .. " строк. " .. (scan.error or "Неполное покрытие")) end
 end
 function S:Summary()
   local d=self.db or {};local current=d.current or {};local success=d.last_success
   local delivery=d.delivery or {}
+  local latest=C.db.collector.last_scan
   local out={"Cennik · сбор данных " .. (self:IsEnabled() and "включён" or "выключен"),
     C.AuctionContext and C.AuctionContext:Summary() or "",
     current.message or "Ожидание",current.detail or "",current.action or "",
     "Последний полный снимок: " .. (success and date("%d.%m %H:%M:%S",success.at) .. " · " .. success.rows .. " строк" or "ещё нет"),
+    "Последняя попытка: " .. (latest and ((latest.full and "полная" or "НЕПОЛНАЯ") .. " · " .. tostring(latest.count or 0) .. " / " .. tostring(latest.reported_count or 0) .. " строк") or "ещё нет"),
     "В памяти игры ожидают записи/локального подтверждения: " .. #(C.db.market_scans or {}) .. " снимков",
-    "Ротация: последние 3 снимка, максимум 40 МБ. Заменено до выгрузки: " .. (C.db.collector.rotated or 0),
+    "Ротация: последние 3 снимка, до 48 МБ на снимок / 128 МБ в очереди. Сейчас: " .. string.format("%.1f",C.MarketCollector:QueuedBytes()/1000000) .. " МБ. Заменено до выгрузки: " .. (C.db.collector.rotated or 0),
     "Собрано этим аддоном: " .. (d.scans or 0) .. " снимков / " .. (d.rows or 0) .. " строк",
     "Локальный импорт: " .. (delivery.local_at and date("%d.%m %H:%M:%S",delivery.local_at) or "подтверждения ещё нет"),
     "Сервер: " .. (delivery.message or "подключение не настроено") .. (delivery.at and " · подтверждение от " .. date("%d.%m %H:%M:%S",delivery.at) or ""),

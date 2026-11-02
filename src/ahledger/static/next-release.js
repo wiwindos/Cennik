@@ -10,7 +10,7 @@
    if(!['settings','sources'].includes(page))return '';
    const status=state.overview.source_updates||{},set=state.overview.upstreams?.ahl_token_set;
    return `<section class="box stack" id="upstream-settings"><h2>Обновления источников</h2>
-    <p>Цены AHledger обновляются при включённом автообновлении цен. Рецепты — раз в 12 часов; история рабочих предметов — небольшими партиями. Каталог FYI проверяется раз в 6 часов независимо от наличия цен AHL.</p>
+    <p>Цены AHledger обновляются при включённом автообновлении цен. Рецепты — раз в час; история рабочих предметов — небольшими партиями. Каталог FYI проверяется раз в час независимо от наличия цен AHL.</p>
     ${[['auto_references','Обновлять рецепты AHledger'],['auto_history','Накапливать историю рабочих предметов'],['auto_fyi','Обновлять предметы и NPC-цены FYI']].map(([key,label])=>`<label class="check"><input type="checkbox" data-upstream-setting="${key}" ${w[key]?'checked':''}>${label}</label>`).join('')}
     <button type="button" data-fyi-update>Проверить каталог FYI сейчас</button>
     <p class="note">Старая бета-сборка не становится релизной из-за даты скачивания. При ошибке остаётся последняя проверенная версия.</p>

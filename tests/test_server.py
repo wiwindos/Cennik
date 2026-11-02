@@ -250,6 +250,41 @@ def test_bulk_publish_production_and_transfer_reports_all_run_on_server(server, 
     assert w.production.status()[0]["transfers"][0]["parts"][0]["state"] == "confirmed"
 
 
+def test_private_exchange_hands_purchasing_plan_to_crafter(server, tmp_path):
+    from cennik.addon.models import ExportRequest
+
+    app, http, p = server
+    device = register(http, p, two=True)
+    auctioneer, crafter = device["clients"]
+    w = app.state.catalog.workspace(p.id)
+    value = opportunity().model_copy(update={"market": p.market})
+    value.details["recipe"] = {"spell_id": 100, "result_item_id": 4238, "qty_min": 1,
+        "inputs": [{"item_id": 2589, "quantity": 3}], "profession": "Tailoring"}
+    run, status, _, _ = setup(w, tmp_path, value)
+    run.market = p.market
+    status.update(active_market=p.market, published_run=run.model_dump(mode="json"))
+    package = w.exchange.export(ExportRequest(request_id="self-purchase-http", opportunity_ids=[value.id]))
+    task = package.tasks[0]
+    request = {"request_id": "addon-self-purchase-http", "crafter_id": crafter,
+        "task_ids": [task.task_id], "procurement": "self_purchase",
+        "purchase_limits": {task.task_id: {str(task.lines[0].item_id): 15}},
+        "task_budgets": {task.task_id: 100}}
+    saved = {"device_id": auctioneer, "binding": {"market": p.market, "realm": "FixtureRealm", "character": "FixturePlayer"},
+        "production": {"plan_requests": [request]}}
+    result = exchange(http, device["token"], auctioneer, 1, saved)
+    assert result["payload"]["packages"] == []
+    assert result["payload"]["production"]["plan_results"][0]["state"] == "accepted"
+    # A new exchange carrying the same persisted SavedVariables is idempotent.
+    exchange(http, device["token"], auctioneer, 2, saved)
+    target = exchange(http, device["token"], crafter, 1)["payload"]
+    assert len(w.production.orders()) == 1
+    assert target["packages"][0]["tasks"][0]["task_id"] == task.task_id
+    assert target["packages"][0]["tasks"][0]["lines"][0]["unit_limit_copper"] == 15
+    assert target["production"]["orders"][0]["transfers"] == []
+    assert target["production"]["orders"][0]["procurement"] == "self_purchase"
+    assert exchange(http, device["token"], auctioneer, 3)["payload"]["packages"] == []
+
+
 def test_catalog_binding_in_addon_selects_eu_and_refuses_ambiguous_servers(server):
     app, _, p = server
     w = app.state.catalog.workspace(p.id)

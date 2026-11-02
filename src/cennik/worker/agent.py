@@ -10,6 +10,7 @@ import httpx
 from pydantic import Field
 
 from ahledger.util import atomic_json, atomic_write
+from cennik.addon.limits import MAX_EXCHANGE_BYTES, MAX_SAVED_BYTES, MAX_SAVED_TOKENS
 from cennik.addon.lua_data import Parser, lua_literal, read_saved_variables
 from cennik.collector.agent import CollectorAgent, addon_source, game_directory
 from cennik.collector.protocol import Connection
@@ -21,6 +22,46 @@ from .idle import IdleProbe
 
 FIELDS = {"device_id", "binding", "events", "market_scans", "npc_quotes", "collector_status", "server_binding",
     "collector_npc", "collector_recipes", "collector_transforms", "auctioneer_proposals", "sniper", "bulk_checks", "accounting", "production"}
+
+VERSION = "0.3.3"
+
+
+def saved_batch(saved, stamp, previous):
+    """One snapshot per durable exchange; mark the file consumed only at the end."""
+    delivered = set(previous.get("scan_ids", [])) if previous.get("scan_stamp") == list(stamp) else set()
+    remaining = [s for s in (saved.get("market_scans") or []) if s.get("scan_id") not in delivered]
+    batch = remaining[:1]
+    return {"saved": {**saved, "market_scans": batch}, "stamp": stamp, "scan_total": len(saved.get("market_scans") or []),
+            "scan_ids": [s["scan_id"] for s in batch], "snapshot_final": len(remaining) <= 1}
+
+
+def http_diagnostic(error):
+    """Keep useful protocol details, never response inputs, headers or credentials."""
+    path = error.request.url.path
+    operation = {
+        "/bridge/v1/characters": "character_discovery",
+        "/bridge/v1/manifest": "manifest",
+        "/bridge/v1/exchange": "exchange",
+        "/pair/v1/poll": "pairing",
+        "/pair/v1/ack": "pairing",
+    }.get(path, "exchange")
+    status = error.response.status_code
+    diagnostic: dict = {"operation": operation, "http_status": status, "validation_fields": []}
+    if status == 422:
+        try:
+            detail = error.response.json().get("detail", [])
+        except (ValueError, AttributeError):
+            detail = []
+        allowed = {"body", "characters", "role", "character", "realm", "account", "faction",
+                   "professions", "client_id", "sequence", "saved", "secret"}
+        for item in detail[:10] if isinstance(detail, list) else []:
+            loc = item.get("loc") if isinstance(item, dict) else None
+            if isinstance(loc, list) and loc and all(
+                (isinstance(v, str) and v in allowed) or (type(v) is int and 0 <= v < 1000)
+                for v in loc
+            ):
+                diagnostic["validation_fields"].append(".".join(map(str, loc)))
+    return diagnostic
 
 
 class Route(Model):
@@ -47,15 +88,23 @@ class WorkerAgent(CollectorAgent):
         self.next_tick = 0.0
         self.last_success: int | None = None
         self.worker_error = ""
+        self.worker_error_code = ""
+        self.error_details: dict = {}
         self.pairing = self.read("pairing.json", None)
         self.discovery_hash = ""
+        self.snapshot_sources: dict[str, str] = {}
+        self.scan_progress = ""
         self.idle = IdleProbe(root)
 
     def request(self, method, path, *, body=None, connection=None):
         c = connection or self.client.connection()
+        payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body is not None else None
+        if payload is not None and len(payload) > MAX_EXCHANGE_BYTES:
+            raise ValueError("Пакет обмена превышает 60 МБ; исходные данные оставлены на ПК")
         with httpx.Client(base_url=c.url, headers={"X-Bridge-Key": c.token, "X-Cennik-Worker":"0.2"}, transport=self.client.transport,
                           follow_redirects=False, trust_env=False, timeout=12) as http:
-            response = http.request(method, path, json=body)
+            response = http.request(method, path, content=payload,
+                                    headers={"Content-Type": "application/json"} if payload is not None else None)
             response.raise_for_status()
             return response.json()
 
@@ -89,7 +138,9 @@ class WorkerAgent(CollectorAgent):
         with self.lock:
             game = game_directory(game_root)
             old = self.client.connection()
-            key = token.strip() or (old.token if url.rstrip('/') == old.url else "")
+            url = url.strip().rstrip('/')
+            supplied_key = token.strip()
+            key = supplied_key or (old.token if url == old.url else "")
             # Apply the same HTTPS and credential-in-URL restrictions as collectors.
             from urllib.parse import urlparse
             address = urlparse(url.strip())
@@ -100,7 +151,16 @@ class WorkerAgent(CollectorAgent):
             if not key:
                 return self.begin_pair(game, url.strip(), source=source)
             connection = Connection(enabled=True, url=url.strip(), token=key)
-            manifest = self.fetch_manifest(connection)
+            try:
+                manifest = self.fetch_manifest(connection)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != 401:
+                    raise
+                if not supplied_key:
+                    # Only a deliberate Save may restart pairing. Background retries
+                    # must never replace a revoked key or create invitations.
+                    return self.begin_pair(game, url, source=source)
+                raise ValueError("Указанный ключ Worker неверен или отозван. Очистите поле ключа и сохраните настройки, чтобы получить новый код подключения") from None
             previous = self.manifest
             self.manifest = manifest
             try:
@@ -116,6 +176,12 @@ class WorkerAgent(CollectorAgent):
             self.last_manifest = time.monotonic()
             self.errors.clear()
             self.worker_error = ""
+            self.worker_error_code = ""
+            self.error_details = {}
+            self.seen.clear()
+            self.snapshot_sources.clear()
+            self.discovery_hash = ""
+            self.scan_progress = ""
             self.next_tick = 0
             self.wake.set()
             return result
@@ -133,6 +199,21 @@ class WorkerAgent(CollectorAgent):
         self.pairing={**paired,"url":url}
         atomic_json(self.root/"pairing.json",self.pairing)
         (self.root/"pairing.json").chmod(0o600)
+        # The new owner-approved connection must not reuse the previous routes.
+        # Keep queued saves and imports on disk for recovery, but stop using them.
+        self.manifest = None
+        (self.root/"manifest.json").unlink(missing_ok=True)
+        atomic_json(self.client.root/"connection.json", Connection(enabled=False,url=url).model_dump(mode="json"))
+        self.last_manifest = 0.0
+        self.discovery_hash = ""
+        self.seen.clear()
+        self.snapshot_sources.clear()
+        self.scan_progress = ""
+        self.last_success = None
+        self.worker_error = ""
+        self.worker_error_code = ""
+        self.error_details = {}
+        self.errors.clear()
         self.settings.update(game_root=str(game),paused=False,kind="worker")
         atomic_json(self.root/"agent.json",self.settings)
         self.write_import()
@@ -167,16 +248,18 @@ class WorkerAgent(CollectorAgent):
         root = Path(self.settings["game_root"])
         for path in sorted((root / "WTF/Account").glob("*/SavedVariables/CennikAddon.lua")):
             before = path.stat()
-            if before.st_size > 64_000_000:
-                raise ValueError("Сохранение больше 64 МБ")
+            if before.st_size > MAX_SAVED_BYTES:
+                raise ValueError("Сохранение больше 256 МБ; данные не удалены")
             stamp = before.st_size, before.st_mtime_ns
+            if self.seen.get(str(path)) == stamp:
+                continue
             previous = self.quiet.get(str(path))
             if not previous or previous[0] != stamp:
                 self.quiet[str(path)] = stamp, time.monotonic()
                 continue
             if time.monotonic()-previous[1] < 1:
                 continue
-            data = read_saved_variables(path.read_text("utf-8-sig"), max_bytes=64_000_000)
+            data = read_saved_variables(path.read_text("utf-8-sig"), max_bytes=MAX_SAVED_BYTES, max_tokens=MAX_SAVED_TOKENS)
             after = path.stat()
             if (after.st_size, after.st_mtime_ns) != stamp:
                 continue
@@ -185,13 +268,20 @@ class WorkerAgent(CollectorAgent):
                 if not isinstance(profile,dict) or profile.get("role") not in {"auctioneer","crafter","unassigned"}:
                     continue
                 row={k:profile[k] for k in ("role","realm","character","faction","professions") if k in profile}
+                if isinstance(row.get("professions"), dict) and not row["professions"]:
+                    row["professions"] = []
                 row["account"]=path.parents[1].name
                 characters[(row.get("realm"),row.get("character"))]=row
             if binding.get("market") != self.manifest["profile"]["market"]:
                 continue
             route = next((r for r in self.manifest["clients"] if (r["realm"], r["character"]) == (binding.get("realm"), binding.get("character"))), None)
             if route:
-                found[route["id"]] = ({k: v for k, v in data.items() if k in FIELDS}, stamp)
+                previous = self.read("state-"+route["id"]+".json", {})
+                if previous.get("stamp") == list(stamp):
+                    self.seen[str(path)] = stamp
+                else:
+                    found[route["id"]] = ({k: v for k, v in data.items() if k in FIELDS}, stamp)
+                    self.snapshot_sources[route["id"]] = str(path)
         if characters:
             values=sorted(characters.values(),key=lambda row:(row["role"]=="unassigned",row["realm"],row["character"]))[:30]
             digest=hashlib.sha256(json.dumps(values,sort_keys=True).encode()).hexdigest()
@@ -236,7 +326,7 @@ class WorkerAgent(CollectorAgent):
         with self.lock:
             if not self.settings.get("game_root") or self.settings["paused"]:
                 return
-            self.idle.tick()
+            self.idle.tick(paused=self.settings["paused"])
             if not force and time.monotonic() < self.next_tick and self.client.next_attempt != 0:
                 return
             self.checked_at = int(time.time())
@@ -258,7 +348,9 @@ class WorkerAgent(CollectorAgent):
                     else:
                         saved, stamp = snapshots.get(route["id"], (None, None))
                         pending = {"client_id": route["id"], "sequence": previous["sequence"]+1,
-                            "saved": saved if stamp and list(stamp) != previous["stamp"] else None, "stamp": stamp}
+                                   "saved": None, "stamp": stamp}
+                        if saved is not None and stamp and list(stamp) != previous["stamp"]:
+                            pending.update(saved_batch(saved, stamp, previous))
                         atomic_json(request_path, pending)
                     body = {k: pending[k] for k in ("client_id", "sequence", "saved")}
                     try:
@@ -277,9 +369,24 @@ class WorkerAgent(CollectorAgent):
                         response = state["response"]
                         if response["sequence"] != pending["sequence"] or response["client_id"] != route["id"]:
                             raise ValueError("Неверное подтверждение обмена")
-                        atomic_json(self.root / "imports" / (route["id"]+".json"), response["payload"])
+                        payload = response["payload"]
+                        scan_ids = pending.get("scan_ids", [])
+                        if not set(scan_ids) <= set(payload.get("acknowledged_scan_ids", [])):
+                            raise ValueError("Сервер не подтвердил сохранение снимка; пакет оставлен на ПК")
+                        import_path = self.root / "imports" / (route["id"]+".json")
+                        old_import = self.read("imports/"+route["id"]+".json", {})
+                        payload["acknowledged_scan_ids"] = list(dict.fromkeys(
+                            old_import.get("acknowledged_scan_ids", []) + payload.get("acknowledged_scan_ids", [])))[-1000:]
+                        atomic_json(import_path, payload)
+                        scan_stamp = pending["stamp"] if pending["saved"] is not None else previous.get("scan_stamp")
+                        delivered = previous.get("scan_ids", []) if previous.get("scan_stamp") == scan_stamp or previous.get("scan_stamp") == list(scan_stamp or []) else []
                         atomic_json(self.root / ("state-"+route["id"]+".json"), {"sequence": pending["sequence"],
-                            "stamp": pending["stamp"] if pending["saved"] is not None else previous["stamp"]})
+                            "stamp": pending["stamp"] if pending["saved"] is not None and pending.get("snapshot_final", True) else previous["stamp"],
+                            "scan_stamp": scan_stamp, "scan_ids": list(dict.fromkeys(delivered + scan_ids))})
+                        if scan_ids:
+                            self.scan_progress = f"Снимки: {len(set(delivered + scan_ids))} / {pending.get('scan_total', 1)} подтверждено сервером"
+                        if pending["saved"] is not None and pending.get("snapshot_final", True) and route["id"] in self.snapshot_sources:
+                            self.seen[self.snapshot_sources[route["id"]]] = tuple(pending["stamp"])
                         request_path.unlink()
                         self.last_success = int(time.time())
                     elif state["state"] == "failed":
@@ -288,22 +395,37 @@ class WorkerAgent(CollectorAgent):
                         raise ValueError("Сервер не завершил обмен. Сохранение осталось в очереди")
                 self.write_import()
                 self.worker_error = ""
+                self.worker_error_code = ""
+                self.error_details = {}
                 self.errors.clear()
                 self.next_tick = time.monotonic()+8
             except httpx.HTTPStatusError as error:
-                self.worker_error = "Ключ рабочего клиента неверен или отозван" if error.response.status_code in {401, 403} else "Сервер отклонил обмен. Данные сохранены; скопируйте отчёт поддержки"
+                self.error_details = http_diagnostic(error)
+                status = error.response.status_code
+                self.worker_error_code = "WORKER_KEY_REJECTED" if status in {401, 403} else "CHARACTER_DISCOVERY_INVALID" if status == 422 and self.error_details["operation"] == "character_discovery" else "PRIVATE_HTTP_ERROR"
+                if self.worker_error_code == "CHARACTER_DISCOVERY_INVALID":
+                    fields = ", ".join(self.error_details["validation_fields"])
+                    self.worker_error = "Сервер отклонил сведения о персонажах (HTTP 422)" + (": " + fields if fields else "") + ". Обновите Worker; сохранения не удаляйте"
+                else:
+                    self.worker_error = "Ключ рабочего клиента неверен или отозван. Для нового подключения оставьте поле ключа пустым и нажмите «Сохранить и установить аддон»" if status in {401, 403} else f"Сервер отклонил обмен (HTTP {status}). Данные сохранены; скопируйте отчёт поддержки"
                 self.next_tick = time.monotonic()+30
             except httpx.HTTPError:
                 self.worker_error = "Нет связи с сервером. Очередь сохранена; повторим позже"
+                self.worker_error_code = "SERVER_UNREACHABLE"
+                self.error_details = {}
                 self.next_tick = time.monotonic()+30
-            except (ValueError, OSError, KeyError, TypeError):
+            except (ValueError, OSError, KeyError, TypeError) as error:
                 self.worker_error = "Не удалось обработать обмен. Очередь сохранена; проверьте версию аддона и сервера"
+                self.worker_error_code = "PRIVATE_DATA_INVALID"
+                self.error_details = {"error_type": type(error).__name__}
                 self.next_tick = time.monotonic()+30
 
     def overview(self):
         pending = len(list((self.root / "requests").glob("*.json")))
         status = "Нужна настройка" if not self.settings.get("game_root") else "Приостановлено" if self.settings["paused"] else "Ошибка" if self.worker_error or self.errors else "Подтвердите код в вебе: "+self.pairing["code"] if self.pairing else "Работает"
         note = " · ".join((self.manifest or {}).get("notes",[]))
+        if self.scan_progress:
+            note = (note+" · " if note else "")+self.scan_progress
         if self.manifest and not self.manifest["clients"] and not self.pairing:
             note=note or "Войдите в персонажей, выберите роль через /cennik role, затем /reload"
         if self.idle.settings.get("enabled"):
@@ -315,6 +437,7 @@ class WorkerAgent(CollectorAgent):
             "game_code": "", "game_status": "", "game_at": None}
 
     def report(self):
-        return json.dumps({"application": "Cennik Worker", "version": "0.2.0", "id": self.settings["id"],
+        return json.dumps({"application": "Cennik Worker", "version": VERSION, "id": self.settings["id"],
             "state": self.overview()["status"], "pending": self.overview()["pending"], "last_success": self.last_success,
-            "error_code": "PRIVATE_EXCHANGE_FAILED" if self.worker_error or self.errors else ""}, ensure_ascii=False, indent=2)
+            "error_code": self.worker_error_code or ("PRIVATE_EXCHANGE_FAILED" if self.worker_error or self.errors else ""),
+            "error": self.worker_error, "details": self.error_details, "scan_progress": self.scan_progress}, ensure_ascii=False, indent=2)

@@ -4,6 +4,7 @@ const assert=require('node:assert/strict'),path=require('node:path');
 (async()=>{
   const browser=await chromium.launch({executablePath:process.argv[3],headless:true});
   const page=await browser.newPage({viewport:{width:1440,height:1100}}),errors=[];
+  const selfPurchase=process.argv[5]==='self',profit=selfPurchase?70:40;
   page.on('pageerror',e=>errors.push(String(e)));
   page.on('response',r=>{if(r.status()>=400)errors.push(r.status()+' '+r.url());});
   const data=async path=>page.evaluate(async p=>await(await fetch('/api/v2/'+p)).json(),path);
@@ -12,6 +13,8 @@ const assert=require('node:assert/strict'),path=require('node:path');
     await page.goto('http://127.0.0.1:8767');
     await page.locator('nav [data-page="production"]').click();
     await page.getByRole('heading',{name:'Производство',exact:true}).waitFor();
+    assert.equal(await page.locator('#prod-procurement').inputValue(),'self_purchase');
+    if(!selfPurchase)await page.locator('#prod-procurement').selectOption('transfer');
     await page.locator('[data-prod-task]').check();
     await page.getByRole('button',{name:'Создать производственный заказ',exact:true}).click();
     await page.waitForFunction(async()=>{const d=await(await fetch('/api/v2/production')).json();return d.orders.length===1;});
@@ -19,14 +22,20 @@ const assert=require('node:assert/strict'),path=require('node:path');
     await page.getByRole('button',{name:'Обновить',exact:true}).click();
     await page.getByRole('heading',{name:/Заказ /}).waitFor();
     let d=await data('production');assert.equal(d.orders[0].steps[0].crafts,2);
-    assert.equal(d.orders[0].transfers[0].lines[0].quantity,6);
+    if(selfPurchase){
+      assert.equal(d.orders[0].procurement,'self_purchase');assert.deepEqual(d.orders[0].transfers,[]);
+      await page.getByText('Крафтер сам закупает и изготавливает: Crafter',{exact:true}).waitFor();
+    }else assert.equal(d.orders[0].transfers[0].lines[0].quantity,6);
     await page.evaluate(async()=>{const r=await fetch('/fixture/production',{method:'POST'});if(!r.ok)throw Error(await r.text());});
     await page.getByRole('button',{name:'Синхронизировать оба окна',exact:true}).click();
+    await page.waitForFunction(async()=>{const d=await(await fetch('/api/v2/production')).json();return d.orders[0].steps[0].done===2;},null,{timeout:30000});
     await settled();await page.getByRole('button',{name:'Обновить',exact:true}).click();
-    await page.getByText('Получение подтверждено обеими сторонами',{exact:false}).first().waitFor();
-    assert.equal(await page.getByText('Получение подтверждено обеими сторонами',{exact:false}).count(),2);
+    if(!selfPurchase){
+      await page.getByText('Получение подтверждено обеими сторонами',{exact:false}).first().waitFor();
+      assert.equal(await page.getByText('Получение подтверждено обеими сторонами',{exact:false}).count(),2);
+    }
     d=await data('production');assert.equal(d.orders[0].steps[0].done,2);
-    let ledger=await data('accounting');assert.equal(ledger.summary.known_profit_copper,40);assert.equal(ledger.summary.inventory_cost_copper,30);
+    let ledger=await data('accounting');assert.equal(ledger.summary.known_profit_copper,profit);assert.equal(ledger.summary.inventory_cost_copper,30);
     // The form retains stable addressing identities across saves.
     await page.getByText('Аккаунты и роли',{exact:true}).click();
     await page.getByRole('button',{name:'Сохранить аккаунты',exact:true}).click();
@@ -38,10 +47,10 @@ const assert=require('node:assert/strict'),path=require('node:path');
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Overflow '+width);
     }
     await page.getByRole('button',{name:'Синхронизировать оба окна',exact:true}).click();await settled();
-    ledger=await data('accounting');assert.equal(ledger.summary.known_profit_copper,40);
+    ledger=await data('accounting');assert.equal(ledger.summary.known_profit_copper,profit);
     await page.getByRole('button',{name:'Архивировать заказ, сохранив остатки и историю',exact:true}).click();
     await page.getByRole('heading',{name:/Заказ .*архив/}).waitFor();
     assert.deepEqual(errors,[]);
-    console.log('Production UI end-to-end passed: ordinary task → order → two routed clients → mail → craft → trade return → partial sale → both SavedVariables → confirmed hand-offs/FIFO profit → repeat sync → archive; 1440/390');
+    console.log('Production UI end-to-end passed: '+(selfPurchase?'self purchase → craft → partial sale':'mail → craft → trade return → partial sale')+' → FIFO profit → repeat sync → archive; 1440/390');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

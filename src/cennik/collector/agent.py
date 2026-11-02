@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ahledger.util import atomic_json, atomic_write
+from cennik.addon.limits import MAX_SAVED_BYTES, MAX_SAVED_TOKENS
 from cennik.addon.lua_data import Parser, lua_literal, read_saved_variables
 from cennik.workspace.install import install_addon
 
@@ -18,7 +19,7 @@ from .client import CollectorClient
 from .protocol import Connection, Observation
 from .status import GAME_STATUS
 
-VERSION = "0.3.0"
+VERSION = "0.4.2"
 MARKET = "forever.pvp.alliance.us"
 
 
@@ -137,13 +138,13 @@ class CollectorAgent:
 
     def ingest(self, path):
         before = path.stat()
-        if before.st_size > 64_000_000:
-            raise ValueError("Сохранение больше 64 МБ. Очередь оставлена в игре; передайте отчёт поддержки")
+        if before.st_size > MAX_SAVED_BYTES:
+            raise ValueError("Сохранение больше 256 МБ. Очередь оставлена в игре; передайте отчёт поддержки")
         text = path.read_text("utf-8-sig")
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise ValueError("Игра ещё записывает файл; повторим чтение")
-        data = read_saved_variables(text, max_bytes=64_000_000)
+        data = read_saved_variables(text, max_bytes=MAX_SAVED_BYTES, max_tokens=MAX_SAVED_TOKENS)
         if not self.client.capture(data, "Сборщик"):
             raise ValueError("Неверный формат сохранённых наблюдений. Они оставлены в игре; скопируйте отчёт поддержки")
         if not self.client.failures:

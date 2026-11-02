@@ -40,7 +40,7 @@ function R:Show()
   if not (CennikImport and CennikImport.worker_discovery) then return end
   if not self.frame then
     local frame=CreateFrame("Frame",nil,UIParent,"BasicFrameTemplateWithInset")
-    frame:SetSize(360,220);frame:SetPoint("CENTER");frame:SetFrameStrata("DIALOG")
+    frame:SetSize(360,150);frame:SetPoint("CENTER");frame:SetFrameStrata("DIALOG")
     local title=frame:CreateFontString(nil,"OVERLAY","GameFontNormal")
     title:SetPoint("TOP",0,-30);title:SetText("Cennik: роль этого персонажа")
     for index,spec in ipairs({{"auctioneer","Аукционер"},{"crafter","Крафтер"}}) do
@@ -49,18 +49,8 @@ function R:Show()
       button:SetSize(145,28);button:SetPoint("TOPLEFT",20+(index-1)*170,-70);button:SetText(spec[2])
       button:SetScript("OnClick",function() R:Choose(role) end)
     end
-    local idle=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
-    idle:SetSize(310,28);idle:SetPoint("TOPLEFT",20,-115)
-    idle:SetScript("OnClick",function()
-      C.db.idle_probe_enabled=not C.db.idle_probe_enabled
-      C.IdleGuard:Initialize();C.IdleGuard:Update();R:Show()
-    end)
-    local note=frame:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-    note:SetPoint("TOPLEFT",20,-155);note:SetWidth(310)
-    note:SetText("Проверка AFK — эксперимент для Worker.\nНе подтверждает, что Forever сбрасывает AFK.")
-    self.idleButton=idle;self.frame=frame
+    self.frame=frame
   end
-  self.idleButton:SetText(C.db.idle_probe_enabled and "Проверка AFK: разрешена" or "Проверка AFK: выключена")
   self.frame:Show()
 end
 function R:Initialize()

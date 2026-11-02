@@ -13,17 +13,23 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help="Build the private auctioneer/crafter bridge")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist", help="Output folder; use a new folder while the old EXE is running")
     args = parser.parse_args()
     product_name = "CennikWorker" if args.worker else "CennikCollector"
-    output = ROOT / "dist"
+    output = args.output.resolve()
     build = ROOT / "build" / ("worker" if args.worker else "collector")
-    output.mkdir(exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
     build.mkdir(parents=True, exist_ok=True)
     # Bundle only the addon files declared by its TOC, excluding live imports.
     addon = build / "payload/CennikAddon"
     addon.mkdir(parents=True, exist_ok=True)
     source = ROOT / "CennikAddon"
     files = ["CennikAddon.toc"]+[s.strip().replace("\\", "/") for s in (source / "CennikAddon.toc").read_text("utf-8").splitlines() if s and not s.startswith("#")]
+    for stale in addon.rglob("*"):
+        if stale.is_file() and stale.relative_to(addon).as_posix() not in files:
+            if not stale.resolve().is_relative_to(addon.resolve()):
+                raise ValueError("Unexpected path in addon build staging")
+            stale.unlink()
     for name in files:
         target = addon / name
         target.parent.mkdir(parents=True, exist_ok=True)

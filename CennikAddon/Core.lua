@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.16.0"
+C.VERSION = "0.18.1"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -71,6 +71,8 @@ function C:MarketBindingMatches(market)
 end
 function C:CheckTask(task, ownPending)
   if self.collectorOnly then return false,"Включён режим сборщика: стратегии и закупки недоступны" end
+  local planReason=self.Production and self.Production:PurchaseBlock(task.task_id)
+  if planReason then return false,planReason end
   if self.Bulk and self.Bulk.active then return false,"Дождитесь завершения массовой проверки" end
   if task.hidden then return false,"Задание скрыто игроком" end
   local details=task.opportunity and task.opportunity.details
@@ -158,7 +160,6 @@ function C:Initialize()
   if self.Accounting then self.Accounting:Initialize() end
   if self.Production and not self.collectorOnly then self.Production:Initialize() end
   if self.CharacterRole then self.CharacterRole:Initialize() end
-  if self.IdleGuard then self.IdleGuard:Initialize() end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame

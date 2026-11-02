@@ -9,7 +9,7 @@ import time
 from uuid import uuid4
 
 from fastapi import HTTPException
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from ahledger.util import atomic_json, atomic_write, dumps
 from cennik.addon.lua_data import lua_literal
@@ -36,6 +36,12 @@ class CharacterDiscovery(RemoteCharacter):
     role: str = Field(pattern=r"^(auctioneer|crafter|unassigned)$")
     faction: str = Field(pattern=r"^(alliance|horde)$")
     professions: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("professions", mode="before")
+    @classmethod
+    def empty_lua_professions(cls, value):
+        # Lua's empty table has no array/object distinction. Accept old Workers too.
+        return [] if isinstance(value, dict) and not value else value
 
 
 class DiscoverCharacters(Model):
@@ -180,7 +186,7 @@ class PrivateBridge:
                 if digest != old["digest"]:
                     raise HTTPException(409, "Номер обмена повторён с другим содержимым")
                 if old["state"] != "interrupted":
-                    return self.public_state(old)
+                    return self.public_state(old, w)
             elif old:
                 if request.sequence < old["sequence"]:
                     raise HTTPException(409, {"code": "STALE_SEQUENCE", "next_sequence": old["sequence"]+1})
@@ -210,7 +216,8 @@ class PrivateBridge:
                 except Exception as error:
                     state.update(state="failed", error=type(error).__name__, message="Обмен не завершён. Сохранение осталось на рабочем ПК; проверьте серверный журнал")
                     w.log.exception("Remote exchange failed for %s", client.id)
-                atomic_json(path, state)
+                with self.lock:
+                    atomic_json(path, state)
                 return {"state": state["state"], "client_id": client.id}
             try:
                 job = w.submit("remote_exchange", execute, defer=True)
@@ -223,14 +230,24 @@ class PrivateBridge:
             current = json.loads(path.read_text("utf-8"))
             if current["state"] == "queued":
                 atomic_json(path, state)
-            return self.public_state(state)
+            return self.public_state(state, w)
 
-    def public_state(self, state):
+    def public_state(self, state, workspace=None):
+        if workspace is not None and state.get("state") == "completed" and state.get("job_id"):
+            jobs = workspace.jobs()
+            job = next((j for j in jobs if j["id"] == state["job_id"]), None)
+            # The callback writes its receipt just before the workspace commits
+            # completion. Do not announce completion while the queue is busy
+            # finishing that same job (the next action would otherwise get 409).
+            finishing = workspace.future is not None and not workspace.future.done() and not any(j["state"] in {"queued", "running"} for j in jobs)
+            if job and (job["state"] in {"queued", "running"} or finishing):
+                return {"sequence": state["sequence"], "state": "queued"}
         return {k: state[k] for k in ("sequence", "state", "response", "error", "message") if k in state}
 
     def status(self, device, client_id):
-        path = self.state_path(device, client_id)
-        return self.public_state(json.loads(path.read_text("utf-8"))) if path.exists() else {"state": "empty", "sequence": 0}
+        with self.lock:
+            path = self.state_path(device, client_id)
+            return self.public_state(json.loads(path.read_text("utf-8")), self.catalog.workspace(device["profile_id"])) if path.exists() else {"state": "empty", "sequence": 0}
 
     def recover(self):
         for path in (self.root / "exchanges").glob("*/*.json"):

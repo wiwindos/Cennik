@@ -8,7 +8,55 @@ from test_workspace import scan
 from test_workspace import workspace as workspace
 
 from ahledger.models import JobSpec
+from ahledger.util import atomic_json
 from cennik.sources import FYI, Sources, TokenUpdate
+
+
+@pytest.mark.parametrize("kind", ["references", "fyi"])
+def test_reference_schedules_are_hourly(workspace, monkeypatch, kind):
+    workspace.save_settings(workspace.settings().model_copy(update={
+        "auto_refresh": True, "auto_references": kind == "references",
+        "auto_fyi": kind == "fyi", "auto_history": False,
+    }))
+    clock = [time.time()]
+    monkeypatch.setattr("cennik.workspace.source_updates.time.time", lambda: clock[0])
+    workspace.source_updates.ready_at = 0
+    atomic_json(workspace.source_updates.path, {kind: {"state": "ok", "attempted_at": clock[0]}})
+    clock[0] += 3599
+    assert workspace.source_updates.due() is None
+    clock[0] += 2
+    assert workspace.source_updates.due() == kind
+
+
+def test_fyi_hourly_cache_revalidates_with_etag(tmp_path, workspace, monkeypatch):
+    previous = workspace.npc_catalog.snapshot()
+    previous = previous.model_copy(update={"items": {2589: previous.items[2589]}})
+    item = previous.items[2589]
+    raw = {"v": 1, "build": previous.build, "source": previous.source,
+           "items": {"2589": {"n": item.name, "buy": item.buy_copper, "sell": item.sell_copper}}}
+    requests = []
+    clock = [time.time()]
+    monkeypatch.setattr("cennik.sources.time.time", lambda: clock[0])
+
+    def reply(request):
+        requests.append(request)
+        return httpx.Response(304) if len(requests) > 1 else httpx.Response(200, json=raw, headers={"etag": '"fixture"'})
+
+    source = Sources(tmp_path, httpx.MockTransport(reply))
+    source.fyi_document(previous)
+    clock[0] += 3599
+    source.fyi_document(previous)
+    assert len(requests) == 1
+    clock[0] += 2
+    source.fyi_document(previous)
+    assert len(requests) == 2
+    assert requests[-1].headers['if-none-match'] == '"fixture"'
+
+
+def test_local_fyi_schedule_is_independent_of_ahl_toggle(workspace):
+    workspace.save_settings(workspace.settings().model_copy(update={"auto_refresh": False, "auto_fyi": True}))
+    workspace.source_updates.ready_at = 0
+    assert workspace.source_updates.due() == "fyi"
 
 
 def test_upstream_key_is_private_scoped_and_not_assumed_to_raise_limits(tmp_path):

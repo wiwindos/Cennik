@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--collector", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--scan-rows", type=int, default=0, help="Also deliver one large synthetic snapshot")
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -53,12 +54,32 @@ def main():
         event = {"event_id": client_id+":ledger:1", "workspace_id": w.identity, "market": profile.market,
             "realm": "FixtureRealm", "character": "FixturePlayer", "observed_at": int(time.time()), "kind": "purchase",
             "outputs": [{"item_id": 2589, "quantity": 3}], "money_copper": 30}
+        scans = []
+        if args.scan_rows:
+            from cennik.collector.auctioneers import AuctioneerProposal, Review
+            from cennik.collector.protocol import Observation
+            assert 0 < args.scan_rows <= 1_000_000
+            npc = AuctioneerProposal(npc_id=12345, npc_name="Native fixture", realm="FixtureRealm",
+                map_id=84, map_name="Fixture", x=50, y=60, proposed_type="ordinary",
+                observed_at=int(time.time()), build="fixture", server_id=profile.id, market=profile.market)
+            proposal = Observation(kind="auctioneer_proposal", data=npc.model_dump(mode="json"))
+            app.state.hub.auctioneers.suggest(proposal.identity(), proposal.data, "native")
+            app.state.hub.auctioneers.review(proposal.identity(), Review(action="approve", auction_type="ordinary"))
+            scans = [{"format_version": 1, "scan_id": "native:large:1", "market": profile.market,
+                "realm": "FixtureRealm", "observed_at": int(time.time()), "full": True,
+                "count": args.scan_rows, "reported_count": args.scan_rows,
+                "data": ";".join(["2589:4:40:0:4:1:0"] * args.scan_rows),
+                "variants": [{"name": "Fixture", "link": "item:2589:0:0:0", "divisible": True}],
+                "auction_context": {"scope_id": npc.scope_id(), "revision": 1, "auction_type": "ordinary",
+                    "server_id": profile.id, "npc_id": 12345, "realm": "FixtureRealm", "map_id": 84,
+                    "x": 50, "y": 60, "session_id": "native:auction:1"}}]
         saved = game / "WTF/Account/first/SavedVariables/CennikAddon.lua"
         saved.parent.mkdir(parents=True)
         saved.write_text("CennikAddonDB="+lua_literal({"device_id": client_id, "binding": {"market": profile.market,
-            "realm": "FixtureRealm", "character": "FixturePlayer"}, "accounting": {"events": [event]}}), "utf-8")
+            "realm": "FixtureRealm", "character": "FixturePlayer"}, "accounting": {"events": [event]}, "market_scans": scans}), "utf-8")
         result_path = out / "worker-result.json"
-        subprocess.run([str(args.worker.resolve()), "--root", str(agent.root), "--smoke-test", str(result_path)], check=True, timeout=90)
+        subprocess.run([str(args.worker.resolve()), "--root", str(agent.root), "--smoke-test", str(result_path),
+                        "--smoke-delay", "40" if args.scan_rows else "16"], check=True, timeout=90)
         result = json.loads(result_path.read_text("utf-8"))
         assert result["frozen"] and result["tray_visible"] and not result["sql_loaded"], result
         assert result["hide_to_tray"] and result["restored"]
@@ -69,6 +90,9 @@ def main():
         payload = parser.value()
         assert payload["format_version"] == 2 and len(payload["routes"]) == 2
         assert event["event_id"] in payload["routes"]["FixtureRealm:FixturePlayer"]["accounting"]["acknowledged_event_ids"]
+        if scans:
+            assert w.market.rows("SELECT count(*) n FROM working_offers")[0]["n"] == args.scan_rows
+            assert payload["routes"]["FixtureRealm:FixturePlayer"]["acknowledged_scan_ids"] == ["native:large:1"]
         assert not list(agent.root.rglob("*.sqlite")) and not list(agent.root.rglob("*.duckdb"))
         if args.collector:
             invitation = app.state.hub.invite("Native Collector", profile_id=profile.id)
@@ -82,7 +106,7 @@ def main():
             assert value["frozen"] and value["tray_visible"] and not value["sql_loaded"]
             assert collector.client.registry()["market_catalog"][0]["id"] == profile.id
         print(json.dumps({"worker_exe": "passed", "collector_exe": "passed" if args.collector else "not_run",
-            "private_purchase_copper": 30, "addressed_routes": 2, "local_sql": False}))
+            "private_purchase_copper": 30, "addressed_routes": 2, "full_scan_rows": args.scan_rows, "local_sql": False}))
     finally:
         server.should_exit = True
         thread.join(timeout=30)

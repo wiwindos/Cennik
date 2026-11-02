@@ -24,6 +24,7 @@ def simulate(workspace, clients):
     collect_mail(crafter, 2589, 6)
     crafter.execute("""
       Game.click(function() Cennik.Production:Craft() end)
+      assert(Game.craftCount==2)
       Game.event('UNIT_SPELLCAST_SUCCEEDED','player','one',100)
       Game.bags[1].quantity=3;Game.bags[2]={item_id=4238,quantity=1};Game.event('BAG_UPDATE_DELAYED');Game.advance(1)
       Game.event('UNIT_SPELLCAST_SUCCEEDED','player','two',100)
@@ -42,11 +43,33 @@ def simulate(workspace, clients):
     return {"saved": 2}
 
 
+def simulate_self(workspace, clients):
+    from test_production import production_lua, save_client
+
+    order = workspace.production.status()[0]
+    assert order["procurement"] == "self_purchase" and not order["transfers"]
+    auctioneer, crafter = [production_lua(workspace, c) for c in clients]
+    crafter.execute("Cennik.Accounting:Purchase('fixture-own',2589,6,60,{task_id="+lua_literal(order["task_ids"][0])+",strategy_id='simple_craft'})")
+    crafter.execute("""
+      Game.bags={{item_id=2589,quantity=6}};Cennik.Accounting.bags=Cennik.Accounting:Snapshot()
+      Game.click(function() Cennik.Production:Craft() end)
+      Game.event('UNIT_SPELLCAST_SUCCEEDED','player','one',100)
+      Game.bags[1].quantity=3;Game.bags[2]={item_id=4238,quantity=1};Game.event('BAG_UPDATE_DELAYED');Game.advance(1)
+      Game.event('UNIT_SPELLCAST_SUCCEEDED','player','two',100)
+      Game.bags[1]=nil;Game.bags[2].quantity=2;Game.event('BAG_UPDATE_DELAYED');Game.advance(1)
+      Cennik.Accounting:Emit('sale',{inputs={Cennik.Accounting:Line(4238,1)},money_copper=100})
+    """)
+    for lua, client in zip((auctioneer, crafter), clients, strict=True):
+        save_client(lua, client)
+    return {"saved": 2}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("node", "playwright", "browser"):
         parser.add_argument("--"+name, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--self-purchase", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
@@ -63,7 +86,7 @@ def main():
 
         @app.post("/fixture/production")
         def capture():
-            return simulate(workspace, clients)
+            return (simulate_self if args.self_purchase else simulate)(workspace, clients)
 
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8767, proxy_headers=False, log_level="warning"))
         thread = threading.Thread(target=server.run)
@@ -74,7 +97,7 @@ def main():
                     break
                 time.sleep(.1)
             subprocess.run([args.node, str(Path(__file__).with_suffix(".cjs")), args.playwright, args.browser,
-                str(args.output)], check=True, timeout=180)
+                str(args.output), "self" if args.self_purchase else "transfer"], check=True, timeout=180)
         finally:
             server.should_exit = True
             thread.join(timeout=30)

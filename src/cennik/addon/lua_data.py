@@ -7,6 +7,7 @@ import re
 SPACE = re.compile(r"(?:\s+|--[^\n]*(?:\n|$))")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+STRING_SPECIAL = {'"': re.compile(r'["\\]'), "'": re.compile(r"['\\]")}
 
 
 def lua_literal(value):
@@ -33,10 +34,11 @@ def lua_literal(value):
 
 
 class Parser:
-    def __init__(self, text: str, *, max_bytes: int = 16_000_000):
+    def __init__(self, text: str, *, max_bytes: int = 16_000_000, max_tokens: int = 500_000):
         if len(text.encode("utf-8")) > max_bytes:
             raise ValueError(f"SavedVariables exceeds {max_bytes // 1_000_000} MB")
         self.text, self.pos, self.tokens = text.lstrip("\ufeff"), 0, 0
+        self.max_tokens = max_tokens
 
     def whitespace(self):
         while True:
@@ -67,7 +69,7 @@ class Parser:
     def value(self, depth=0):
         self.whitespace()
         self.tokens += 1
-        if depth > 40 or self.tokens > 500_000:
+        if depth > 40 or self.tokens > self.max_tokens:
             raise ValueError("SavedVariables nesting/size limit")
         if self.pos >= len(self.text):
             raise ValueError("Truncated Lua data")
@@ -76,8 +78,12 @@ class Parser:
             self.pos += 1
             result: list[str] = []
             while self.pos < len(self.text):
-                char = self.text[self.pos]
-                self.pos += 1
+                match = STRING_SPECIAL[quote].search(self.text, self.pos)
+                if match is None:
+                    break
+                result.append(self.text[self.pos:match.start()])
+                char = match[0]
+                self.pos = match.end()
                 if char == quote:
                     return "".join(result)
                 if char == "\\":
@@ -107,8 +113,6 @@ class Parser:
                         )
                     else:
                         raise ValueError("Unsupported Lua escape")
-                else:
-                    result.append(char)
             raise ValueError("Unterminated Lua string")
         if self.take("{"):
             entries, index = {}, 1
@@ -150,8 +154,8 @@ class Parser:
         return {"nil": None, "true": True, "false": False}[word]
 
 
-def read_saved_variables(text: str, *, max_bytes: int = 16_000_000) -> dict:
-    parser = Parser(text, max_bytes=max_bytes)
+def read_saved_variables(text: str, *, max_bytes: int = 16_000_000, max_tokens: int = 500_000) -> dict:
+    parser = Parser(text, max_bytes=max_bytes, max_tokens=max_tokens)
     if parser.identifier() != "CennikAddonDB":
         raise ValueError("Expected CennikAddonDB assignment")
     parser.require("=")

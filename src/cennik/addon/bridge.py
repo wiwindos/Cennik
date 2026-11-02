@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 
 from ahledger.util import exclusive_lock
+from cennik.addon.limits import MAX_SAVED_BYTES, MAX_SAVED_TOKENS
 from cennik.addon.lua_data import lua_literal, read_saved_variables
 from cennik.addon.models import Package, ReportBatch
 
@@ -93,7 +94,8 @@ class Bridge:
             after = self.saved_variables.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError("SavedVariables is being written; retry after /reload")
-            data = read_saved_variables(text, max_bytes=64_000_000 if self.extra_import else 16_000_000)
+            data = read_saved_variables(text, max_bytes=MAX_SAVED_BYTES if self.extra_import else 16_000_000,
+                                        max_tokens=MAX_SAVED_TOKENS if self.extra_import else 500_000)
             events = data.get("events") or []
             if not isinstance(events, list):
                 raise ValueError("Invalid SavedVariables event list")

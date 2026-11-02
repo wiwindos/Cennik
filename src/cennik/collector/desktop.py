@@ -29,6 +29,59 @@ def icon_image(color="#2a9d8f"):
     return image
 
 
+def bind_entry_editing(entry):
+    """Windows Ctrl shortcuts use physical keys, including under Russian layouts."""
+    def paste(event=None):
+        try:
+            value = entry.clipboard_get()
+            if entry.selection_present():
+                entry.delete("sel.first", "sel.last")
+            entry.insert("insert", value)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def select_all():
+        entry.selection_range(0, "end")
+        entry.icursor("end")
+
+    def shortcut(event):
+        # AltGr is not a clipboard shortcut.
+        if event.state & 0x20008:
+            return None
+        key = {65: "a", 67: "c", 86: "v", 88: "x"}.get(event.keycode) if os.name == "nt" else None
+        key = key or event.keysym.lower()
+        if key == "v":
+            return paste()
+        if key == "a":
+            select_all()
+            return "break"
+        if key in {"c", "x"}:
+            entry.event_generate("<<Copy>>" if key == "c" else "<<Cut>>")
+            return "break"
+        return None
+
+    entry.bind("<Control-KeyPress>", shortcut)
+    entry.bind("<Shift-Insert>", paste)
+    menu = tk.Menu(entry, tearoff=False)
+    menu.add_command(label="Вырезать", command=lambda: entry.event_generate("<<Cut>>"))
+    menu.add_command(label="Копировать", command=lambda: entry.event_generate("<<Copy>>"))
+    menu.add_command(label="Вставить", command=paste)
+    menu.add_separator()
+    menu.add_command(label="Выделить всё", command=select_all)
+
+    def popup(event):
+        entry.focus_set()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    entry.bind("<Button-3>", popup)
+    return entry
+
+
 class CollectorWindow:
     def __init__(self, agent, *, background=False, worker=False):
         import pystray
@@ -36,7 +89,9 @@ class CollectorWindow:
         self.agent = agent
         self.worker = worker
         self.product = "Cennik Worker" if worker else "Cennik Collector"
-        self.version = "0.2.0" if worker else VERSION
+        if worker:
+            from cennik.worker.agent import VERSION as WORKER_VERSION
+        self.version = WORKER_VERSION if worker else VERSION
         self.startup_name = "CennikWorker" if worker else "CennikCollector"
         self.root = tk.Tk()
         self.root.title(self.product)
@@ -85,26 +140,27 @@ class CollectorWindow:
         games = ttk.Frame(frame)
         games.grid(row=5, column=0, sticky="ew", pady=(4, 10))
         games.columnconfigure(0, weight=1)
-        ttk.Entry(games, textvariable=self.game).grid(row=0, column=0, sticky="ew")
+        self.game_entry = bind_entry_editing(ttk.Entry(games, textvariable=self.game))
+        self.game_entry.grid(row=0, column=0, sticky="ew")
         ttk.Button(games, text="Выбрать…", command=self.choose_game).grid(
             row=0, column=1, padx=(8, 0)
         )
         ttk.Label(frame, text="Адрес сервера, который выдал владелец").grid(
             row=6, column=0, sticky="w"
         )
-        ttk.Entry(frame, textvariable=self.url).grid(row=7, column=0, sticky="ew", pady=(4, 10))
+        self.url_entry = bind_entry_editing(ttk.Entry(frame, textvariable=self.url))
+        self.url_entry.grid(row=7, column=0, sticky="ew", pady=(4, 10))
         ttk.Label(
             frame,
             text="Ключ рабочего клиента (не ключ владельца)"
             if worker
             else "Личный ключ сборщика (не ключ владельца)",
         ).grid(row=8, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.token, show="•").grid(
-            row=9, column=0, sticky="ew", pady=(4, 4)
-        )
+        self.token_entry = bind_entry_editing(ttk.Entry(frame, textvariable=self.token, show="•"))
+        self.token_entry.grid(row=9, column=0, sticky="ew", pady=(4, 4))
         ttk.Label(
             frame,
-            text="Без ключа: получите код подключения и подтвердите его в вебе."
+            text="Без ключа: получите код подключения и подтвердите его в вебе.\nЕсли прежний ключ отозван, оставьте поле пустым и сохраните настройки."
             if worker
             else "Пустое поле сохраняет прежний ключ для того же сервера.",
             wraplength=570,
@@ -131,7 +187,7 @@ class CollectorWindow:
             row=16, column=0, sticky="w", pady=(14, 0)
         )
         if worker:
-            ttk.Button(frame, text="Проверка AFK…", command=self.idle_dialog).grid(
+            ttk.Button(frame, text="Прыжок / Space…", command=self.idle_dialog).grid(
                 row=16, column=0, sticky="e", pady=(14, 0)
             )
         self.tray = pystray.Icon(
@@ -176,16 +232,16 @@ class CollectorWindow:
         try:
             windows = helper.windows(self.agent.settings.get("game_root") or self.game.get())
         except Exception as error:
-            messagebox.showerror("Проверка AFK", str(error), parent=self.root)
+            messagebox.showerror("Прыжок / Space", str(error), parent=self.root)
             return
         dialog = tk.Toplevel(self.root)
-        dialog.title("Cennik: эксперимент AFK")
+        dialog.title("Cennik: прыжок в фоновом окне")
         dialog.geometry("610x320")
         frame = ttk.Frame(dialog, padding=18)
         frame.pack(fill="both", expand=True)
         ttk.Label(
             frame,
-            text="Откройте окно аукционера. В аддоне: «Роль этого персонажа» →\n«Проверка AFK: разрешена». Только при готовности аддона\nWorker отправляет Space в выбранное окно, без переключения фокуса.\nСброс AFK на Forever необходимо проверить в игре.",
+            text="Выберите окно WoW. Worker отправляет нажатие и отпускание Space\nтолько в это окно, пока оно неактивно, без переключения фокуса.\nРазрешение в аддоне не требуется. В игре Space должен быть назначен на прыжок.",
             wraplength=565,
         ).pack(anchor="w", pady=(0, 12))
         choice = ttk.Combobox(
@@ -199,7 +255,7 @@ class CollectorWindow:
             choice.current(0)
         enabled = tk.BooleanVar(value=helper.settings.get("enabled", False))
         ttk.Checkbutton(
-            frame, text="Повторять проверку примерно раз в 3 минуты", variable=enabled
+            frame, text="Отправлять Space примерно раз в 3 минуты", variable=enabled
         ).pack(anchor="w", pady=10)
         result = tk.StringVar(value=helper.message)
         ttk.Label(frame, textvariable=result, wraplength=565).pack(anchor="w")
@@ -218,13 +274,13 @@ class CollectorWindow:
                 result.set(
                     helper.message
                     if test
-                    else "Настройка сохранена. При отсутствии готовности сигнал не отправляется."
+                    else "Настройка сохранена. Space отправляется только в выбранное неактивное окно."
                 )
             except Exception as error:
                 result.set(str(error))
 
         ttk.Button(buttons, text="Сохранить", command=apply).pack(side="left")
-        ttk.Button(buttons, text="Проверить один раз", command=lambda: apply(True)).pack(
+        ttk.Button(buttons, text="Отправить Space сейчас", command=lambda: apply(True)).pack(
             side="left", padx=6
         )
         def disable():

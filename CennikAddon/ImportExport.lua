@@ -18,7 +18,7 @@ function C:Import()
     -- New identities affect future events only; queued historical events retain IDs.
     self.db.device_id=imported.device_id
   end
-  if imported.production and imported.production.client.role=="crafter" then self.db.current_run=nil;self.db.queue={} end
+  if imported.production and imported.production.client.role=="crafter" and #(imported.packages or {})==0 then self.db.current_run=nil;self.db.queue={} end
   if imported.device_id and imported.device_id ~= self.db.device_id then
     -- First load can happen before Bridge writes its device id. Adopt it only
     -- while no task, report or uncertain purchase has ever been created.

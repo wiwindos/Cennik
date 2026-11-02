@@ -7,13 +7,14 @@ import threading
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import Field, model_validator
 
 from ahledger.util import atomic_json
 from cennik.addon.lua_data import lua_literal
-from cennik.addon.models import ExportRequest, Task
+from cennik.addon.models import MAX_INTEGER, ExportRequest, Task
 from cennik.core.models import Model, Opportunity
 
 from .accounting import StockLine
@@ -64,6 +65,9 @@ class OrderCreate(Model):
     crafter_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     task_ids: list[str] = Field(default_factory=list, max_length=50)
     opportunity_ids: list[str] = Field(default_factory=list, max_length=50)
+    procurement: Literal["transfer", "self_purchase"] = "transfer"
+    purchase_limits: dict[str, dict[int, int]] = Field(default_factory=dict, max_length=50)
+    task_budgets: dict[str, int] = Field(default_factory=dict, max_length=50)
 
     @model_validator(mode="after")
     def selection(self):
@@ -72,6 +76,14 @@ class OrderCreate(Model):
         values = self.task_ids or self.opportunity_ids
         if len(values) != len(set(values)):
             raise ValueError("Повтор задания")
+        if (self.purchase_limits or self.task_budgets) and (self.procurement != "self_purchase" or not self.task_ids):
+            raise ValueError("Лимиты передаются только вместе с готовым планом самостоятельной закупки")
+        if (set(self.purchase_limits) | set(self.task_budgets)) - set(self.task_ids):
+            raise ValueError("Лимиты относятся к другому заданию")
+        if any(type(v) is not int or not 0 < v <= MAX_INTEGER for v in self.task_budgets.values()):
+            raise ValueError("Неверный бюджет задания")
+        if any(type(v) is not int or not 0 < v <= MAX_INTEGER for limits in self.purchase_limits.values() for v in limits.values()):
+            raise ValueError("Неверный предел цены")
         return self
 
 
@@ -166,11 +178,13 @@ class Production:
 
     def create(self, request: OrderCreate):
         with self.lock:
-            digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+            digest = self.request_digest(request)
             for order in self.orders():
                 if order["request_id"] == request.request_id:
                     if order["request_hash"] != digest:
-                        raise ValueError("Повтор ID создания с другим выбором")
+                        legacy = hashlib.sha256(request.model_dump_json(exclude={"procurement", "purchase_limits", "task_budgets"}).encode()).hexdigest()
+                        if request.procurement != "transfer" or request.purchase_limits or request.task_budgets or order["request_hash"] != legacy:
+                            raise ValueError("Повтор ID создания с другим выбором")
                     return {"order_id": order["order_id"], "reused": True}
             clients = self.clients()
             if sum(not o.get("closed") and not o.get("cancelled") for o in self.orders()) >= 50:
@@ -199,7 +213,19 @@ class Production:
                         tasks.append(Task.model_validate_json(row[0]))
             steps, names, return_ids = [], {}, set()
             quantities: dict[int, int] = defaultdict(int)
-            for task in tasks:
+            for task_index, task in enumerate(tasks):
+                if task.market != self.w.market_key:
+                    raise ValueError("План относится к другому рынку")
+                if request.procurement == "self_purchase":
+                    self.check_unpurchased(task)
+                    limits = request.purchase_limits.get(task.task_id, {})
+                    if set(limits) - {line.item_id for line in task.lines if line.source == "auction"}:
+                        raise ValueError("В лимитах есть посторонний предмет")
+                    task = task.model_copy(deep=True)
+                    for line in task.lines:
+                        line.unit_limit_copper = limits.get(line.item_id, line.unit_limit_copper)
+                    task.max_total_cost_copper = request.task_budgets.get(task.task_id, task.max_total_cost_copper)
+                    tasks[task_index] = task
                 steps.extend(self.steps(task.opportunity, task.task_id))
                 for line in task.lines:
                     quantities[line.item_id] += line.quantity
@@ -220,11 +246,94 @@ class Production:
             order = {"order_id": identity, "request_id": request.request_id, "request_hash": digest,
                 "created_at": int(datetime.now(UTC).timestamp()), "auctioneer_id": auctioneer.id, "crafter_id": crafter.id,
                 "task_ids": [t.task_id for t in tasks], "tasks": [t.model_dump(mode="json") for t in tasks],
-                "steps": steps, "transfers": [forward, backward], "cancelled": False}
+                "steps": steps, "procurement": request.procurement,
+                "transfers": [] if request.procurement == "self_purchase" else [forward, backward], "cancelled": False}
             if len(json.dumps(order).encode()) > 2_000_000:
                 raise ValueError("Заказ слишком большой")
             atomic_json(self.order_path(identity), order)
             return {"order_id": identity, "tasks": len(tasks), "reused": False}
+
+    def check_unpurchased(self, task):
+        run = self.w.analytics.status().get("published_run") or {}
+        if task.run_id != run.get("run_id") or task.expires_at_epoch <= int(datetime.now(UTC).timestamp()):
+            raise ValueError("План устарел: обновите задания в вебе")
+        with self.w.store.connection() as db:
+            uncertain = False
+            for row in db.execute("SELECT payload FROM addon_events WHERE task_id=? AND kind IN ('purchase','state','error') ORDER BY rowid", [task.task_id]):
+                event = json.loads(row[0])
+                if event.get("quantity", 0) > 0 or event.get("cost_copper", 0) > 0:
+                    raise ValueError("По заданию уже была покупка; используйте передачу ресурсов или новый план")
+                if event.get("state") in {"unknown", "started", "requires_manual_check"}:
+                    uncertain = True
+                elif event.get("kind") == "purchase":
+                    uncertain = False
+            if uncertain:
+                raise ValueError("Результат прежней покупки неизвестен; сначала уточните его")
+        for path in (self.w.root / "accounting/events").glob("*.json"):
+            event = json.loads(path.read_text("utf-8"))
+            if event.get("task_id") == task.task_id and event.get("kind") == "purchase":
+                raise ValueError("По заданию уже была покупка; ресурсы остались у покупателя")
+
+    def purchase_owners(self):
+        return {task_id: order["crafter_id"] for order in self.orders()
+                if order.get("procurement") == "self_purchase" and not order.get("cancelled")
+                for task_id in order["task_ids"]}
+
+    @staticmethod
+    def request_digest(request):
+        return hashlib.sha256(json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def route_packages(self, client, packages):
+        """One purchasing character per task; keep the original task/report identity."""
+        orders = self.orders()
+        owners = self.purchase_owners()
+        replacements = {t["task_id"]: t for o in orders if o.get("procurement") == "self_purchase"
+                        and not o.get("cancelled") and not o.get("closed") and o["crafter_id"] == client.id for t in o["tasks"]}
+        result = []
+        for package in packages:
+            tasks = []
+            for task in package["tasks"]:
+                owner = owners.get(task["task_id"])
+                if (owner and owner != client.id) or (not owner and client.role != "auctioneer"):
+                    continue
+                replacement = replacements.get(task["task_id"])
+                if owner and not replacement:
+                    continue
+                tasks.append({**(replacement or task), "expires_at": task["expires_at"], "expires_at_epoch": task["expires_at_epoch"]})
+            if tasks:
+                result.append({**package, "tasks": tasks,
+                    "max_budget_copper": sum(t["max_total_cost_copper"] for t in tasks)
+                        if client.role == "crafter" else package["max_budget_copper"]})
+        return result
+
+    def accept_plan_requests(self, client, raw):
+        requests = raw.get("plan_requests") or []
+        if not isinstance(requests, list) or len(requests) > 50:
+            raise ValueError("Неверная очередь передачи планов")
+        if requests and client.role != "auctioneer":
+            raise ValueError("Передать план может аукционер")
+        results = []
+        for payload in requests:
+            request = OrderCreate.model_validate(payload)
+            if request.procurement != "self_purchase" or not request.task_ids:
+                raise ValueError("Из аддона передаются готовые планы самостоятельной закупки")
+            path = self.directory / "plan_requests" / (request.request_id+".json")
+            digest = self.request_digest(request)
+            with self.lock:
+                if path.exists():
+                    result = json.loads(path.read_text("utf-8"))
+                    if result["client_id"] != client.id or result["digest"] != digest:
+                        raise ValueError("ID передачи плана повторён с другим содержимым")
+                else:
+                    try:
+                        created = self.create(request)
+                        result = {"state": "accepted", "order_id": created["order_id"]}
+                    except ValueError as error:
+                        result = {"state": "rejected", "message": str(error)}
+                    result.update(request_id=request.request_id, client_id=client.id, digest=digest)
+                    atomic_json(path, result)
+                results.append(result)
+        return results
 
     def events(self):
         return [json.loads(p.read_text("utf-8")) for p in (self.directory / "events").glob("*.json")]
@@ -376,6 +485,12 @@ class Production:
         part_sequence = max((int(e["part_id"].rsplit(":", 1)[-1]) for e in events
                              if e["kind"] == "sent" and e["client_id"] == client.id and e["part_id"].rsplit(":", 1)[-1].isdigit()), default=0)
         return {"format_version": 1, "workspace_id": self.w.identity, "client": client.model_dump(mode="json"),
+            "purchase_owners": self.purchase_owners(),
+            "closed_purchase_tasks": [t for o in self.orders() if o.get("procurement") == "self_purchase"
+                and o.get("closed") for t in o["task_ids"]],
+            "plan_results": [{k: v for k, v in result.items() if k != "digest"}
+                for path in (self.directory / "plan_requests").glob("*.json")
+                if (result := json.loads(path.read_text("utf-8")))["client_id"] == client.id],
             "sequence": sequence, "part_sequence": part_sequence,
             "clients": [c.model_dump(include={"id", "role", "character", "realm"}) for c in self.clients()],
             "orders": [{k: v for k, v in o.items() if k not in {"tasks", "request_hash"}} for o in self.status()

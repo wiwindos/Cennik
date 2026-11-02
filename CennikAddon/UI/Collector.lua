@@ -2,11 +2,90 @@ local _,C=...
 local U={}
 C.CollectorUI=U
 local colors={error="|cffff7777",collect="|cff77ccff",ready="|cff77dd99",pause="|cffffcc66",wait="|cffdddddd"}
+local menuItems={
+  {id="production",label="Производство / крафт"},
+  {id="role",label="Роль персонажа"},
+  {id="collector",label="Статус сбора и ошибки",collector=true},
+  {id="diagnostics",label="Отчёт для поддержки",collector=true},
+  {id="auction",label="Cennik на аукционе",auction=true},
+  {id="sniper",label="Снайпер",auction=true,section="Sniper"},
+  {id="bulk",label="Массовая проверка из веба",auction=true,section="Bulk"},
+  {id="market",label="Подтвердить текущий рынок"},
+}
+function U:MenuReason(item)
+  if C.collectorOnly and not item.collector then return "В режиме сборщика доступны только сбор и диагностика" end
+  if item.id=="role" and not (CennikImport and CennikImport.worker_discovery) then return "Выбор роли доступен после подключения через Worker" end
+  if item.id=="market" and not C.db.current_market then return "Сначала выберите рынок в вебе и синхронизируйте аддон" end
+  if item.auction and not C.Adapter:Open() then return "Откройте аукцион у NPC" end
+end
+function U:MenuAction(item)
+  local reason=self:MenuReason(item)
+  if reason then self.menuNote:SetText(reason);return false,reason end
+  if item.auction then
+    C.UI:Attach();C.UI:Show()
+    if not C.UI.frame then self.menuNote:SetText(C.Adapter.error or "Не удалось открыть вкладку Cennik. Проверьте Auctionator");return false end
+    if item.section then C.UI:SelectSection(item.section) else C.UI:SelectSection("Opportunities") end
+  elseif item.id=="production" then C.Production:Show()
+  elseif item.id=="role" then C.CharacterRole:Show()
+  elseif item.id=="collector" then self:Show(false)
+  elseif item.id=="diagnostics" then self:Show(true)
+  elseif item.id=="market" then
+    local ok,message=C:BindMarket(C.db.current_market)
+    self.menuNote:SetText(ok and "Рынок подтверждён для этого персонажа" or message)
+    return ok,message
+  end
+  self.menu:Hide()
+  return true
+end
+function U:RefreshMenu(resetHint)
+  if not self.menu or not self.menu:IsShown() then return end
+  local count=0
+  for index,item in ipairs(menuItems) do
+    local b=self.menuButtons[index]
+    if not C.collectorOnly or item.collector then
+      count=count+1;b:ClearAllPoints();b:SetPoint("TOPLEFT",16,-38-(count-1)*32)
+      b:SetEnabled(not self:MenuReason(item));b:Show()
+    else b:Hide() end
+  end
+  self.menu:SetHeight(48+count*32+65)
+  if resetHint then
+    self.menuNote:SetText(C.collectorOnly and "Управление сбором и отчёт для поддержки доступны без аукциона."
+      or C.Adapter:Open() and "Производство, роль и диагностика доступны в любом месте."
+      or "Закупка, снайпер и массовая проверка доступны при открытом аукционе.")
+  end
+end
+function U:ToggleMenu()
+  if self.menu and self.menu:IsShown() then self.menu:Hide();return end
+  if not self.menu then
+    local w=CreateFrame("Frame","CennikAccessMenu",UIParent,"BasicFrameTemplateWithInset");self.menu=w
+    w:SetSize(310,370);w:SetPoint("TOPRIGHT",self.access,"BOTTOMRIGHT",0,-4);w:SetFrameStrata("DIALOG");w:SetClampedToScreen(true)
+    local title=w:CreateFontString(nil,"OVERLAY","GameFontNormal");title:SetPoint("TOPLEFT",16,-13);title:SetText("Cennik · меню")
+    self.menuNote=w:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall");self.menuNote:SetPoint("BOTTOMLEFT",16,15);self.menuNote:SetSize(278,55);self.menuNote:SetJustifyH("LEFT")
+    self.menuButtons={}
+    for index,item in ipairs(menuItems) do
+      local b=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");self.menuButtons[index]=b
+      b:SetSize(278,27);b:SetText(item.label)
+      if b.SetMotionScriptsWhileDisabled then b:SetMotionScriptsWhileDisabled(true) end
+      b:SetScript("OnClick",function() U:MenuAction(item) end)
+      b:SetScript("OnEnter",function() U.menuNote:SetText(U:MenuReason(item) or (item.auction and "Открыть вкладку Cennik на аукционе" or "Доступно без открытого аукциона")) end)
+    end
+    w:SetScript("OnShow",function() U:RefreshMenu(true) end)
+    if UISpecialFrames then table.insert(UISpecialFrames,"CennikAccessMenu") end
+  end
+  self.menu:Show();self:RefreshMenu(true)
+end
 function U:Initialize()
   if not self.access then
     local b=CreateFrame("Button",nil,Minimap or UIParent,"UIPanelButtonTemplate");self.access=b
-    b:SetSize(75,24);b:SetPoint("TOPRIGHT",Minimap or UIParent,"BOTTOMRIGHT",0,-8);b:SetText("Сбор: Cennik")
-    b:SetScript("OnClick",function() U:Show() end)
+    b:SetSize(85,24);b:SetPoint("TOPRIGHT",Minimap or UIParent,"BOTTOMRIGHT",0,-8);b:SetText("Cennik")
+    b:SetScript("OnClick",function() U:ToggleMenu() end)
+    b:SetScript("OnEnter",function()
+      if not GameTooltip then return end
+      GameTooltip:SetOwner(b,"ANCHOR_LEFT");GameTooltip:SetText("Cennik · меню команд")
+      local current=C.CollectorStatus.db and C.CollectorStatus.db.current
+      GameTooltip:AddLine(current and current.message or "Производство, роль персонажа, статус и диагностика",1,1,1,true);GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave",function() if GameTooltip then GameTooltip:Hide() end end)
     if AuctionHouseFrame then
       local badge=CreateFrame("Button",nil,AuctionHouseFrame,"UIPanelButtonTemplate");self.badge=badge
       badge:SetSize(420,25);badge:SetPoint("TOPRIGHT",AuctionHouseFrame,"BOTTOMRIGHT",0,-3)
@@ -51,7 +130,8 @@ function U:Refresh()
   local s=C.CollectorStatus;local d=s and s.db;if not d then return end
   local current=d.current or {};local color=colors[current.level] or colors.wait
   if self.badge then self.badge:SetText(color .. "Cennik · " .. (current.message or "сбор данных") .. "|r") end
-  if self.access then self.access:SetText(color .. "Сбор: Cennik|r") end
+  if self.access then self.access:SetText(color .. "Cennik|r") end
+  self:RefreshMenu()
   if self.window and self.window:IsShown() then
     if not self.report then self.edit:SetText(s:Summary()) end
     if self.report and not self.report_loaded then self.edit:SetText(s:Report());self.report_loaded=true end

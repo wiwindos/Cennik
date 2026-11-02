@@ -1,4 +1,4 @@
-"""Opt-in jump experiment, addressed to a verified game window; never steals focus."""
+"""Opt-in Space messages to a selected background game window; never steals focus."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from pathlib import Path
 
 from ahledger.util import atomic_json
 
-MAGIC = [(17, 223, 109), (219, 81, 247), (31, 147, 251)]
-
 
 class WindowsGame:
     def __init__(self):
@@ -21,14 +19,11 @@ class WindowsGame:
         self.c, self.w = ctypes, w
         self.user = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.gdi = ctypes.WinDLL("gdi32", use_last_error=True)
         self.user.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
         self.user.IsWindow.argtypes = [w.HWND]
         self.user.IsWindow.restype = w.BOOL
         self.user.IsWindowVisible.argtypes = [w.HWND]
         self.user.IsWindowVisible.restype = w.BOOL
-        self.user.IsIconic.argtypes = [w.HWND]
-        self.user.IsIconic.restype = w.BOOL
         self.user.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
         self.kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
         self.kernel.OpenProcess.restype = w.HANDLE
@@ -40,11 +35,9 @@ class WindowsGame:
             ctypes.POINTER(w.DWORD),
         ]
         self.kernel.GetProcessTimes.argtypes = [w.HANDLE, *([ctypes.POINTER(w.FILETIME)] * 4)]
-        self.user.GetDC.argtypes = [w.HWND]
-        self.user.GetDC.restype = w.HDC
-        self.user.ReleaseDC.argtypes = [w.HWND, w.HDC]
-        self.gdi.GetPixel.argtypes = [w.HDC, ctypes.c_int, ctypes.c_int]
-        self.gdi.GetPixel.restype = w.DWORD
+        self.user.GetForegroundWindow.restype = w.HWND
+        self.user.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self.user.GetAsyncKeyState.restype = self.c.c_short
         self.user.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
         self.user.PostMessageW.restype = w.BOOL
 
@@ -52,7 +45,6 @@ class WindowsGame:
         if (
             not self.user.IsWindow(hwnd)
             or not self.user.IsWindowVisible(hwnd)
-            or self.user.IsIconic(hwnd)
         ):
             return None
         pid = self.w.DWORD()
@@ -106,26 +98,19 @@ class WindowsGame:
         current = self.identity(target["hwnd"])
         if not current or any(current[k] != target[k] for k in ("pid", "started", "path")):
             return False
+        if self.user.GetForegroundWindow() == target["hwnd"]:
+            return False
         if any(self.user.GetAsyncKeyState(key) & 0x8000 for key in (0x10, 0x11, 0x12)):
             return False
-        dc = self.user.GetDC(target["hwnd"])
-        if not dc:
-            return False
-        try:
-            return all(
-                self.gdi.GetPixel(dc, 4 + 8 * i, 4) == r + (g << 8) + (b << 16)
-                for i, (r, g, b) in enumerate(MAGIC)
-            )
-        finally:
-            self.user.ReleaseDC(target["hwnd"], dc)
+        return True
 
     def jump(self, target):
         if not self.ready(target):
-            raise ValueError("Нет подтверждения готовности выбранного окна")
+            raise ValueError("Выбранное окно недоступно или активно")
         hwnd = target["hwnd"]
         code = 1 | (0x39 << 16)
         if not self.user.PostMessageW(hwnd, 0x100, 0x20, code):
-            raise OSError("Не удалось отправить тестовый сигнал")
+            raise OSError("Не удалось отправить Space")
         try:
             time.sleep(0.08)
         finally:
@@ -142,13 +127,13 @@ class IdleProbe:
         )
         self.backend = backend
         self.last = time.monotonic()
-        self.message = "Проверка AFK выключена"
+        self.message = "Прыжок в фоновом окне выключен"
         self.lock = threading.RLock()
 
     def engine(self):
         if self.backend is None:
             if os.name != "nt":
-                raise ValueError("Проверка доступна только на Windows")
+                raise ValueError("Отправка Space доступна только на Windows")
             self.backend = WindowsGame()
         return self.backend
 
@@ -168,7 +153,7 @@ class IdleProbe:
         with self.lock:
             self.settings["enabled"] = False
             atomic_json(self.path, self.settings)
-            self.message = "Проверка AFK выключена"
+            self.message = "Прыжок в фоновом окне выключен"
 
     def tick(self, *, paused=False, test=False):
         with self.lock:
@@ -179,11 +164,11 @@ class IdleProbe:
             self.last = time.monotonic()
             try:
                 if not self.engine().ready(self.settings["target"]):
-                    self.message = "AFK: пауза — окно или готовность аддона не подтверждены"
+                    self.message = "Space: пауза — окно недоступно, активно или нажата клавиша Shift/Ctrl/Alt"
                     return False
                 self.engine().jump(self.settings["target"])
-                self.message = "AFK: тестовый прыжок отправлен; сброс AFK нужно проверить в Forever"
+                self.message = "Space отправлен в выбранное фоновое окно"
                 return True
             except (ValueError, OSError):
-                self.message = "AFK: тест не выполнен; выбранное окно недоступно"
+                self.message = "Space не отправлен; выбранное окно недоступно"
                 return False

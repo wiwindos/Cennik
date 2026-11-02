@@ -11,9 +11,9 @@ from pathlib import Path
 import httpx
 import uvicorn
 
-from cennik.addon.lua_data import Parser
+from cennik.addon.lua_data import Parser, lua_literal
 from cennik.server.app import create_server
-from cennik.worker.agent import WorkerAgent
+from cennik.worker.agent import VERSION, WorkerAgent
 
 
 def main():
@@ -46,6 +46,12 @@ def main():
         agent.configure(str(game), origin)
         code = agent.pairing["code"]
         profile = app.state.catalog.profiles()[0]
+        saved = game / "WTF/Account/first/SavedVariables/CennikAddon.lua"
+        saved.parent.mkdir(parents=True)
+        saved.write_text("CennikAddonDB=" + lua_literal({"character_profiles": {"test": {
+            "role": "auctioneer", "character": "FixturePlayer", "realm": "FixtureRealm",
+            "faction": profile.faction, "professions": [],
+        }}}), "utf-8")
         with httpx.Client(base_url=origin, trust_env=False) as client:
             approved = client.post(
                 "/server/api/pairing/approve",
@@ -67,15 +73,17 @@ def main():
         )
         result = json.loads(result_path.read_text("utf-8"))
         assert result["frozen"] and result["tray_visible"] and not result["sql_loaded"], result
-        assert result["status"] == "Работает" and result["version"] == "0.2.0", result
+        assert result["status"] == "Работает" and result["version"] == VERSION, result
         assert not (agent.root / "pairing.json").exists()
         manifest = json.loads((agent.root / "manifest.json").read_text("utf-8"))
-        assert manifest["clients"] == []
+        assert len(manifest["clients"]) == 1
+        assert manifest["clients"][0]["role"] == "auctioneer"
         parsed = Parser((game / "Interface/AddOns/CennikAddon/ImportedData.lua").read_text("utf-8"))
         assert parsed.identifier() == "CennikImport"
         parsed.require("=")
         payload = parsed.value()
         assert payload["discovery"]["worker_discovery"]
+        assert "FixtureRealm:FixturePlayer" in payload["routes"]
         assert not list((app.state.catalog.root / "pairing").glob("*.json"))
         print(
             json.dumps(
@@ -83,6 +91,7 @@ def main():
                     "frozen_pairing": "passed",
                     "owner_approval": True,
                     "discovery_import": True,
+                    "empty_professions": "passed",
                     "local_sql": False,
                 }
             )

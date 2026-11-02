@@ -38,6 +38,78 @@ end
 function P:Transfer(id)
   for _,order in ipairs(self.config.orders or {}) do for _,transfer in ipairs(order.transfers or {}) do if transfer.id==id then return transfer,order end end end
 end
+function P:PurchaseBlock(taskID)
+  local config=self.config or (CennikImport and CennikImport.production)
+  if not config then return end
+  for _,id in ipairs(config.closed_purchase_tasks or {}) do if id==taskID then return "План архивирован; повторная закупка заблокирована" end end
+  local owner=config.purchase_owners and config.purchase_owners[taskID]
+  if owner and owner~=config.client.id then return "План передан крафтеру; закупка выполняется в его окне" end
+  for _,request in ipairs((self.db or C.db.production or {}).plan_requests or {}) do
+    for _,id in ipairs(request.task_ids) do if id==taskID then return "План ожидает передачи крафтеру: /reload и дождитесь Worker" end end
+  end
+end
+function P:SendPlan(crafterID,selection)
+  if not self.db or self.config.client.role~="auctioneer" then return false,"Настройте аукционера и крафтера через Worker" end
+  local crafter=self:Client(crafterID)
+  if not crafter or crafter.role~="crafter" then return false,"Выберите крафтера" end
+  if C.db.pending then return false,"Сначала уточните результат текущей покупки" end
+  self.db.plan_requests=self.db.plan_requests or {}
+  if #self.db.plan_requests>=50 then return false,"Очередь передачи заполнена: /reload и синхронизация" end
+  local ids,limits,budgets={},{},{}
+  for id,chosen in pairs(selection or {}) do
+    if chosen then
+      local task=C.db.tasks[id]
+      if not task or task.hidden or task.market~=C.db.current_market or task.run_id~=C.db.current_run
+        or C:Now()>=task.expires_at_epoch then return false,"Выбрано устаревшее задание; обновите план" end
+      if self:PurchaseBlock(id) then return false,self:PurchaseBlock(id) end
+      if not C:MarketBindingMatches(task.market) then return false,"Сначала подтвердите рынок" end
+      if (task.spent or 0)>0 then return false,"По заданию уже была покупка; ресурсы остались у аукционера" end
+      for _,q in pairs(task.bought or {}) do if q>0 then return false,"Нельзя передать уже купленный план как новую закупку" end end
+      for _,e in ipairs(C.db.history or {}) do
+        if e.task_id==id and e.kind=="purchase" and ((e.quantity or 0)>0 or (e.cost_copper or 0)>0) then return false,"По заданию уже была покупка" end
+      end
+      local details=task.opportunity.details or {}
+      if not details.recipe and not details.steps and not details.disenchant then return false,"Выберите задания крафта или распыления" end
+      ids[#ids+1]=id;limits[id]={};budgets[id]=task.max_total_cost_copper
+      for _,line in ipairs(task.lines) do if line.source=="auction" then limits[id][line.item_id]=line.unit_limit_copper end end
+    end
+  end
+  if #ids==0 or #ids>50 then return false,"Отметьте от 1 до 50 производственных заданий" end
+  table.sort(ids)
+  self.db.plan_sequence=(self.db.plan_sequence or 0)+1
+  local request={request_id=self.config.client.id .. "-plan-" .. math.floor(C:Now()) .. "-" .. self.db.plan_sequence,
+    crafter_id=crafterID,task_ids=ids,procurement="self_purchase",purchase_limits=limits,task_budgets=budgets}
+  self.db.plan_requests[#self.db.plan_requests+1]=request
+  C.Scanner:Cancel("План передаётся крафтеру");C.BuyQueue.ticket=nil
+  local queue={};for _,id in ipairs(C.db.queue) do if not selection[id] then queue[#queue+1]=id end end;C.db.queue=queue
+  self:Notice("План для " .. crafter.character .. " подготовлен. /reload → дождитесь Worker → вход или /reload у крафтера")
+  C:Refresh()
+  return true
+end
+function P:ChoosePlan(selection)
+  if not self.config then C.UI.notice="Сначала подключите обоих персонажей через Worker";C:Refresh();return end
+  self.planSelection=C:Clone(selection)
+  local targets={};for _,client in ipairs(self.config.clients or {}) do if client.role=="crafter" then targets[#targets+1]=client end end
+  if #targets==0 then C.UI.notice="Крафтер не назначен: /cennik role в его окне, затем /reload";C:Refresh();return end
+  if not self.planWindow then
+    local w=CreateFrame("Frame",nil,UIParent,"BasicFrameTemplateWithInset");self.planWindow=w
+    w:SetSize(500,205);w:SetPoint("CENTER");w:SetFrameStrata("DIALOG")
+    self.planText=w:CreateFontString(nil,"OVERLAY","GameFontHighlight");self.planText:SetPoint("TOPLEFT",18,-38);self.planText:SetSize(460,92);self.planText:SetJustifyH("LEFT")
+    local nextButton=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");nextButton:SetSize(205,28);nextButton:SetPoint("TOPLEFT",18,-155);nextButton:SetText("Другой крафтер")
+    nextButton:SetScript("OnClick",function() P.planTarget=(P.planTarget or 1)%#P.planTargets+1;P:RenderPlan() end)
+    local send=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");send:SetSize(235,28);send:SetPoint("TOPLEFT",235,-155);send:SetText("Передать план крафтеру")
+    send:SetScript("OnClick",function()
+      local ok,reason=P:SendPlan(P.planTargets[P.planTarget or 1].id,P.planSelection)
+      C.UI.notice=ok and P.message or reason;C:Refresh();if ok then P.planWindow:Hide() end
+    end)
+  end
+  self.planTargets=targets;self.planTarget=1;self:RenderPlan();self.planWindow:Show()
+end
+function P:RenderPlan()
+  local target=self.planTargets[self.planTarget or 1];local count=0;for _,chosen in pairs(self.planSelection) do if chosen then count=count+1 end end
+  self.planText:SetText("Крафтер: " .. target.character .. " · " .. target.realm .. "\nЗаданий: " .. count ..
+    "\nОн сам проверяет цены, закупает и крафтит. Купленные ресурсы не передаются. Исходные задания закупки будут заблокированы.")
+end
 function P:Record(kind,fields)
   if not self.db or #self.db.events>=2000 then self:Notice("Очередь производства заполнена: /reload и синхронизация");return end
   self.db.sequence=self.db.sequence+1
@@ -57,6 +129,16 @@ function P:Initialize()
   self.config=config
   C.db.production=C.db.production or {events={},sequence=0,part_sequence=0,parcels={},sent={},received={},done={}}
   self.db=C.db.production;self.db.outbox={}
+  local results={};for _,result in ipairs(config.plan_results or {}) do results[result.request_id]=result end
+  local pending={}
+  for _,request in ipairs(self.db.plan_requests or {}) do
+    local result=results[request.request_id]
+    if not result then pending[#pending+1]=request
+    else self.message=result.state=="accepted" and "План получен сервером. Войдите за крафтера или выполните /reload в его окне."
+      or ("План не передан: " .. (result.message or "неизвестная ошибка") .. ". Исходные задания снова доступны.") end
+  end
+  self.db.plan_requests=pending
+  if self.message then print("Cennik: " .. self.message) end
   self.db.sequence=math.max(self.db.sequence or 0,config.sequence or 0)
   self.db.part_sequence=math.max(self.db.part_sequence or 0,config.part_sequence or 0)
   local ack={};for _,id in ipairs(config.acknowledged_event_ids or {}) do ack[id]=true end
@@ -200,6 +282,7 @@ function P:Prepare(mode)
   if not self:CanRecord() then self:Notice("Сначала сохраните очереди: /reload и синхронизация");return false end
   if self.active then self:Notice("Завершите или отмените текущую подготовку");return false end
   local order=self:Selected();if not order then self:Notice("Сначала создайте заказ в вебе и выполните /reload");return false end
+  if order.procurement=="self_purchase" then self:Notice("В этом плане крафтер закупает сам; передача ресурсов не требуется");return false end
   local transfer
   for _,value in ipairs(order.transfers) do if value.from_client==self.config.client.id then transfer=value end end
   local lines=transfer and self:ReadyLines(transfer) or {}
@@ -406,6 +489,7 @@ function P:Available(step)
   for _,input in ipairs(step.inputs) do
     local owned=0;for _,line in pairs(snapshot.items) do if line.item_id==input.item_id then owned=owned+line.quantity end end
     local available=(stock[tostring(input.item_id)] or 0)-(returned[tostring(input.item_id)] or 0)
+    if order.procurement=="self_purchase" then available=owned end
     count=math.min(count,math.floor(math.min(owned,available)/input.quantity))
   end
   return math.max(0,count)
@@ -415,7 +499,7 @@ function P:Craft()
   if not step or order.crafter_id~=self.config.client.id then return end
   if not self:CanRecord() then self:Notice("Сначала сохраните очереди: /reload и синхронизация");return end
   local count=self:Available(step)
-  if count<=0 then self:Notice("Недостаточно полученных материалов этого заказа");return end
+  if count<=0 then self:Notice(order.procurement=="self_purchase" and "Недостаточно материалов в сумках; закупитесь по плану" or "Недостаточно полученных материалов этого заказа");return end
   local function activate() P.db.active_step={order_id=order.order_id,step_id=step.step_id} end
   if step.kind=="disenchant" then
     if self.db.recipes and self.db.recipes.disenchant and CastSpellByID then activate();CastSpellByID(13262);self:Notice("Выберите исходный предмет в сумке") else self:Notice("Распыление не подтверждено у персонажа") end
@@ -453,7 +537,7 @@ function P:Render()
   if not self.text then return end
   local order=self:Selected();local lines={"Производство · " .. self.config.client.character .. " · " .. (self.config.client.role=="crafter" and "Крафтер" or "Аукционер")}
   if order then
-    lines[#lines+1]="Заказ " .. order.order_id:sub(1,8)
+    lines[#lines+1]="Заказ " .. order.order_id:sub(1,8) .. (order.procurement=="self_purchase" and " · Крафтер закупает сам" or "")
     local selected=self.stepIndex or 1
     lines[#lines+1]="Этап " .. selected .. "/" .. #order.steps
     for i=math.max(1,selected-2),math.min(#order.steps,selected+2) do
@@ -467,7 +551,8 @@ function P:Render()
       lines[#lines+1]="Материалы на действие: " .. table.concat(inputs,", ")
     end
   else lines[#lines+1]="Ожидаются адресные заказы из веба. /reload в обоих окнах после синхронизации." end
-  lines[#lines+1]="\nПередача: откройте почту или обмен с назначенным персонажем.\nПодготовка заполняет предметы; отправку/обмен подтверждаете в игре."
+  lines[#lines+1]=order and order.procurement=="self_purchase" and "\nЗакупка: аукцион → Cennik → Возможности. Повторите проверку и подтвердите условия за крафтера.\nПосле закупки откройте профессию и изготовьте доступное."
+    or "\nПередача: откройте почту или обмен с назначенным персонажем.\nПодготовка заполняет предметы; отправку/обмен подтверждаете в игре."
   lines[#lines+1]=self.message or ""
   self.text:SetText(table.concat(lines,"\n"))
 end

@@ -132,7 +132,7 @@ class Sources:
         with self.lock:
             state = self.read("fyi.json", {})
             path = self.root / "fyi-document.json"
-            if not force and state.get("expires", 0) > time.time() and path.exists():
+            if not force and min(state.get("expires", 0), state.get("checked_at", 0) + 3600) > time.time() and path.exists():
                 cached = NpcPriceDocument.model_validate_json(path.read_bytes())
                 return previous if cached.raw_sha256 == previous.raw_sha256 else cached
             headers = (
@@ -195,6 +195,6 @@ class Sources:
                 atomic_json(path, document.model_dump(mode="json"))
             atomic_json(
                 self.root / "fyi.json",
-                {"etag": received.get("etag", state.get("etag")), "expires": time.time() + 21600},
+                {"etag": received.get("etag", state.get("etag")), "expires": time.time() + 3600, "checked_at": time.time()},
             )
             return document

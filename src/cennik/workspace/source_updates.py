@@ -85,14 +85,14 @@ class SourceUpdates:
             ahl_allowed = False
         status = self.status()
         for kind, enabled, interval in [
-            ("fyi", settings.auto_fyi, 21600),
+            ("fyi", settings.auto_fyi, 3600),
             (
                 "references",
                 settings.auto_refresh
                 and settings.auto_references
                 and not settings.development_mode
                 and not settings.own_data_only,
-                43200,
+                3600,
             ),
             (
                 "history",
@@ -103,10 +103,10 @@ class SourceUpdates:
                 600,
             ),
         ]:
-            if not self.w.server_mode and not settings.auto_refresh:
+            if kind != "fyi" and not self.w.server_mode and not settings.auto_refresh:
                 continue
             previous = status.get(kind, {})
-            delay = 1800 if previous.get("state") in {"error", "running"} else interval
+            delay = max(1800, interval) if previous.get("state") in {"error", "running"} else interval
             if (
                 enabled
                 and (kind == "fyi" or ahl_allowed)
