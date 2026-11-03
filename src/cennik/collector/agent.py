@@ -19,7 +19,7 @@ from .client import CollectorClient
 from .protocol import Connection, Observation
 from .status import GAME_STATUS
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 MARKET = "forever.pvp.alliance.us"
 
 

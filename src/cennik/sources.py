@@ -128,17 +128,21 @@ class Sources:
             "note": "Запрос принят. Это не подтверждает повышенную квоту API",
         }
 
-    def fyi_document(self, previous: NpcPriceDocument, *, force=False):
+    def fyi_document(self, previous: NpcPriceDocument, *, force=False, delivery: dict[str, str] | None = None):
         with self.lock:
             state = self.read("fyi.json", {})
             path = self.root / "fyi-document.json"
             if not force and min(state.get("expires", 0), state.get("checked_at", 0) + 3600) > time.time() and path.exists():
+                if delivery is not None:
+                    delivery["origin"] = "cache"
                 cached = NpcPriceDocument.model_validate_json(path.read_bytes())
                 return previous if cached.raw_sha256 == previous.raw_sha256 else cached
             headers = (
                 {"If-None-Match": state["etag"]} if state.get("etag") and path.exists() else {}
             )
             body, received = self.fetch(FYI, headers=headers)
+            if delivery is not None:
+                delivery["origin"] = "not_modified" if body is None else "network"
             if body is None:
                 document = NpcPriceDocument.model_validate_json(path.read_bytes())
             else:

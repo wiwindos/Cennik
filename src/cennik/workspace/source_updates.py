@@ -29,12 +29,14 @@ class SourceUpdates:
         try:
             if kind == "fyi":
                 previous = self.w.npc_catalog.snapshot()
-                document = self.w.sources.fyi_document(previous, force=force)
+                delivery = {}
+                document = self.w.sources.fyi_document(previous, force=force, delivery=delivery)
                 result = (
                     self.w.npc_catalog.install(document)
                     if document.sha256 != previous.sha256
                     else {"unchanged": True}
                 )
+                self.w.record_source("fyi", previous, document, origin=delivery.get("origin", "network"))
                 if self.w.settings().auto_recalculate and document.sha256 != previous.sha256:
                     self.w.submit("analytics", self.w.calculate, defer=True)
             elif kind == "references":
@@ -62,6 +64,9 @@ class SourceUpdates:
             status[kind].update(state="ok", completed_at=int(time.time()), error=None)
             return result
         except Exception as error:
+            if kind == "fyi":
+                message = str(error) if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__
+                self.w.record_source("failed", message=message)
             status[kind].update(
                 state="error",
                 error=type(error).__name__,

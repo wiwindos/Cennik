@@ -17,3 +17,7 @@ dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);bor
 body[data-server-mode="true"] #prod-clients,body[data-server-mode="true"] details:has(#collector-connection),body[data-server-mode="true"] label:has([data-setting="game_root"]),body[data-server-mode="true"] label:has([data-setting="account"]),body[data-server-mode="true"] label:has([data-setting="auto_import"]),body[data-server-mode="true"] [data-action="install"]{display:none}
 
 .leveling-table{min-width:980px}.leveling-table th,.leveling-table td{word-break:normal;overflow-wrap:normal}.leveling-table td:first-child{min-width:180px}.leveling-table button{white-space:nowrap}
+
+.source-report-table{min-width:1000px}.source-report-table th,.source-report-table td{word-break:normal;overflow-wrap:normal}.source-report-table td:first-child{min-width:170px}.source-report-table td:nth-child(3){min-width:260px}
+
+#upstream-settings{grid-template-columns:minmax(0,1fr)}#source-changes{min-width:0;max-width:100%}

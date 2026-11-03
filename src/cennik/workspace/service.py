@@ -48,6 +48,7 @@ from .npc import NpcReferenceProvider, NpcReferences
 from .production import Production
 from .recipes import LocalRecipes
 from .sniper import SniperBook
+from .source_reports import SourceReports
 from .source_updates import SourceUpdates
 
 
@@ -69,6 +70,7 @@ class Workspace:
         self.market_binding: dict | None = None
         self.root = root.resolve()
         self.sources = sources or Sources(self.root)
+        self.source_reports = SourceReports(self)
         self.source_updates = SourceUpdates(self)
         self.local_recipes = LocalRecipes(self.root, market_key)
         self.market = MarketDatabase(self.root, market_key=market_key, market_info=market_info)
@@ -230,7 +232,22 @@ class Workspace:
         with self.store.connection() as db:
             return [dict(row) for row in db.execute("SELECT * FROM workspace_jobs ORDER BY created_at DESC LIMIT 20")]
 
+    def record_source(self, method, *args, **kwargs):
+        try:
+            return getattr(self.source_reports, method)(*args, **kwargs)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self.log.warning("Source report could not be saved: %s", type(error).__name__)
+            return None
+
     def request(self, spec: JobSpec):
+        try:
+            return self._request(spec)
+        except Exception as error:
+            message = str(error) if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__
+            self.record_source("failed", spec, message=message)
+            raise
+
+    def _request(self, spec: JobSpec):
         self.require_live_updates()
         if self.server_mode and spec.market not in {None, self.ahl_market}:
             raise ValueError("Разрешён только выбранный рынок AHledger")
@@ -238,8 +255,15 @@ class Workspace:
         with self.store.connection() as db:
             row = db.execute("SELECT * FROM source_cache WHERE id=?", [key]).fetchone()
         cached = dict(row) if row else None
+        if cached and not self.source_reports.has_baseline(spec):
+            try:
+                previous_body = zstd.ZstdDecompressor().decompress(cached["body"], max_output_size=64 * 1024 * 1024)
+                self.record_source("seed", spec, parse(spec, previous_body))
+            except (ValueError, zstd.ZstdError):
+                self.log.warning("Previous source response unavailable for change comparison")
         if cached and cached["expires"] > time.time():
             self.log.info("Cache hit: %s", spec.dataset)
+            self.record_source("checked", spec, cached=True)
             return {"dataset": spec.dataset, "cached": True, "changed": False}
         headers = self.sources.headers(spec.url)
         if cached:
@@ -275,6 +299,7 @@ class Workspace:
                     combined = {**json.loads(cached["headers"]), **response_headers}
                     with self.store.connection() as db:
                         db.execute("UPDATE source_cache SET expires=?,checked_at=?,headers=? WHERE id=?", [cache_expiry(combined), now(), dumps(combined), key])
+                    self.record_source("checked", spec)
                     return {"dataset": spec.dataset, "changed": False, "http_status": 304}
                 if status != 200:
                     raise ValueError(f"AHledger HTTP {status}")
@@ -286,6 +311,7 @@ class Workspace:
                     db.execute("INSERT OR REPLACE INTO source_cache VALUES(?,?,?,?,?,?,?)", [key,
                         zstd.ZstdCompressor().compress(bytes(body)), dumps(response_headers), cache_expiry(response_headers), now(),
                         parsed.maximum, spec.url])
+                self.record_source("applied", spec, parsed)
                 return {"dataset": spec.dataset, "changed": changed, "records": parsed.count,
                         "status": parsed.status, "warnings": parsed.warnings}
             except httpx.HTTPError as error:
@@ -558,6 +584,7 @@ class Workspace:
         return {"workspace_id": self.identity, "market": self.market_key, "market_info": self.market.market_info,
                 "server_mode": self.server_mode, "root": str(self.root), "sources": source, "coverage": coverage,
                 "source_updates": self.source_updates.status(), "upstreams": self.sources.public(),
+                "source_changes": self.source_reports.overview(),
                 "observed_recipes": len(self.local_recipes.document()),
                 "npc_reference_prices": len(self.npc_references.snapshot()),
                 "npc_catalog": self.npc_catalog.snapshot().metadata(),
