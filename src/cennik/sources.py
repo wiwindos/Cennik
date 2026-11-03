@@ -106,6 +106,12 @@ class Sources:
                 identity = row.get("id")
                 if valid_market(identity) and identity.split(".")[-2] in {"alliance", "horde"}:
                     _, ruleset, faction, region = identity.split(".")
+                    realms = row.get("realms", row.get("realmNames", []))
+                    if isinstance(realms, str):
+                        realms = [realms]
+                    realms = [r if isinstance(r, str) else r.get("name", "") for r in realms] if isinstance(realms, list) else []
+                    realms += [row.get(k) for k in ("realm", "realmName", "realm_name") if isinstance(row.get(k), str)]
+                    realms = list(dict.fromkeys(r.strip() for r in realms if isinstance(r, str) and r.strip() and len(r) <= 100 and not any(c in r for c in "\n\r:")))
                     items.append(
                         {
                             "id": identity,
@@ -113,6 +119,7 @@ class Sources:
                             "faction": faction,
                             "region": region,
                             "label": str(row.get("label") or identity)[:160],
+                            "realm_names": realms,
                         }
                     )
             if not items:
@@ -136,6 +143,7 @@ class Sources:
                 if delivery is not None:
                     delivery["origin"] = "cache"
                 cached = NpcPriceDocument.model_validate_json(path.read_bytes())
+                self.validate_fyi_transition(previous, cached)
                 return previous if cached.raw_sha256 == previous.raw_sha256 else cached
             headers = (
                 {"If-None-Match": state["etag"]} if state.get("etag") and path.exists() else {}
@@ -155,12 +163,17 @@ class Sources:
                     raise ValueError("FYI вернул неизвестный формат каталога")
                 # A date or a changed ETag never proves that beta data is release data.
                 phase = (
-                    "release"
-                    if data.get("phase") == "release"
+                    data["phase"]
+                    if data.get("phase") in {"beta", "release"}
                     else previous.phase
                     if data.get("build") == previous.build
                     else "beta"
                 )
+                if previous.phase == "release" and phase != "release":
+                    raise ValueError("FYI предложил бета-каталог поверх релизного; прежняя версия сохранена")
+                build = str(data.get("build", ""))
+                if build.startswith("1.60.") and tuple(map(int, build.split('.'))) < tuple(map(int, previous.build.split('.'))):
+                    raise ValueError("FYI предложил старую сборку; прежняя версия сохранена")
                 items = {}
                 for identity, row in data["items"].items():
                     for field in ("buy", "sell"):
@@ -196,9 +209,21 @@ class Sources:
                         raw_sha256=digest,
                         items=items,
                     )
+                self.validate_fyi_transition(previous, document)
                 atomic_json(path, document.model_dump(mode="json"))
+            self.validate_fyi_transition(previous, document)
             atomic_json(
                 self.root / "fyi.json",
                 {"etag": received.get("etag", state.get("etag")), "expires": time.time() + 3600, "checked_at": time.time()},
             )
             return document
+
+    @staticmethod
+    def validate_fyi_transition(previous, document):
+        # Cache hits and HTTP 304 must meet the same rules as a downloaded body.
+        if previous.phase == "release" and document.phase != "release":
+            raise ValueError("FYI предложил бета-каталог поверх релизного; прежняя версия сохранена")
+        if tuple(map(int, document.build.split('.'))) < tuple(map(int, previous.build.split('.'))):
+            raise ValueError("FYI предложил старую сборку; прежняя версия сохранена")
+        if len(document.items) < len(previous.items) / 2:
+            raise ValueError("FYI вернул существенно сокращённый каталог; прежняя версия сохранена")

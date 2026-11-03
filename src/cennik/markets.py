@@ -16,6 +16,7 @@ class MarketBinding(Model):
     faction: str = Field(pattern=r"^(alliance|horde)$")
     region: str = Field(pattern=r"^(eu|us|kr|tw|cn)$")
     realm_names: list[str] = Field(max_length=30)
+    client_family: str = Field(default="test", pattern=r"^(forever|test)$")
 
     @model_validator(mode="after")
     def identity(self):

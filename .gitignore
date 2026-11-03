@@ -18,5 +18,8 @@ dist/
 *.log
 Auctionator/
 /vps/
+/ssh/
 research/
 outputs/
+/release/
+/release-seed/

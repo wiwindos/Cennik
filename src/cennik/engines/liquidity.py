@@ -43,7 +43,7 @@ class CraftLiquidity:
             "note": "Source estimates, not confirmed transactions. Supply/sales is a pressure proxy, not sale time. No sale guarantee.",
         }
         reason = None
-        if config.craft_liquidity_enabled:
+        if config.craft_liquidity_enabled and not price.beta_baseline:
             if price.sales_estimated_per_day is None or age is None:
                 reason = None if config.own_data_only else "liquidity_unknown_sales"
             elif age > config.craft_sales_max_age_seconds:
@@ -59,6 +59,8 @@ class CraftLiquidity:
             elif batch_percent is not None and batch_percent > config.craft_max_batch_sales_percent:
                 reason = "liquidity_large_batch"
         evidence["passed"] = None if not config.craft_liquidity_enabled else reason is None
+        if price.beta_baseline:
+            evidence.update(passed=None, status="beta", note="Бета: ликвидность и объём требуют проверки на релизе")
         if config.own_data_only and (price.sales_estimated_per_day is None or age is None):
             evidence.update(passed=None, status="unknown", note="Ликвидность неизвестна: расчёт по собственному сбору, продажа не подтверждена")
         return evidence, reason

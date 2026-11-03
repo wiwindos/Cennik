@@ -112,8 +112,11 @@ class NpcReferenceProvider:
         if self.catalog:
             for item_id, value in self.catalog.items.items():
                 item = items.get(item_id) or Item(item_id=item_id, name=value.name)
-                if item.vendor_sell_copper is None and value.sell_copper is not None:
-                    item = item.model_copy(update={"vendor_sell_copper": value.sell_copper})
+                newer_release = ((self.catalog.phase == "release" or item.source_phase == "beta") and item.source not in {"manual", "local_scan"}
+                    and (item.observed_at is None or self.catalog.retrieved_at > item.observed_at))
+                if value.sell_copper is not None and (item.vendor_sell_copper is None or newer_release):
+                    item = item.model_copy(update={"vendor_sell_copper": value.sell_copper,
+                        "source_phase": self.catalog.phase})
                 items[item_id] = item
         for item_id, quote in self.quotes.items():
             item = items.get(item_id) or Item(item_id=item_id, name=quote.name)

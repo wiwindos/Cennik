@@ -161,7 +161,7 @@ class MarketDatabase:
             if table == "items":
                 # Sparse observations never erase item facts already learned elsewhere.
                 select = 'SELECT ' + ",".join(
-                    ('CASE WHEN n.origin_dataset=\'manual\' THEN coalesce(n."' + c + '",o."' + c + '") ELSE coalesce(o."' + c + '",n."' + c + '") END') if c in {"vendor_sell_copper", "vendor_buy_copper", "binding", "stack_size"}
+                    ('CASE WHEN o.origin_dataset=\'manual\' AND n.origin_dataset<>\'manual\' THEN coalesce(o."' + c + '",n."' + c + '") WHEN n.origin_dataset=\'manual\' OR o.retrieved_at IS NULL OR try_cast(n.retrieved_at AS TIMESTAMPTZ)>=try_cast(o.retrieved_at AS TIMESTAMPTZ) THEN coalesce(n."' + c + '",o."' + c + '") ELSE coalesce(o."' + c + '",n."' + c + '") END') if c in {"vendor_sell_copper", "vendor_buy_copper", "binding", "stack_size"}
                     else ('CASE WHEN o.origin_dataset IN (\'local_scan\',\'manual\') THEN coalesce(o.name,n.name) ELSE coalesce(n.name,o.name) END' if c == "name" else
                           ('CASE WHEN o.origin_dataset IN (\'local_scan\',\'manual\') AND n.origin_dataset<>\'manual\' THEN o.origin_dataset ELSE n.origin_dataset END' if c == "origin_dataset" else
                           ('(coalesce(n.is_placeholder,true) AND coalesce(o.is_placeholder,true))' if c == "is_placeholder" else 'n."' + c + '"'))

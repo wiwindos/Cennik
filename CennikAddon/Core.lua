@@ -1,6 +1,6 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.20.0"
+C.VERSION = "0.21.0"
 C.MAX_INTEGER = 9007199254740991
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
@@ -64,6 +64,9 @@ function C:BindMarket(market)
   return true
 end
 function C:MarketBindingMatches(market)
+  local server=self.db and self.db.server_binding
+  local version=GetBuildInfo and GetBuildInfo() or ""
+  if server and server.client_family=="forever" and not version:match("^1%.60%.") then return false end
   local binding=self.db and self.db.binding
   return not not (type(market)=="string" and binding and binding.market==market
     and binding.realm==GetRealmName() and binding.faction==string.lower(UnitFactionGroup("player") or "")
@@ -133,12 +136,26 @@ function C:Initialize()
     CennikImport.market_collector.market=binding and binding.market or "unassigned"
     self.db.binding=nil;self.db.current_market=binding and binding.market or nil
   end
+  local oldMarket=self.db.server_binding and self.db.server_binding.market or self.db.binding and self.db.binding.market
+  if binding and oldMarket and oldMarket~=binding.market then
+    self.db.observation_profiles=self.db.observation_profiles or {}
+    local old={}
+    for _,key in ipairs({"npc_quotes","collector_npc","collector_recipes","collector_transforms","auctioneer_proposals","production","collector_status"}) do old[key]=self.db[key] end
+    self.db.observation_profiles[oldMarket]=old
+    local restored=self.db.observation_profiles[binding.market] or {}
+    for _,key in ipairs({"npc_quotes","collector_npc","collector_recipes","collector_transforms","auctioneer_proposals","production","collector_status"}) do self.db[key]=restored[key] end
+    -- Full raw scans keep their normal bounded rotation; Worker isolates foreign ones.
+  end
   self.db.server_binding=binding and C:Clone(binding) or nil
   if binding then
     local allowed=false
     for _,realm in ipairs(binding.realm_names or {}) do if realm==GetRealmName() then allowed=true end end
     if allowed and binding.faction==string.lower(UnitFactionGroup("player") or "") then
-      self.db.current_market=binding.market;self:BindMarket(binding.market)
+      local version=GetBuildInfo and GetBuildInfo() or ""
+      if binding.client_family=="forever" and not version:match("^1%.60%.") then
+        self.db.binding=nil
+        print("Cennik: клиент не Forever. Сбор и закупки заблокированы; для Retail выберите отдельный тестовый рынок.")
+      else self.db.current_market=binding.market;self:BindMarket(binding.market) end
     else self.db.binding=nil end
   end
   if self.collectorOnly then

@@ -22,6 +22,7 @@ class MarketProfile(Model):
     ruleset: str = Field(default="pvp", pattern=r"^[a-z0-9_-]{1,40}$")
     faction: Literal["alliance", "horde"] = "alliance"
     region: Literal["eu", "us", "kr", "tw", "cn"] = "eu"
+    client_family: Literal["forever", "test"] = "forever"
     realm_names: list[str] = Field(default_factory=list, max_length=30)
     ahl_market: str | None = Field(default="forever.pvp.alliance.eu", pattern=MARKET_PATTERN)
 
@@ -64,7 +65,7 @@ class Catalog:
         with self.lock:
             config = self.config()
             existing = next((p for p in self.profiles() if p.id == profile.id), None)
-            if existing and (existing.faction, existing.region, existing.ruleset) != (profile.faction, profile.region, profile.ruleset):
+            if existing and (existing.faction, existing.region, existing.ruleset, existing.client_family) != (profile.faction, profile.region, profile.ruleset, profile.client_family):
                 raise ValueError("Регион, фракция и тип существующего рынка неизменны. Создайте отдельный профиль")
             names = [v.strip() for v in profile.realm_names]
             if any(not v or len(v)>160 or any(c in v for c in "\n\r:") for v in names):
@@ -94,18 +95,26 @@ class Catalog:
                         raise RuntimeError("AHledger настроен на другой сервер/рынок. Измените выбор в панели сервера")
                 w.updates_guard = guard
                 w.market_binding = {"id": p.id, "market": p.market, "realm_names": p.realm_names,
-                    "faction": p.faction, "region": p.region}
+                    "faction": p.faction, "region": p.region, "client_family": p.client_family}
                 self.workspaces[identity] = w
                 if self.running:
                     w.thread.start()
             w = self.workspaces[identity]
             p = self.profile(identity)
             w.market_binding = {"id": p.id, "market": p.market, "realm_names": p.realm_names,
-                "faction": p.faction, "region": p.region}
+                "faction": p.faction, "region": p.region, "client_family": p.client_family}
             return w
 
     def public(self):
         return [p.public() for p in self.profiles()]
+
+    def resolve_realms(self, markets):
+        """Only explicit realm names from AHL, never its generic PvP label."""
+        with self.lock:
+            for profile in self.profiles():
+                entry = next((m for m in markets if m["id"] == profile.ahl_market), None)
+                if entry and entry.get("realm_names") and not profile.realm_names:
+                    self.save(profile.model_copy(update={"realm_names": entry["realm_names"]}))
 
     def close(self):
         for w in self.workspaces.values():

@@ -40,7 +40,11 @@ class SourceUpdates:
                 if self.w.settings().auto_recalculate and document.sha256 != previous.sha256:
                     self.w.submit("analytics", self.w.calculate, defer=True)
             elif kind == "references":
+                if self.w.resolve_realm_names:
+                    self.w.resolve_realm_names()
                 result = self.w.refresh(RefreshRequest(dataset="references"))
+            elif kind == "disenchant_check":
+                result = self.w.check_disenchant_rules()
             elif kind == "history":
                 rules = self.w.sniper.listing(wire=True)["rules"]
                 identities = {r["item_id"] for r in rules}
@@ -107,6 +111,8 @@ class SourceUpdates:
                 and not settings.own_data_only,
                 600,
             ),
+            ("disenchant_check", settings.auto_refresh and settings.auto_disenchant_check
+                and not settings.development_mode and not settings.own_data_only, 3600),
         ]:
             if kind != "fyi" and not self.w.server_mode and not settings.auto_refresh:
                 continue

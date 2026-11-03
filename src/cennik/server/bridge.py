@@ -36,6 +36,8 @@ class CharacterDiscovery(RemoteCharacter):
     role: str = Field(pattern=r"^(auctioneer|crafter|unassigned)$")
     faction: str = Field(pattern=r"^(alliance|horde)$")
     professions: list[str] = Field(default_factory=list, max_length=20)
+    market: str | None = Field(default=None, max_length=160)
+    game_version: str | None = Field(default=None, max_length=80)
 
     @field_validator("professions", mode="before")
     @classmethod
@@ -125,12 +127,41 @@ class PrivateBridge:
         with self.lock:
             device=next(d for d in self.devices() if d["id"]==device["id"])
             profile=self.catalog.profile(device["profile_id"])
-            rows=[r for r in value.characters if r.faction==profile.faction]
+            rows=[]
+            discovery_notes=[]
+            for row in value.characters:
+                if row.faction != profile.faction:
+                    continue
+                if row.market and row.market != profile.market:
+                    discovery_notes.append("Сохранённая роль относится к другому рынку; выберите её заново в аддоне")
+                    continue
+                if profile.client_family == "forever" and row.game_version and not row.game_version.startswith("1.60."):
+                    discovery_notes.append("Клиент не Forever: Retail/Classic тестируется только в отдельном тестовом рынке")
+                    continue
+                if not profile.realm_names and not row.market:
+                    discovery_notes.append("Обновите аддон и повторно выберите роль: старые роли без привязки к рынку не подтверждают имя релизного сервера")
+                    continue
+                rows.append(row)
             if not profile.realm_names and len({r.realm for r in rows})==1:
                 profile=self.catalog.save(profile.model_copy(update={"realm_names":[rows[0].realm]}))
             w=self.catalog.workspace(profile.id)
             clients=w.production.clients()
-            notes=[]
+            notes=discovery_notes
+            revoked = {d["id"] for d in self.devices() if d["revoked"]}
+            active = {identity for order in w.production.orders() if not order.get("closed") and not order.get("cancelled")
+                      for identity in (order["auctioneer_id"], order["crafter_id"])}
+            retired = []
+            # Owner approval of a new device may reclaim revoked, idle roles.
+            # History stays in the ledger/orders and the retired roster snapshot.
+            for old in list(clients):
+                reclaim = any((r.realm, r.character) == (old.realm, old.character) for r in rows if r.role != "unassigned")
+                replace_auctioneer = old.role == "auctioneer" and any(r.role == "auctioneer" for r in rows)
+                if old.remote_device in revoked and (reclaim or replace_auctioneer):
+                    if old.id in active:
+                        notes.append("Персонаж отозванного ПК занят активным заказом; сначала завершите заказ")
+                        continue
+                    clients.remove(old)
+                    retired.append(old.model_dump(mode="json"))
             for row in rows:
                 if row.realm not in profile.realm_names:
                     notes.append("Сервер персонажа не совпадает с выбранным рынком")
@@ -152,6 +183,10 @@ class PrivateBridge:
                 if clients:
                     w.production.save_clients(ClientRoster(clients=clients))
                     device["clients"]=[c.id for c in clients if c.remote_device==device["id"]]
+                    if retired:
+                        archive = w.production.directory / "retired_clients.json"
+                        history = json.loads(archive.read_text("utf-8")) if archive.exists() else []
+                        atomic_json(archive, history + retired)
             except ValueError as error:
                 notes.append(str(error))
             device.update(discovered=[r.model_dump(mode="json") for r in value.characters],notes=notes)

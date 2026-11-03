@@ -170,7 +170,7 @@ class CollectorClient:
             deadline = time.monotonic()+10
             try:
                 with httpx.Client(base_url=c.url, headers={"X-Collector-Key": c.token},
-                                  timeout=10, follow_redirects=False, trust_env=False, transport=self.transport) as http:
+                                  timeout=httpx.Timeout(60, connect=10, write=180), follow_redirects=False, trust_env=False, transport=self.transport) as http:
                     http.post("/v1/heartbeat").raise_for_status()
                     registry_response = http.get("/v1/auctioneers/registry")
                     registry_response.raise_for_status()

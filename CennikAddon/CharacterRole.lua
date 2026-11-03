@@ -6,6 +6,8 @@ function R:Capture(role)
   C.db.character_profiles=C.db.character_profiles or {}
   local key=GetRealmName() .. ":" .. UnitName("player")
   local previous=C.db.character_profiles[key] or {}
+  local market=C.db.server_binding and C.db.server_binding.market or C.db.current_market
+  if previous.market and previous.market~=market then previous={} end
   local assigned=CennikImport.production and CennikImport.production.client.role
   local chosen=role or previous.role or assigned or "unassigned"
   local professions=previous.professions or {}
@@ -24,7 +26,8 @@ function R:Capture(role)
     end
   end
   C.db.character_profiles[key]={character=UnitName("player"),realm=GetRealmName(),
-    faction=string.lower(UnitFactionGroup("player") or ""),role=chosen,professions=professions}
+    faction=string.lower(UnitFactionGroup("player") or ""),role=chosen,professions=professions,
+    market=market,game_version=GetBuildInfo and GetBuildInfo() or nil}
   return chosen
 end
 function R:Choose(role)

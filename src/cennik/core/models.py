@@ -66,6 +66,8 @@ class Item(Model):
     vendor_buy_copper: int | None = None
     binding: str | None = None
     source: str | None = None
+    observed_at: AwareDatetime | None = None
+    source_phase: str | None = None
 
 
 class PriceObservation(Model):
@@ -83,6 +85,9 @@ class PriceObservation(Model):
     source: str
     raw_id: str | None = None
     sha256: str | None = None
+    beta_baseline: bool = False
+    baseline_version: str | None = None
+    reference_market: str | None = None
 
 
 class RecipeInput(Model):
@@ -105,6 +110,8 @@ class Recipe(Model):
     raw_id: str | None = None
     source_retrieved_at: AwareDatetime | None = None
     source_generated_at: AwareDatetime | None = None
+    beta_baseline: bool = False
+    baseline_version: str | None = None
 
 
 class Opportunity(Model):

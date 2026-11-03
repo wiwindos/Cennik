@@ -38,6 +38,7 @@ from cennik.services.analytics import AnalyticsService
 from cennik.sources import Sources
 
 from .accounting import Accounting
+from .bootstrap import BootstrapCatalog, BootstrapProvider
 from .bulk import BulkChecks
 from .data import MarketDatabase, WorkspaceProvider, atomic_bytes, now
 from .development import DevelopmentProvider, coverage_report
@@ -68,11 +69,13 @@ class Workspace:
         self.server_mode = server_mode
         self.updates_guard: Callable[[], None] | None = None
         self.market_binding: dict | None = None
+        self.resolve_realm_names = None
         self.root = root.resolve()
         self.sources = sources or Sources(self.root)
         self.source_reports = SourceReports(self)
         self.source_updates = SourceUpdates(self)
         self.local_recipes = LocalRecipes(self.root, market_key)
+        self.bootstrap = BootstrapCatalog(self.root)
         self.market = MarketDatabase(self.root, market_key=market_key, market_info=market_info)
         marker = self.root / "workspace.json"
         if not marker.exists():
@@ -119,6 +122,9 @@ class Workspace:
         self.stop = threading.Event()
         self.future: Future | None = None
         self.queue_lock = threading.Lock()
+        self.recalculate_pending = threading.Event()
+        self.analytics.settings_changed = self.request_calculation
+        self.analytics.config_reader = self.effective_config
         self.last_request = 0.0
         self.embargo = 0.0
         self.last_file: tuple[int, int] | None = None
@@ -146,11 +152,15 @@ class Workspace:
 
     def generation(self) -> str:
         clock = self.development_clock()
-        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + ":recipes:"+self.local_recipes.generation() + ":own:"+str(self.settings().own_data_only) + (":development:" + clock.isoformat() if clock else "")
+        self.bootstrap.snapshot()
+        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + ":recipes:"+self.local_recipes.generation() + ":own:"+str(self.settings().own_data_only) + ":beta:" + (self.bootstrap.sha256 if self.settings().use_beta_prices else "off") + (":development:" + clock.isoformat() if clock else "")
 
     def provider(self, path, market, as_of, *, data_as_of=None):
         own = self.settings().own_data_only
         provider = DevelopmentProvider(self.market, market, as_of, data_as_of) if data_as_of is not None and not own else WorkspaceProvider(self.market, market, as_of, own_data_only=own)
+        baseline = self.bootstrap.snapshot()
+        if baseline and self.settings().use_beta_prices and data_as_of is None:
+            provider = BootstrapProvider(provider, baseline, max_age=self.effective_config().max_price_age_seconds)
         return NpcReferenceProvider(provider, self.npc_references.snapshot(), data_as_of or as_of,
                                     self.npc_catalog.snapshot(), recipes=self.local_recipes)
 
@@ -171,6 +181,7 @@ class Workspace:
             raise RuntimeError("Включена работа без AHledger: используются собственные сканы и сохранённые справочники")
 
     def save_settings(self, value: WorkspaceSettings):
+        previous = self.settings()
         if self.server_mode and (value.game_root or value.account):
             raise ValueError("Путь игры настраивается в Cennik Worker на игровом ПК")
         if value.account and (not re.fullmatch(r'[^/\\:<>"|?*]+', value.account) or value.account in {".", ".."}):
@@ -196,7 +207,18 @@ class Workspace:
                 db.execute("INSERT OR REPLACE INTO workspace_settings VALUES(1,?)", [value.model_dump_json()])
         finally:
             self.analytics.lock.release()
+        if value != previous and hasattr(self, "recalculate_pending"):
+            self.request_calculation()
         return value
+
+    def request_calculation(self):
+        """Coalesce changes without losing one arriving during a running analysis."""
+        if self.settings().auto_recalculate:
+            self.recalculate_pending.set()
+
+    def calculate_pending(self):
+        self.recalculate_pending.clear()
+        return self.calculate()
 
     def submit(self, kind: str, callback, *, coalesce=False, defer=False) -> dict:
         with self.queue_lock:
@@ -306,7 +328,18 @@ class Workspace:
                 parsed = parse(spec, bytes(body))
                 if spec.dataset == "crafting" and parsed.data.get("recipes") == []:
                     raise RuntimeError("AHledger не вернул рецепты; прежний справочник сохранён")
+                if spec.dataset == "crafting":
+                    self.validate_recipe_update(spec, parsed)
                 changed = self.market.import_api(spec, parsed, bytes(body), response_headers)
+                if changed:
+                    self.request_calculation()
+                if spec.dataset == "crafting" and parsed.status == "COMPLETE":
+                    path = self.root / "references/release_recipes.json"
+                    accepted = json.loads(path.read_text("utf-8")) if path.exists() else {}
+                    accepted[spec.params.get("profession", "").casefold()] = {"checked_at": now(),
+                        "records": parsed.count, "build": parsed.data.get("build"), "version": parsed.data.get("version"),
+                        "content_sha256": hashlib.sha256(bytes(body)).hexdigest()}
+                    atomic_bytes(path, dumps(accepted).encode())
                 with self.store.connection() as db:
                     db.execute("INSERT OR REPLACE INTO source_cache VALUES(?,?,?,?,?,?,?)", [key,
                         zstd.ZstdCompressor().compress(bytes(body)), dumps(response_headers), cache_expiry(response_headers), now(),
@@ -320,6 +353,27 @@ class Workspace:
                     raise RuntimeError("Ошибка сети AHledger: " + type(error).__name__) from error
                 self.embargo = time.monotonic() + 2 ** (attempt + 1)
         raise RuntimeError("Не удалось получить ответ")
+
+    def validate_recipe_update(self, spec, parsed):
+        data = parsed.data
+        build = data.get("build")
+        if build and not re.fullmatch(r"1\.60\.\d+\.\d+", str(build)):
+            raise ValueError("Рецепты относятся к несовместимой сборке игры")
+        if data.get("game") not in {None, "forever"}:
+            raise ValueError("Рецепты относятся к другой игре")
+        profession = spec.params.get("profession", "").casefold()
+        baseline = self.bootstrap.snapshot()
+        prior_count = sum((r.profession or "").casefold() == profession for r in baseline.recipes) if baseline else 0
+        previous = self.market.rows("SELECT record_count FROM dataset_metadata WHERE dataset='crafting' AND json_extract_string(params_json,'$.profession')=? ORDER BY retrieved_at DESC LIMIT 1", [spec.params.get("profession")])
+        prior_count = max(prior_count, previous[0]["record_count"] or 0 if previous else 0)
+        if prior_count and parsed.count < prior_count / 2:
+            raise ValueError("AHL вернул существенно сокращённый набор рецептов; прежние сохранены")
+        for row in data.get("recipes", []):
+            result, reagents = row.get("result", {}), row.get("reagents", [])
+            if (any(type(result.get(key)) is not int or result[key] <= 0 for key in ("id", "qtyMin", "qtyMax"))
+                or result["qtyMax"] < result["qtyMin"] or not reagents
+                or any(type(r.get("id")) is not int or r["id"] <= 0 or type(r.get("qty")) is not int or r["qty"] <= 0 for r in reagents)):
+                raise ValueError("AHL вернул рецепт с неполным составом или выходом; прежние сохранены")
 
     def refresh(self, request: RefreshRequest):
         self.require_live_updates()
@@ -354,8 +408,12 @@ class Workspace:
 
     def import_scans(self, scans: list[dict]):
         result = [self.market.import_scan(scan) for scan in scans]
-        if self.settings().auto_recalculate and any(not row["reused"] and not row.get("archived_only") for row in result):
-            self.calculate()
+        if self.settings().auto_recalculate and any(not row["reused"] and row.get("complete") for row in result):
+            try:
+                self.calculate()
+            except ValueError:
+                # A durable scan ACK does not depend on successful analytics.
+                self.log.exception("Scan stored; calculation failed independently")
         return result
 
     def effective_config(self):
@@ -367,6 +425,7 @@ class Workspace:
         return config
 
     def calculate(self):
+        self.recalculate_pending.clear()
         config = self.effective_config()
         result = self.analytics.start(background=False, config_override=config)
         latest = self.store.latest(self.market_key, summary=True)
@@ -389,6 +448,7 @@ class Workspace:
             except Exception:
                 self.market.db.execute("ROLLBACK")
                 raise
+        self.request_calculation()
         return payload
 
     def game_paths(self):
@@ -502,7 +562,7 @@ class Workspace:
             self.log.warning("Bulk report retained without acknowledgement: %s", error)
         results = self.import_scans(scans) if include_scans else []
         if (npc_prices["updated"] or local_recipes["updated"]) and self.settings().auto_recalculate and not any(not r["reused"] for r in results):
-            self.calculate()
+            self.request_calculation()
         sniper_ack = self.sniper.accept_game(data.get("sniper") or {})
         recipe_requests = self.sniper.pending_recipe_requests()
         recipe_error = None
@@ -586,17 +646,27 @@ class Workspace:
                 "source_updates": self.source_updates.status(), "upstreams": self.sources.public(),
                 "source_changes": self.source_reports.overview(),
                 "observed_recipes": len(self.local_recipes.document()),
+                "bootstrap": self.bootstrap.metadata(),
                 "npc_reference_prices": len(self.npc_references.snapshot()),
                 "npc_catalog": self.npc_catalog.snapshot().metadata(),
                 "bulk_checks": {"format_version": 1, "max_candidates": 200, "max_unique_items": 200},
                 "npc_database_prices": self.market.rows("SELECT count(*) n FROM items WHERE vendor_buy_copper>0")[0]["n"],
                 "archive": {**scans, "retention": "permanent"}, "jobs": self.jobs(),
-                "generation": self.analytics.generation(), "analytics": self.analytics.status(),
+                "generation": self.analytics.generation(), "analytics": {**self.analytics.status(),
+                    "automatic_recalculation": self.settings().auto_recalculate},
                 "disenchant_rules": self.analytics.disenchant.snapshot().metadata(),
+                "disenchant_check": self.disenchant_check_status(),
                 "settings": self.settings().model_dump(mode="json"), "attribution": "Prices from https://ahledger.com"}
+
+    def disenchant_check_status(self):
+        path = self.root / "references/disenchant/last-check.json"
+        return json.loads(path.read_text("utf-8")) if path.exists() else {
+            "rules_updated": False, "full_catalog_verified": False, "compared_rows": 0,
+            "note": "Модель фиксирована. Проверяем доступную выборку AHL; FYI используется только для NPC-цен."}
 
     def check_disenchant_rules(self):
         """A bounded comparison only: never imports market prices or overwrites rules."""
+        self.require_live_updates()
         directory = self.root / "references/disenchant"
         cache = directory / "api-check-cache.json"
         saved = json.loads(cache.read_text("utf-8")) if cache.exists() else None
@@ -873,6 +943,9 @@ class Workspace:
                         if self.last_file != (stat.st_size, stat.st_mtime_ns):
                             self.submit("sync", self.synchronize)
                             continue
+                if self.recalculate_pending.is_set() and settings.auto_recalculate:
+                    self.submit("analytics", self.calculate_pending)
+                    continue
                 if self.collectors.due():
                     self.submit("collector_delivery", self.deliver_collectors)
                     continue
@@ -919,7 +992,7 @@ class Workspace:
                     with sqlite3.connect(destination / "state.sqlite") as target_db:
                         source.backup(target_db)
                 count = 2
-                for directory in (self.root / "archive", self.root / "bridge", self.root / "references", self.root / "bulk_checks", self.root / "accounting", self.root / "production", self.root / "collectors"):
+                for directory in (self.root / name for name in ("archive", "bridge", "references", "bulk_checks", "accounting", "production", "collectors", "profession_leveling", "source_reports", "bootstrap")):
                     if not directory.exists():
                         continue
                     for path in directory.rglob("*"):

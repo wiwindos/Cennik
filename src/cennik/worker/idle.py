@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -138,6 +139,7 @@ class IdleProbe:
         )
         self.backend = backend
         self.last = time.monotonic()
+        self.interval = random.uniform(150, 400)
         self.message = "Прыжок в фоновом окне выключен"
         self.lock = threading.RLock()
 
@@ -159,6 +161,7 @@ class IdleProbe:
             self.settings = {"target": target, "enabled": bool(enabled)}
             atomic_json(self.path, self.settings)
             self.last = time.monotonic()
+            self.interval = random.uniform(150, 400)
 
     def disable(self):
         with self.lock:
@@ -170,14 +173,15 @@ class IdleProbe:
         with self.lock:
             if paused or not self.settings.get("target") or not (test or self.settings["enabled"]):
                 return False
-            if not test and time.monotonic() - self.last < 180:
+            if not test and time.monotonic() - self.last < self.interval:
                 return False
-            self.last = time.monotonic()
             try:
                 if not self.engine().ready(self.settings["target"]):
                     self.message = "Space: пауза — окно недоступно, активно или нажата клавиша Shift/Ctrl/Alt"
                     return False
                 self.engine().jump(self.settings["target"])
+                self.last = time.monotonic()
+                self.interval = random.uniform(150, 400)
                 self.message = "Space отправлен в выбранное фоновое окно"
                 return True
             except (ValueError, OSError):

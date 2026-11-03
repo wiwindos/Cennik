@@ -43,6 +43,8 @@ def test_pairing_needs_owner_and_discovers_two_accounts_without_manual_names(ser
                     "role": role,
                     "character": name,
                     "realm": "FixtureRealm",
+                    "market": profile.market,
+                    "game_version": "1.60.1",
                     "faction": "alliance",
                     "professions": [] if role == "auctioneer" else ["Tailoring"],
                 }

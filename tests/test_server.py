@@ -295,6 +295,7 @@ def test_catalog_binding_in_addon_selects_eu_and_refuses_ambiguous_servers(serve
     app, _, p = server
     w = app.state.catalog.workspace(p.id)
     lua = accounting_lua(w, collector_only=True)
+    lua.execute("GetBuildInfo=function() return '1.60.1','fixture' end")
     catalog = app.state.collectors.market_catalog()
     lua.execute("CennikImport.market_collector={workspace_id='catalog',auto_scan=true};CennikImport.market_catalog="+lua_literal(catalog)+";Cennik:Initialize()")
     assert lua.eval("Cennik.db.current_market") == p.market

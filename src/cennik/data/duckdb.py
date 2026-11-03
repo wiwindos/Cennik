@@ -108,7 +108,7 @@ class DuckDBProvider:
 
     def items(self) -> dict[int, Item]:
         return {row["item_id"]: Item(**row) for row in self.rows("""SELECT item_id,name,
-            vendor_sell_copper,vendor_buy_copper,binding,origin_dataset AS source
+            vendor_sell_copper,vendor_buy_copper,binding,origin_dataset AS source,retrieved_at AS observed_at
             FROM items WHERE retrieved_at<=?""", [self.as_of])}
 
     def recipes(self) -> list[Recipe]:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import zstandard as zstd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from cennik.addon.api import addon_router
@@ -25,6 +25,7 @@ from .accounting import JournalRevision, LedgerEvent
 from .bulk import BulkCreate, BulkSelection
 from .leveling import LevelingPublish, LevelingQuery
 from .models import ImportRequest, ItemFacts, PlanRequest, RefreshRequest, WorkspaceSettings
+from .presentation import page
 from .production import ClientRoster, OrderCreate
 from .runtime import revision
 from .service import Workspace
@@ -78,8 +79,8 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     app.mount("/static", StaticFiles(directory=static), name="static")
 
     @app.get("/")
-    def index():
-        return FileResponse(static / "next.html")
+    def index(request: Request):
+        return page(static / "next.html", request)
 
     @app.get("/healthz")
     def health():
@@ -262,6 +263,7 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
             return workspace.npc_catalog.install(value)
         finally:
             workspace.analytics.lock.release()
+            workspace.request_calculation()
 
     @app.get("/api/v2/disenchant/rules/document")
     def disenchant_document():
@@ -279,6 +281,7 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
             return workspace.analytics.disenchant.install(value)
         finally:
             workspace.analytics.lock.release()
+            workspace.request_calculation()
 
     @app.post("/api/v2/disenchant/rules/check", status_code=202)
     def check_disenchant_rules():
@@ -334,14 +337,30 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     @app.get("/api/v2/items")
     def items(q: str = Query("", max_length=100), limit: int = Query(50, ge=1, le=200)):
         escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        return {"items": workspace.market.rows("SELECT item_id,name,vendor_sell_copper FROM items WHERE CAST(item_id AS VARCHAR)=? OR coalesce(name,'') ILIKE ? ESCAPE '\\' ORDER BY item_id LIMIT ?", [q, "%" + escaped + "%", limit])}
+        result = workspace.market.rows("SELECT item_id,name,vendor_sell_copper FROM items WHERE CAST(item_id AS VARCHAR)=? OR coalesce(name,'') ILIKE ? ESCAPE '\\' ORDER BY item_id LIMIT ?", [q, "%" + escaped + "%", limit])
+        baseline = workspace.bootstrap.snapshot()
+        known = {row["item_id"] for row in result}
+        if baseline:
+            for identity, value in baseline.items.items():
+                if len(result) >= limit:
+                    break
+                if identity not in known and (str(identity) == q or q.casefold() in (value.name or "").casefold()):
+                    result.append({"item_id": identity, "name": value.name, "vendor_sell_copper": value.vendor_sell_copper, "source": "beta"})
+        return {"items": result}
 
     @app.get("/api/v2/items/{item_id}")
     def item(item_id: int):
         if item_id <= 0:
             raise ValueError("Неверный ID")
-        return {"item_id": item_id, "item": workspace.market.rows("SELECT * FROM items WHERE item_id=?", [item_id]),
-                "observations": workspace.market.rows("SELECT * EXCLUDE(payload_json) FROM price_snapshots WHERE item_id=? QUALIFY row_number() OVER(PARTITION BY source ORDER BY observed_at DESC)=1", [item_id]),
+        facts = workspace.market.rows("SELECT * FROM items WHERE item_id=?", [item_id])
+        observations = workspace.market.rows("SELECT * EXCLUDE(payload_json) FROM price_snapshots WHERE item_id=? QUALIFY row_number() OVER(PARTITION BY source ORDER BY observed_at DESC)=1", [item_id])
+        baseline = workspace.bootstrap.snapshot()
+        if baseline and item_id in baseline.items:
+            if not facts:
+                facts = [{**baseline.item_facts.get(item_id, {}), **baseline.items[item_id].model_dump(), "origin_dataset": "beta"}]
+            if not observations and item_id in baseline.prices:
+                observations = [{**baseline.prices[item_id].model_dump(mode="json"), "source": "Бета · " + baseline.source_market, "beta_baseline": True}]
+        return {"item_id": item_id, "item": facts, "observations": observations,
                 "offers": workspace.market.rows("SELECT * FROM working_offers WHERE item_id=? ORDER BY buyout::DECIMAL(38,6)/quantity LIMIT 500", [item_id]),
                 "history": workspace.market.rows("SELECT observed_at,min_copper,median_copper,quantity,granularity FROM price_history WHERE item_id=? ORDER BY observed_at DESC LIMIT 100", [item_id]),
                 "recipes": workspace.sniper.recipes_for(item_id)}

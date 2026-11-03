@@ -1,6 +1,8 @@
 """Private full-feature server, owner portal and isolated collector endpoint."""
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,12 +15,14 @@ from pydantic import Field
 
 from cennik.collector.server import create_hub
 from cennik.core.models import Model
+from cennik.workspace.presentation import page
 from cennik.workspace.web import create_app as create_workspace_app
 
 from .auth import OwnerAuth
 from .bridge import DiscoverCharacters, ExchangeRequest, PrivateBridge, RegisterDevice
 from .catalog import Catalog, MarketProfile
 from .collectors import ServerCollectors
+from .hub_auth import verify_hub
 from .pairing import PairApprove, Pairing, PairPoll, PairStart
 
 
@@ -33,7 +37,10 @@ class CollectorInvite(Model):
     profile_id: str = Field(default="", pattern=r"^([a-f0-9]{32})?$")
 
 
-def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1:8770"):
+def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1:8770", hub_secret=None):
+    hub_secret = hub_secret if hub_secret is not None else os.environ.get("CENNIK_HUB_SECRET", "")
+    if hub_secret and len(hub_secret) < 32:
+        raise ValueError("CENNIK_HUB_SECRET должен содержать минимум 32 символа")
     address = urlparse(public_origin)
     if address.path.rstrip('/') or address.query or address.fragment or address.username or address.password or not address.hostname:
         raise ValueError("Нужен внешний адрес сервера без пути и параметров")
@@ -73,6 +80,7 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
             return
         w = catalog.workspace(profile.id)
         w.collectors = collectors.adapter(w, profile)
+        w.resolve_realm_names = lambda: catalog.resolve_realms(catalog.sources.markets()["items"])
         old_calculate = w.calculate
         def calculate():
             with analysis_slots:
@@ -84,6 +92,10 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
     @app.middleware("http")
     async def access(request: Request, call_next):
         path = request.url.path
+        hub = verify_hub(request, hub_secret)
+        hub_access = bool(hub and hub["access"] == "cennik")
+        if hub_access:
+            request.state.cennik_mount = "/cennik"
         pair_public = path in {"/pair/v1/start", "/pair/v1/poll", "/pair/v1/ack"}
         public = pair_public or path in {"/", "/login", "/healthz", "/auth/login"} or path.startswith("/static/") or path.startswith("/collect/")
         private_bridge = path.startswith("/bridge/v1/")
@@ -93,12 +105,12 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
             except HTTPException as error:
                 return JSONResponse({"detail": error.detail}, status_code=error.status_code)
         elif not public:
-            if not auth.authenticated(request):
+            if not hub_access and not auth.authenticated(request):
                 return JSONResponse({"detail": "Нужен вход владельца"}, status_code=401)
             request.state.cennik_owner = True
         origin = request.headers.get("origin")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not private_bridge and not pair_public and not path.startswith("/collect/"):
-            if origin != auth.origin and not request.headers.get("X-Owner-Key"):
+            if origin != auth.origin and not request.headers.get("X-Owner-Key") and not hub_access:
                 return JSONResponse({"detail": "Запрос должен исходить со страницы Cennik"}, status_code=403)
             if origin and origin != auth.origin:
                 return JSONResponse({"detail": "Другой источник страницы"}, status_code=403)
@@ -109,6 +121,8 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
                 if len(data) > 64_000_000:
                     return JSONResponse({"detail": "Запрос превышает 64 МБ"}, status_code=413)
             request._body = bytes(data)
+            if hub and hub.get("body_sha256") != hashlib.sha256(request._body).hexdigest():
+                return JSONResponse({"detail": "Подпись тела запроса хаба не совпадает"}, status_code=403)
         response = await call_next(request)
         response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"})
@@ -130,9 +144,9 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
 
     @app.get("/")
     def portal(request: Request):
-        if not auth.authenticated(request):
+        if not getattr(request.state, "cennik_mount", "") and not auth.authenticated(request):
             return RedirectResponse("/login", status_code=303)
-        return FileResponse(static / "server.html")
+        return page(static / "server.html", request)
 
     @app.get("/login")
     def login_page():
@@ -174,7 +188,9 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
 
     @app.get("/server/api/ahl/markets")
     def ahl_markets():
-        return catalog.sources.markets()
+        result = catalog.sources.markets()
+        catalog.resolve_realms(result["items"])
+        return result
 
     @app.post("/server/api/markets/{identity}/workers")
     def register_worker(identity: str, value: RegisterDevice):
@@ -182,7 +198,8 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
 
     @app.post("/pair/v1/start")
     def pair_start(value: PairStart, request: Request):
-        return pairing.start(value, request.client.host if request.client else "unknown")
+        hub = verify_hub(request, hub_secret)
+        return pairing.start(value, hub.get("address", "unknown") if hub else request.client.host if request.client else "unknown")
 
     @app.post("/pair/v1/poll")
     def pair_poll(value: PairPoll):

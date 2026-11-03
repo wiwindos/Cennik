@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--root", type=Path, default=Path("data/cennik-server"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770)
-    parser.add_argument("--origin", default="http://127.0.0.1:8770")
+    parser.add_argument("--origin", default=os.environ.get("CENNIK_PUBLIC_ORIGIN", "http://127.0.0.1:8770"))
     args = parser.parse_args()
     key = os.environ.get("CENNIK_OWNER_KEY", "")
     with exclusive_lock(args.root):

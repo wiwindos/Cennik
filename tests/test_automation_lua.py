@@ -113,5 +113,5 @@ def test_pausing_sniper_during_ready_does_not_restore_old_targets(workspace, tmp
       assert(next(Cennik.Automation.db.resume_rules)==nil)
       Cennik.Automation:Stop()
       Cennik.CollectorUI:ToggleMenu()
-      assert(Cennik.CollectorUI.menuButtons[9]:GetText()=='Автоцикл: статус')
+      assert(Cennik.CollectorUI.menuButtons[10]:GetText()=='Автоцикл: статус')
     """)

@@ -15,7 +15,7 @@ from cennik.addon.lua_data import Parser, lua_literal, read_saved_variables
 from cennik.collector.agent import CollectorAgent, addon_source, game_directory
 from cennik.collector.protocol import Connection
 from cennik.core.models import Model
-from cennik.markets import MarketBinding
+from cennik.markets import MarketBinding, neutral_market
 from cennik.workspace.install import install_addon
 
 from .automation import AuctionCycle
@@ -24,7 +24,20 @@ from .idle import IdleProbe
 FIELDS = {"device_id", "binding", "events", "market_scans", "npc_quotes", "collector_status", "server_binding",
     "collector_npc", "collector_recipes", "collector_transforms", "auctioneer_proposals", "sniper", "bulk_checks", "accounting", "production"}
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
+
+
+def scoped_saved(saved, market, realm, faction):
+    """Never relabel another market's retained raw scans or merchant quotes."""
+    clean = {k: v for k, v in saved.items() if k in FIELDS}
+    scans = saved.get("market_scans") or []
+    clean["market_scans"] = [s for s in scans if s.get("market") in {market, neutral_market(market)}
+        and s.get("realm", realm) == realm]
+    for field in ("npc_quotes", "collector_npc"):
+        if field in clean:
+            clean[field] = {k: v for k, v in clean[field].items()
+                if str(v.get("scope", "")).casefold() == (realm + "/" + faction).casefold()}
+    return clean, [s for s in scans if s not in clean["market_scans"]]
 
 
 def saved_batch(saved, stamp, previous):
@@ -54,7 +67,7 @@ def http_diagnostic(error):
         except (ValueError, AttributeError):
             detail = []
         allowed = {"body", "characters", "role", "character", "realm", "account", "faction",
-                   "professions", "client_id", "sequence", "saved", "secret"}
+                   "professions", "market", "game_version", "client_id", "sequence", "saved", "secret"}
         for item in detail[:10] if isinstance(detail, list) else []:
             loc = item.get("loc") if isinstance(item, dict) else None
             if isinstance(loc, list) and loc and all(
@@ -104,7 +117,7 @@ class WorkerAgent(CollectorAgent):
         if payload is not None and len(payload) > MAX_EXCHANGE_BYTES:
             raise ValueError("Пакет обмена превышает 60 МБ; исходные данные оставлены на ПК")
         with httpx.Client(base_url=c.url, headers={"X-Bridge-Key": c.token, "X-Cennik-Worker":"0.2"}, transport=self.client.transport,
-                          follow_redirects=False, trust_env=False, timeout=12) as http:
+                          follow_redirects=False, trust_env=False, timeout=httpx.Timeout(30, connect=10, write=180)) as http:
             response = http.request(method, path, content=payload,
                                     headers={"Content-Type": "application/json"} if payload is not None else None)
             response.raise_for_status()
@@ -269,7 +282,9 @@ class WorkerAgent(CollectorAgent):
             for profile in (data.get("character_profiles") or {}).values():
                 if not isinstance(profile,dict) or profile.get("role") not in {"auctioneer","crafter","unassigned"}:
                     continue
-                row={k:profile[k] for k in ("role","realm","character","faction","professions") if k in profile}
+                if profile.get("market") and profile["market"] != self.manifest["profile"]["market"]:
+                    continue
+                row={k:profile[k] for k in ("role","realm","character","faction","professions","market","game_version") if k in profile}
                 if isinstance(row.get("professions"), dict) and not row["professions"]:
                     row["professions"] = []
                 row["account"]=path.parents[1].name
@@ -282,7 +297,15 @@ class WorkerAgent(CollectorAgent):
                 if previous.get("stamp") == list(stamp):
                     self.seen[str(path)] = stamp
                 else:
-                    found[route["id"]] = ({k: v for k, v in data.items() if k in FIELDS}, stamp)
+                    cleaned, foreign = scoped_saved(data, self.manifest["profile"]["market"],
+                        route["realm"], self.manifest["profile"]["faction"])
+                    for old in foreign:
+                        digest = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()
+                        quarantine = self.root / "quarantine" / (digest + ".json")
+                        if not quarantine.exists():
+                            atomic_json(quarantine, {"reason": "foreign_market", "scan": old})
+                            quarantine.chmod(0o600)
+                    found[route["id"]] = (cleaned, stamp)
                     self.snapshot_sources[route["id"]] = str(path)
         if characters:
             values=sorted(characters.values(),key=lambda row:(row["role"]=="unassigned",row["realm"],row["character"]))[:30]
@@ -409,7 +432,7 @@ class WorkerAgent(CollectorAgent):
                 self.worker_error_code = "WORKER_KEY_REJECTED" if status in {401, 403} else "CHARACTER_DISCOVERY_INVALID" if status == 422 and self.error_details["operation"] == "character_discovery" else "PRIVATE_HTTP_ERROR"
                 if self.worker_error_code == "CHARACTER_DISCOVERY_INVALID":
                     fields = ", ".join(self.error_details["validation_fields"])
-                    self.worker_error = "Сервер отклонил сведения о персонажах (HTTP 422)" + (": " + fields if fields else "") + ". Обновите Worker; сохранения не удаляйте"
+                    self.worker_error = "Сервер отклонил сведения о персонажах (HTTP 422)" + (": " + fields if fields else "") + ". Обновите Worker и сервер; сохранения не удаляйте"
                 else:
                     self.worker_error = "Ключ рабочего клиента неверен или отозван. Для нового подключения оставьте поле ключа пустым и нажмите «Сохранить и установить аддон»" if status in {401, 403} else f"Сервер отклонил обмен (HTTP {status}). Данные сохранены; скопируйте отчёт поддержки"
                 self.next_tick = time.monotonic()+30
@@ -449,7 +472,8 @@ class WorkerAgent(CollectorAgent):
             "state": self.overview()["status"], "pending": self.overview()["pending"], "last_success": self.last_success,
             "error_code": self.worker_error_code or self.cycle.error_code or ("PRIVATE_EXCHANGE_FAILED" if self.worker_error or self.errors else ""),
             "error": self.worker_error, "details": self.error_details, "scan_progress": self.scan_progress,
-            "auction_cycle": self.cycle.report()}, ensure_ascii=False, indent=2)
+            "auction_cycle": self.cycle.report(),
+            "isolated_foreign_scans": sum(1 for _ in (self.root / "quarantine").glob("*.json"))}, ensure_ascii=False, indent=2)
 
     def cycle_tick(self):
         route = next((r for r in (self.manifest or {}).get("clients", []) if r["id"] == self.cycle.settings.get("client_id")), None)

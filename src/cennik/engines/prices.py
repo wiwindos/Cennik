@@ -66,6 +66,8 @@ class PriceEngine:
 
     def flags(self, price: PriceObservation) -> list[str]:
         result = ["aggregated_prices_no_executable_lot", "partial_coverage"]
+        if price.beta_baseline:
+            result.extend(["beta_baseline", "live_price_and_supply_unconfirmed"])
         if self.age(price) > self.config.max_price_age_seconds:
             result.append("stale_price")
         if price.quantity is None:
@@ -87,7 +89,7 @@ class PriceEngine:
     def usable(self, price: PriceObservation | None) -> str | None:
         if price is None or price.min_copper is None or price.min_copper <= 0:
             return "missing_positive_buy_price"
-        if self.age(price) > self.config.max_price_age_seconds:
+        if self.age(price) > self.config.max_price_age_seconds and not price.beta_baseline:
             return "stale_price"
         if price.quantity is not None and price.quantity <= 0:
             return "no_observed_supply"
@@ -100,11 +102,11 @@ class PriceEngine:
             flags = []
             if not value or not value.get("copper"):
                 flags.append("missing_source_reference")
-            elif (self.provider.as_of - value["observed_at"]).total_seconds() > self.config.max_price_age_seconds:
+            elif not value.get("beta_baseline") and (self.provider.as_of - value["observed_at"]).total_seconds() > self.config.max_price_age_seconds:
                 flags.append("stale_source_reference")
             return HistoricalReference(value["copper"] if value else None, None, None, None,
                 0, 0, 30, value["observed_at"] if value else None, ["source_aggregate"], flags,
-                "AHledger median30d; local stability checks not applied")
+                "Бета median30d; стартовый ориентир" if value and value.get("beta_baseline") else "AHledger median30d; local stability checks not applied")
         current = self.current.get(item_id)
         # Use complete prior UTC days. A current day's aggregate cannot be its own
         # historical baseline. Each covered day has equal weight, regardless of scans.

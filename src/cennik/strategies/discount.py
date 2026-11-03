@@ -36,7 +36,7 @@ class HistoricalDiscount:
             result.append(opportunity(context, self, price, reference.copper, price.min_copper,
                 profit, "potential_buy_then_resell",
                 f"Историческая медиана {reference.copper}; скидка {discount:.2f}%. При продаже по ориентиру после комиссии прибыль {profit} copper; продажа не подтверждена.",
-                flags=["historical_resale_price_unconfirmed"], included=["purchase", "auction_cut"],
+                flags=["historical_resale_price_unconfirmed"] + (["beta_historical_reference"] if reference.method.startswith("Бета") else []), included=["purchase", "auction_cut"],
                 excluded=["lost_deposits", "relisting_costs", "price_slippage"],
                 details={"history": asdict(reference), "discount_percent": str(discount),
                     "net_reference_copper": net, "auction_cut_copper": reference.copper - net,

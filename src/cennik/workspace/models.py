@@ -8,10 +8,12 @@ MARKET = "forever.pvp.alliance.us"
 
 
 class WorkspaceSettings(Model):
+    use_beta_prices: bool = True
     own_data_only: bool = False
     auto_references: bool = True
     auto_history: bool = True
     auto_fyi: bool = True
+    auto_disenchant_check: bool = False
     development_mode: bool = False
     development_as_of: AwareDatetime | None = None
     auto_scan: bool = True

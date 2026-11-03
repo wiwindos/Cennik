@@ -20,6 +20,11 @@ def opportunity(
     item = context.items.get(price.item_id)
     observed = observed_at or price.observed_at
     risks = sorted(set(context.prices.flags(price) + (flags or [])))
+    recipe = (details or {}).get("recipe") or {}
+    beta_recipe = recipe.get("beta_baseline") or any((step.get("recipe") or {}).get("beta_baseline") for step in (details or {}).get("steps", []))
+    if beta_recipe:
+        risks = sorted(set(risks + ["beta_recipe"]))
+        reason += " Рецепт из стартовой беты; состав и изученность проверяются в игре."
     if context.config.own_data_only:
         risks = sorted(set(risks + ["own_data_only", "liquidity_unknown"]))
     return Opportunity(

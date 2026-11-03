@@ -1004,7 +1004,7 @@ def test_new_auction_not_best_price_alerts_once_and_never_changes_selected_lot(e
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key)
       assert(Game.sounds==1 and s.overlay:IsShown())
       assert(s.alerts[r.definition.id].auction_id==123)
-      assert(s.overlay.finding:GetText():find('500c',1,true))
+      assert(s.findingNotice:find('500c',1,true))
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,false),key); assert(Game.sounds==1)
       s.overlay.latest.scripts.OnClick()
       assert(s.alerts[r.definition.id].auction_id==124 and s.overlay.buy:GetText()=='Купить 1 шт. за 500c')
@@ -1044,7 +1044,7 @@ def test_commodity_supply_change_is_not_claimed_as_new_auction(exchange):
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==1)
       Game.commodity[2589][1].quantity=90
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key)
-      assert(Game.sounds==2 and s.overlay.finding:GetText():find('Изменилось предложение товара',1,true))
+      assert(Game.sounds==2 and s.findingNotice:find('Изменилось предложение товара',1,true))
       s:AcceptRows(r,Cennik.Adapter:Results(2589,key,true),key); assert(Game.sounds==2)
     """)
 
@@ -1104,7 +1104,7 @@ def test_variant_baselines_and_batch_missing_do_not_replace_selected_auction(exc
       s:NextFinding(r); assert(s.alerts[r.definition.id].auction_id==124)
       local c=Cennik:Clone(a); c.itemLevel=2
       s:AcceptRows(r,row(c,125),c)
-      assert(Game.sounds==1 and s.alerts[r.definition.id].auction_id==124)
+      assert(Game.sounds==2 and s.alerts[r.definition.id].auction_id==124)
     """)
 
 

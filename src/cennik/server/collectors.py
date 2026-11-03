@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 
@@ -22,6 +23,20 @@ class ServerCollectors:
         self.hub.catalog_provider = self.market_catalog
         self.hub.on_accept = self.enqueue
         self.thread = threading.Thread(target=self.run, name="collector-forwarding", daemon=True)
+        self.log = logging.getLogger("cennik.forwarding")
+
+    def failure(self, path, message):
+        target = self.root / "failures" / path.name
+        previous = json.loads(target.read_text("utf-8")) if target.exists() else {}
+        attempts = previous.get("attempts", 0) + 1
+        atomic_json(target, {"record_id": path.stem, "attempts": attempts,
+            "error": message[:400], "at": int(time.time()),
+            "next_attempt": int(time.time()) + min(3600, 10 * 2 ** min(attempts, 8))})
+
+    def overview(self):
+        failures = [json.loads(p.read_text("utf-8")) for p in (self.root / "failures").glob("*.json")]
+        return {"pending": sum(1 for _ in (self.root / "pending").glob("*.json")),
+            "failed": len(failures), "errors": sorted(failures, key=lambda r: r["at"], reverse=True)[:20]}
 
     def market_catalog(self, member_id=None):
         profile_id = next((m.get("profile_id") for m in self.hub.members() if m["id"] == member_id), None) if member_id else None
@@ -41,7 +56,14 @@ class ServerCollectors:
 
     def run(self):
         while not self.stop.wait(2):
-            for path in sorted((self.root / "pending").glob("*.json"))[:20]:
+            processed = 0
+            for path in sorted((self.root / "pending").glob("*.json")):
+                failed = self.root / "failures" / path.name
+                if failed.exists() and json.loads(failed.read_text("utf-8")).get("next_attempt", 0) > time.time():
+                    continue
+                if processed >= 20:
+                    break
+                processed += 1
                 if self.stop.is_set():
                     break
                 try:
@@ -73,10 +95,14 @@ class ServerCollectors:
                                     w.collectors.registry()
                                     w.import_scans([{"format_version": 1, "scan_id": value.identity(), **value.data}])
                                 elif value.kind == "npc" and not value.data.get("blocked"):
-                                    w.npc_references.ingest({str(value.data["item_id"]): {**value.data,
+                                    changed = w.npc_references.ingest({str(value.data["item_id"]): {**value.data,
                                         "scope": value.data.get("realm", "")+"/"+profile.faction}})
+                                    if changed["updated"]:
+                                        w.request_calculation()
                                 elif value.kind == "recipe":
-                                    w.local_recipes.ingest({"recipes": {str(value.data["spell_id"]): value.data}})
+                                    changed = w.local_recipes.ingest({"recipes": {str(value.data["spell_id"]): value.data}})
+                                    if changed["updated"]:
+                                        w.request_calculation()
                                 # Recipes and transform observations remain raw evidence;
                                 # they never automatically replace reviewed reference rules.
                                 return {"forwarded": value.identity()}
@@ -90,12 +116,16 @@ class ServerCollectors:
                             if self.stop.is_set():
                                 return
                         if failure:
+                            self.failure(path, failure[0])
                             continue
                         result = {"state": "forwarded", "profile_id": profile.id}
                     atomic_json(self.root / "done" / path.name, {**receipt, **result})
                     path.unlink()
-                except Exception:
+                    failed.unlink(missing_ok=True)
+                except Exception as error:
                     # Keep the durable marker; a restart retries without losing raw data.
+                    self.log.exception("Collector forwarding failed: %s", path.stem)
+                    self.failure(path, type(error).__name__)
                     continue
 
 
@@ -122,8 +152,19 @@ class HubAdapter(CollectorClient):
 
     def registry(self):
         snapshot = self.server.registry()
-        atomic_json(self.root / "auctioneer_registry.json", snapshot)
+        if snapshot != super().registry():
+            atomic_json(self.root / "auctioneer_registry.json", snapshot)
         return snapshot
+
+    def due(self):
+        if time.monotonic() < self.next_attempt:
+            return False
+        pending = any((self.root / "outbox").glob("*.json"))
+        previous = super().registry()
+        current = self.server.registry()
+        changed = any(previous.get(k) != current.get(k) for k in ("version", "entries", "market_catalog"))
+        self.next_attempt = time.monotonic() + 30 if not pending and not changed else self.next_attempt
+        return pending or changed
 
     def capture(self, saved, label="Рабочий клиент"):
         # Private full-depth scans are already imported by the private pipeline,
@@ -134,6 +175,7 @@ class HubAdapter(CollectorClient):
         return result
 
     def flush(self, limit=20):
+        before = super().registry()
         sent = 0
         for path in sorted((self.root / "outbox").glob("*.json"))[:limit]:
             value = Observation.model_validate_json(path.read_text("utf-8"))
@@ -142,8 +184,12 @@ class HubAdapter(CollectorClient):
             path.unlink()
             sent += 1
         self.next_attempt = time.monotonic()+30
-        self.registry()
-        return {"sent": sent, "registry_changed": True, "pending": len(list((self.root / "outbox").glob("*.json")))}
+        after = self.registry()
+        changed = any(before.get(k) != after.get(k) for k in ("version", "entries", "market_catalog"))
+        return {"sent": sent, "registry_changed": changed, "pending": len(list((self.root / "outbox").glob("*.json")))}
+
+    def overview(self):
+        return {**super().overview(), "forwarding": self.server.overview()}
 
     def admin(self, method="GET", path="/v1/admin/members", body=None):
         hub = self.server.hub

@@ -4,6 +4,7 @@ import argparse
 import json
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--collector", type=Path)
+    parser.add_argument("--hub", action="store_true", help="Run through a separate real WIW Hub HTTP gateway")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--scan-rows", type=int, default=0, help="Also deliver one large synthetic snapshot"
@@ -37,7 +39,9 @@ def main():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     origin = f"http://127.0.0.1:{port}"
-    app = create_server(out / "server", "native-fixture-" + "x" * 40, public_origin=origin)
+    secret = "native-hub-fixture-" + "x" * 40
+    app = create_server(out / "server", "native-fixture-" + "x" * 40, public_origin=origin,
+        hub_secret=secret if args.hub else "")
     catalog = app.state.catalog
     profile = catalog.profiles()[0].model_copy(update={"realm_names": ["FixtureRealm"]})
     catalog.save(profile, source=True)
@@ -63,9 +67,22 @@ def main():
     )
     game = out / "game"
     (game / "Interface/AddOns/Auctionator").mkdir(parents=True)
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", proxy_headers=False)
-    )
+    backend_port = port
+    if args.hub:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            backend_port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=backend_port, log_level="warning", proxy_headers=False))
+    hub_server = hub_thread = None
+    if args.hub:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "funpayparsers"))
+        from marketwatch.app import create_app as hub_app
+        from marketwatch.config import Config
+        hub = hub_app(Config(db_path=out / "hub.sqlite3", environment="development", collect=False,
+            cennik_url=f"http://127.0.0.1:{backend_port}", cennik_secret=secret))
+        hub_server = uvicorn.Server(uvicorn.Config(hub, host="127.0.0.1", port=port, log_level="warning", proxy_headers=False))
+        hub_thread = threading.Thread(target=hub_server.run)
+        hub_thread.start()
     thread = threading.Thread(target=server.run)
     thread.start()
     try:
@@ -74,6 +91,12 @@ def main():
                 break
             time.sleep(0.05)
         assert server.started
+        if hub_server:
+            for _ in range(100):
+                if hub_server.started:
+                    break
+                time.sleep(.05)
+            assert hub_server.started
         agent = WorkerAgent(out / "worker")
         agent.configure(str(game), origin, device["token"])
         if args.cycle_config:
@@ -225,6 +248,15 @@ def main():
             (collector_game / "Interface/AddOns/Auctionator").mkdir(parents=True)
             collector = CollectorAgent(out / "collector")
             collector.configure(str(collector_game), origin + "/collect", invitation["token"])
+            if scans:
+                sample = {**scans[0], "scan_id": "collector:full:1", "count": 2, "reported_count": 2,
+                    "observed_at": int(time.time()), "data": ";".join(["2589:4:40:0:4:1"] * 2)}
+                collector_save = collector_game / "WTF/Account/collector/SavedVariables/CennikAddon.lua"
+                collector_save.parent.mkdir(parents=True)
+                collector_save.write_text("CennikAddonDB=" + lua_literal({"market_scans": [sample],
+                    "server_binding": profile.public(), "binding": {"realm": "FixtureRealm"},
+                    "collector_status": {"collector_id": "native-collector", "current": {"code": "READY", "at": int(time.time())},
+                        "scans": 1, "rows": 2}}), "utf-8")
             cresult = out / "collector-result.json"
             subprocess.run(
                 [
@@ -240,6 +272,9 @@ def main():
             value = json.loads(cresult.read_text("utf-8"))
             assert value["frozen"] and value["tray_visible"] and not value["sql_loaded"]
             assert collector.client.registry()["market_catalog"][0]["id"] == profile.id
+            if scans:
+                member = next(m for m in app.state.hub.members() if m["id"] == invitation["id"])
+                assert member["counts"]["full_scans"] == 1 and member["counts"]["rows"] == 2
         print(
             json.dumps(
                 {
@@ -249,10 +284,14 @@ def main():
                     "addressed_routes": 2,
                     "full_scan_rows": args.scan_rows,
                     "local_sql": False,
+                    "separate_hub_gateway": args.hub,
                 }
             )
         )
     finally:
+        if hub_server:
+            hub_server.should_exit = True
+            hub_thread.join(timeout=30)
         server.should_exit = True
         thread.join(timeout=30)
 

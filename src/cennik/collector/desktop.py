@@ -430,7 +430,7 @@ class CollectorWindow:
             choice.current(0)
         enabled = tk.BooleanVar(value=helper.settings.get("enabled", False))
         ttk.Checkbutton(
-            frame, text="Отправлять Space примерно раз в 3 минуты", variable=enabled
+            frame, text="Отправлять Space примерно со случайным интервалом 150–400 секунд", variable=enabled
         ).pack(anchor="w", pady=10)
         result = tk.StringVar(value=helper.message)
         ttk.Label(frame, textvariable=result, wraplength=565).pack(anchor="w")

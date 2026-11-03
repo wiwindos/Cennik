@@ -69,6 +69,8 @@ class AnalyticsService:
         self.thread: threading.Thread | None = None
         self._identity: tuple[int, int, int, int, str] | None = None
         self._performance: Performance | None = None
+        self.settings_changed: Callable[[], None] | None = None
+        self.config_reader = None
         try:
             with exclusive_lock(self.directory):
                 self.store.recover()
@@ -105,6 +107,8 @@ class AnalyticsService:
                 self.store.save_settings(settings)
         finally:
             self.lock.release()
+        if self.settings_changed:
+            self.settings_changed()
         return settings
 
     def start(self, *, background: bool = True, as_of: datetime | None = None, config_override=None) -> dict:
@@ -117,6 +121,8 @@ class AnalyticsService:
             # The lock proves an abandoned 'running' record has no live owner.
             self.store.recover()
             settings = self.store.settings()
+            if self.config_reader:
+                settings.config = self.config_reader()
             if config_override is not None:
                 settings.config = config_override
             settings.config = self.registry.normalize_config(settings.config)
@@ -246,6 +252,8 @@ class AnalyticsService:
 
     def status(self) -> dict:
         settings = self.store.settings()
+        if self.config_reader:
+            settings.config = self.config_reader()
         generation, error, observed = None, None, None
         ready = False
         try:
@@ -269,9 +277,11 @@ class AnalyticsService:
         development_at = self.development_clock() if self.development_clock else None
         evaluation_at = development_at or datetime.now(UTC)
         age = max(0, int((evaluation_at - observed).total_seconds())) if observed else None
+        beta = bool(published and published.diagnostics.get("quality", {}).get("beta_baseline", {}).get("price_items"))
         return {"ready": ready, "active_market": settings.active_market, "generation": generation,
                 "observed_at": observed, "data_age_seconds": age,
                 "observation_stale": age is not None and age > settings.config.max_price_age_seconds,
+                "beta_baseline_active": beta,
                 "development_mode": development_at is not None, "evaluation_at": evaluation_at,
                 "running": self.lock.locked() or (latest is not None and latest.status == "running"),
                 "progress": self._performance.snapshot() if self._performance else None,

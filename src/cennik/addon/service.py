@@ -57,7 +57,7 @@ class AddonExchange:
                     "strategy_versions_match",
                 )
             )
-            or status["observation_stale"]
+            or status["observation_stale"] and not status.get("beta_baseline_active")
         ):
             raise ExchangeConflict(
                 "Расчёт устарел или не соответствует базе/настройкам. Выполните ручной пересчёт и обновите данные, если цены устарели."
