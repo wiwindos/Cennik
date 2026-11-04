@@ -156,6 +156,7 @@ def main():
                 {
                     "format_version": 1,
                     "scan_id": "native:large:1",
+                    "locale": "ruRU",
                     "market": profile.market,
                     "realm": "FixtureRealm",
                     "observed_at": int(time.time()),
@@ -163,7 +164,7 @@ def main():
                     "count": args.scan_rows,
                     "reported_count": args.scan_rows,
                     "data": ";".join(["2589:4:40:0:4:1:0"] * args.scan_rows),
-                    "variants": [{"name": "Fixture", "link": "item:2589:0:0:0", "divisible": True}],
+                    "variants": [{"name": "Льняная ткань", "base_name": "Льняная ткань", "link": "item:2589:0:0:0", "divisible": True}],
                     "auction_context": {
                         "scope_id": npc.scope_id(),
                         "revision": 1,
@@ -238,6 +239,7 @@ def main():
         )
         if scans:
             assert w.market.rows("SELECT count(*) n FROM working_offers")[0]["n"] == args.scan_rows
+            assert w.market.names.document()["names"]["item"]["2589"]["ruRU"] == "Льняная ткань"
             assert payload["routes"]["FixtureRealm:FixturePlayer"]["acknowledged_scan_ids"] == [
                 "native:large:1"
             ]
@@ -250,7 +252,8 @@ def main():
             collector.configure(str(collector_game), origin + "/collect", invitation["token"])
             if scans:
                 sample = {**scans[0], "scan_id": "collector:full:1", "count": 2, "reported_count": 2,
-                    "observed_at": int(time.time()), "data": ";".join(["2589:4:40:0:4:1"] * 2)}
+                    "observed_at": int(time.time()), "data": ";".join(["2589:4:40:0:4:1"] * 2), "locale": "enUS",
+                    "variants": [{"name": "Linen Cloth", "base_name": "Linen Cloth", "link": "item:2589:0:0:0", "divisible": True}]}
                 collector_save = collector_game / "WTF/Account/collector/SavedVariables/CennikAddon.lua"
                 collector_save.parent.mkdir(parents=True)
                 collector_save.write_text("CennikAddonDB=" + lua_literal({"market_scans": [sample],
@@ -275,6 +278,12 @@ def main():
             if scans:
                 member = next(m for m in app.state.hub.members() if m["id"] == invitation["id"])
                 assert member["counts"]["full_scans"] == 1 and member["counts"]["rows"] == 2
+                for _ in range(100):
+                    names = w.market.names.document()["names"]["item"]["2589"]
+                    if names.get("enUS") == "Linen Cloth":
+                        break
+                    time.sleep(.1)
+                assert names == {"ruRU": "Льняная ткань", "enUS": "Linen Cloth"}
         print(
             json.dumps(
                 {

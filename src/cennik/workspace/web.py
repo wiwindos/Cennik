@@ -91,6 +91,11 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     def overview():
         return workspace.overview()
 
+    @app.get("/api/v2/game-names")
+    def game_names(revision: str | None = Query(None, max_length=30)):
+        workspace.market.names.seed(workspace.bootstrap.snapshot())
+        return workspace.market.names.document(revision)
+
     @app.get("/api/v2/production")
     def production():
         return workspace.production.overview()
@@ -336,15 +341,23 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
 
     @app.get("/api/v2/items")
     def items(q: str = Query("", max_length=100), limit: int = Query(50, ge=1, le=200)):
+        workspace.market.names.seed(workspace.bootstrap.snapshot())
+        translated = workspace.market.names.search(q, limit) if q else []
         escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         result = workspace.market.rows("SELECT item_id,name,vendor_sell_copper FROM items WHERE CAST(item_id AS VARCHAR)=? OR coalesce(name,'') ILIKE ? ESCAPE '\\' ORDER BY item_id LIMIT ?", [q, "%" + escaped + "%", limit])
         baseline = workspace.bootstrap.snapshot()
         known = {row["item_id"] for row in result}
+        if translated:
+            extra = workspace.market.rows("SELECT item_id,name,vendor_sell_copper FROM items WHERE item_id IN (SELECT unnest(?)) ORDER BY item_id", [translated])
+            for row in extra:
+                if row["item_id"] not in known and len(result) < limit:
+                    result.append(row)
+                    known.add(row["item_id"])
         if baseline:
             for identity, value in baseline.items.items():
                 if len(result) >= limit:
                     break
-                if identity not in known and (str(identity) == q or q.casefold() in (value.name or "").casefold()):
+                if identity not in known and (identity in translated or str(identity) == q or q.casefold() in (value.name or "").casefold()):
                     result.append({"item_id": identity, "name": value.name, "vendor_sell_copper": value.vendor_sell_copper, "source": "beta"})
         return {"items": result}
 

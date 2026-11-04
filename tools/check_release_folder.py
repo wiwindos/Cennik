@@ -45,15 +45,16 @@ def check(folder):
         first_target = hub/"marketwatch/config.py"
         before = first_target.read_bytes()
         first_target.write_bytes(before+b"\n# unrelated production change\n")
+        conflict_files = {p.relative_to(hub).as_posix(): p.read_bytes() for p in hub.rglob("*") if p.is_file()}
         try:
             installer.apply(package, hub)
         except ValueError:
             pass
         else:
             raise AssertionError("Installer overwrote different hub version")
-        assert not (hub/"marketwatch/cennik.py").exists(), "Preflight wrote some files"
+        assert {p.relative_to(hub).as_posix(): p.read_bytes() for p in hub.rglob("*") if p.is_file()} == conflict_files, "Preflight wrote some files"
         first_target.write_bytes(before)
-        assert installer.apply(package, hub)["changed"] == len(changes)
+        assert installer.apply(package, hub)["changed"] == sum(row["before"] != row["after"] for row in changes.values())
         assert installer.apply(package, hub)["changed"] == 0
         assert (hub/".env").read_text() == "PRIVATE_SENTINEL=preserved\n"
         script = r'''

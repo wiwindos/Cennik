@@ -30,7 +30,7 @@ function A:Read()
   if x~=x or y~=y or x<0 or x>1 or y<0 or y>1 then return end
   local info=C_Map.GetMapInfo and safe(C_Map.GetMapInfo,map)
   local build=GetBuildInfo and select(2,GetBuildInfo())
-  return {npc_id=npc,npc_name=name,realm=GetRealmName(),map_id=map,map_name=info and info.name or "",
+  return {npc_id=npc,npc_name=name,realm=GetRealmName(),map_id=map,map_name=info and info.name or "",locale=C:ClientLocale(),
     server_id=C.db.server_binding and C.db.server_binding.id or "",market=C.db.server_binding and C.db.server_binding.market or "",
     x=math.floor(x*1000+.5)/10,y=math.floor(y*1000+.5)/10,observed_at=math.floor(C:Now()),build=tostring(build or "")}
 end

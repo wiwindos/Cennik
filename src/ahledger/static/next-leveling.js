@@ -9,7 +9,7 @@ window.CennikLeveling={
     const c=this.context,h=c.h,m=c.money,q=this.query;
     this.data=await c.api('/leveling');
     const profiles=this.data.profiles,profile=profiles.find(p=>p.id===q.profile_id);
-    const available=profile?Object.entries(profile.professions).map(([id,p])=>[id,p.name]):Object.entries(this.professions);
+    const available=profile?Object.entries(profile.professions).map(([id,p])=>[id,p.name]):Object.entries(this.professions).map(([id,name])=>[id,window.CennikNames?.profession(id)||name]);
     if(available.length&&!available.some(([id])=>id===q.profession))q.profession=available[0][0];
     const skill=profile?.professions[q.profession];
     const options=(empty)=>`<option value="">${empty}</option>`+profiles.map(p=>`<option value="${h(p.id)}" ${q.profile_id===p.id?'selected':''}>${h(p.character)} · ${h(p.realm)}</option>`).join('');

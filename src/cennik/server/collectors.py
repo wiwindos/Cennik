@@ -95,14 +95,18 @@ class ServerCollectors:
                                     w.collectors.registry()
                                     w.import_scans([{"format_version": 1, "scan_id": value.identity(), **value.data}])
                                 elif value.kind == "npc" and not value.data.get("blocked"):
+                                    w.market.names.npc(value.data)
                                     changed = w.npc_references.ingest({str(value.data["item_id"]): {**value.data,
                                         "scope": value.data.get("realm", "")+"/"+profile.faction}})
                                     if changed["updated"]:
                                         w.request_calculation()
                                 elif value.kind == "recipe":
+                                    w.market.names.recipe(value.data)
                                     changed = w.local_recipes.ingest({"recipes": {str(value.data["spell_id"]): value.data}})
                                     if changed["updated"]:
                                         w.request_calculation()
+                                elif value.kind == "auctioneer_proposal":
+                                    w.market.names.npc(value.data)
                                 # Recipes and transform observations remain raw evidence;
                                 # they never automatically replace reviewed reference rules.
                                 return {"forwarded": value.identity()}

@@ -87,6 +87,7 @@ class Workspace:
             store_path=self.root / "state.sqlite", generation_reader=self.generation,
             provider_factory=self.provider, development_clock=self.development_clock)
         self.store = self.analytics.store
+        self.market.names.seed(self.bootstrap.snapshot())
         with self.store.connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS workspace_settings(id INTEGER PRIMARY KEY,payload TEXT NOT NULL);
@@ -531,6 +532,7 @@ class Workspace:
             if not isinstance(scans, list):
                 raise ValueError("Неверная очередь снимков")
         npc_prices = self.npc_references.ingest(data.get("npc_quotes") or {})
+        self.market.names.saved(data)
         recipe_report = data.get("collector_recipes") or (data.get("production") or {}).get("recipes") or {}
         local_recipes = self.local_recipes.ingest(recipe_report)
         try:

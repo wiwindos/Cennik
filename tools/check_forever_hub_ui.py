@@ -42,6 +42,7 @@ def main():
     secret = 'hub-ui-fixture-'+'x'*40
     backend = create_server(args.output/'server', 'owner-ui-fixture-'+'x'*40, public_origin=origin, hub_secret=secret)
     workspace = backend.state.catalog.workspace(prepared['profile']['id'])
+    workspace.market.names.put([('item', 2589, 'Льняная ткань')], 'ruRU', stamp=time.time())
     workspace.save_settings(workspace.settings().model_copy(update={'auto_refresh': False, 'auto_fyi': False}))
     workspace.source_updates.ready_at = float('inf')
     workspace.recalculate_pending.clear()

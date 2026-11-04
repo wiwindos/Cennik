@@ -24,6 +24,7 @@ from cennik.data.duckdb import DuckDBProvider
 from cennik.markets import neutral_market
 
 from .models import MARKET
+from .names import GameNames
 
 
 def now() -> str:
@@ -46,6 +47,7 @@ class MarketDatabase:
         self.market_info = market_info or {}
         self.root, self.path = root, root / "market.duckdb"
         root.mkdir(parents=True, exist_ok=True)
+        self.names = GameNames(root)
         self.lock = threading.RLock()
         self.db = duckdb.connect(str(self.path), config={"memory_limit": "512MB", "threads": "2",
             "temp_directory": str(root / "temporary"), "preserve_insertion_order": "false"})
@@ -224,6 +226,7 @@ class MarketDatabase:
             except Exception:
                 self.db.execute("ROLLBACK")
                 raise
+        self.names.api(tables, observed.timestamp())
         return True
 
     def import_scan(self, scan: dict) -> dict:
@@ -251,6 +254,7 @@ class MarketDatabase:
                     atomic_bytes(marker, dumps({"scan_id": identity, "path": str(path.relative_to(self.root)), "scope": scope}).encode())
             return {"scan_id": identity, "complete": False, "archived_only": True, "auction_type": scope,
                     "rows": scan.get("count", 0), "warnings": ["Снимок сохранён отдельно и не меняет рабочие цены"], "reused": reused}
+        self.names.scan(scan)
         with self.lock:
             if self.db.execute("SELECT 1 FROM scan_registry WHERE scan_id=?", [identity]).fetchone():
                 return {"scan_id": identity, "reused": True}

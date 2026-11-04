@@ -49,6 +49,7 @@ function P:Capture(silent)
   C.db.profession_profiles=C.db.profession_profiles or {}
   local snapshot=C.db.profession_profiles[identity] or {format_version=1,character=character,realm=realm,professions={}}
   snapshot.observed_at=math.floor(C:Now())
+  snapshot.locale=C:ClientLocale()
   snapshot.disenchant=IsPlayerSpell and not not IsPlayerSpell(13262) or IsSpellKnown and not not IsSpellKnown(13262) or false
   self:Levels(snapshot)
   local state,count=nil,0
@@ -86,6 +87,7 @@ function P:Capture(silent)
           local previous=state.recipes[tostring(spell)]
           recipe.item_id,recipe.qty_min,recipe.qty_max,recipe.inputs=previous.item_id,previous.qty_min,previous.qty_max,previous.inputs
         end
+        C:RecipeNames(recipe)
         state.recipes[tostring(spell)]=recipe;count=count+1
       end
     end

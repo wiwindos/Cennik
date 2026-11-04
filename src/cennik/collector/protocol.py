@@ -25,6 +25,10 @@ ALLOWED = {
 }
 for _kind in ("npc", "recipe", "disenchant", "craft", "diagnostic"):
     ALLOWED[_kind] |= {"server_id", "market", "realm"}
+for _kind in ("scan", "npc", "recipe"):
+    ALLOWED[_kind].add("locale")
+ALLOWED["npc"].add("item_name")
+ALLOWED["recipe"] |= {"item_names", "item_name"}
 
 
 def canonical(data):
@@ -38,6 +42,14 @@ class Observation(Model):
 
     @model_validator(mode="after")
     def validate_data(self):
+        if self.data.get("locale") is not None and self.data["locale"] not in {"ruRU", "enUS", "enGB", "deDE", "frFR", "esES", "esMX", "ptBR", "itIT", "koKR", "zhCN", "zhTW"}:
+            raise ValueError("Неверный язык клиента")
+        for field in ("name", "item_name", "npc_name"):
+            if field in self.data and self.data[field] is not None and (not isinstance(self.data[field], str) or len(self.data[field]) > 300):
+                raise ValueError("Неверное название")
+        names = self.data.get("item_names", {})
+        if not isinstance(names, dict) or len(names) > 101 or any(not re.fullmatch(r"[1-9][0-9]{0,9}", str(k)) or not isinstance(v, str) or len(v) > 300 for k, v in names.items()):
+            raise ValueError("Неверный словарь реагентов")
         if "server_id" in self.data and not re.fullmatch(r"([a-f0-9]{32})?", str(self.data["server_id"])):
             raise ValueError("Неверный ID сервера")
         if self.kind != "auctioneer_proposal" and "market" in self.data and not valid_market(self.data["market"]):
@@ -64,9 +76,9 @@ class Observation(Model):
             if not isinstance(variants, list) or len(variants) > 300000:
                 raise ValueError("Неверные варианты скана")
             for v in variants:
-                if not isinstance(v, dict) or set(v)-{"link", "name", "divisible", "vendor_sell"}:
+                if not isinstance(v, dict) or set(v)-{"link", "name", "base_name", "divisible", "vendor_sell"}:
                     raise ValueError("Неверные поля варианта")
-                if any(v.get(k) is not None and (not isinstance(v[k], str) or len(v[k]) > n) for k, n in (("link", 1500), ("name", 300))):
+                if any(v.get(k) is not None and (not isinstance(v[k], str) or len(v[k]) > n) for k, n in (("link", 1500), ("name", 300), ("base_name", 300))):
                     raise ValueError("Неверное описание варианта")
                 if v.get("vendor_sell") is not None and (type(v["vendor_sell"]) is not int or not 0 <= v["vendor_sell"] <= 2**53-1):
                     raise ValueError("Неверная цена продажи NPC")

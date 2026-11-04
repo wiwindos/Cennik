@@ -17,6 +17,7 @@ from cennik.markets import MarketBinding, neutral_market, valid_market
 
 
 class AuctioneerProposal(Model):
+    locale: str | None = Field(default=None, max_length=10)
     server_id: str = Field(default="", pattern=r"^([a-f0-9]{32})?$")
     market: str = Field(default="", max_length=120)
     npc_id: int = Field(gt=0, le=2147483647, strict=True)
@@ -138,6 +139,10 @@ class AuctioneerRegistry:
         with self.lock:
             entries = [json.loads(p.read_text("utf-8")) for p in (self.root / "registry").glob("*.json")]
             public = [{k: v for k, v in e.items() if k != "history"} for e in entries if e["approved"]]
+            # Locale is observation evidence, not part of the execution registry.
+            # Keep the old registry contract readable by already distributed clients.
+            for entry in public:
+                entry["data"] = {k: v for k, v in entry["data"].items() if k != "locale"}
             public.sort(key=lambda e: e["scope_id"])
             return {"format_version": 1, "version": hashlib.sha256(json.dumps(public, sort_keys=True).encode()).hexdigest(), "entries": public}
 

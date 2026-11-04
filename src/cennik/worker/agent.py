@@ -24,7 +24,7 @@ from .idle import IdleProbe
 FIELDS = {"device_id", "binding", "events", "market_scans", "npc_quotes", "collector_status", "server_binding",
     "collector_npc", "collector_recipes", "collector_transforms", "auctioneer_proposals", "sniper", "bulk_checks", "accounting", "production"}
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 def scoped_saved(saved, market, realm, faction):

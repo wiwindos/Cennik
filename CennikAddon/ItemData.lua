@@ -1,6 +1,24 @@
 local _, C = ...
+function C:ClientLocale()
+  return GetLocale and GetLocale() or nil
+end
+function C:RecipeNames(value)
+  value.locale=self:ClientLocale();value.item_names={}
+  local get=C_Item and C_Item.GetItemInfo or GetItemInfo
+  if type(get)=="function" then
+    local function add(id)
+      if type(id)~="number" or id<=0 then return end
+      local name=get(id)
+      if name and name~="" then value.item_names[tostring(id)]=name end
+    end
+    add(value.item_id)
+    for _,line in ipairs(value.inputs or {}) do add(line.item_id) end
+    value.item_name=value.item_id and value.item_names[tostring(value.item_id)] or nil
+  end
+  return value
+end
 function C:ObservedModernRecipe(id,name)
-  local result={spell_id=id,name=name}
+  local result=self:RecipeNames({spell_id=id,name=name})
   if not (C_TradeSkillUI and C_TradeSkillUI.GetRecipeSchematic) then return result end
   local ok,s=pcall(C_TradeSkillUI.GetRecipeSchematic,id,false)
   if not ok or type(s)~="table" or s.isRecraft or not C:Integer(s.outputItemID)
@@ -15,7 +33,7 @@ function C:ObservedModernRecipe(id,name)
   end
   if #inputs==0 then return result end
   result.item_id=s.outputItemID;result.qty_min=s.quantityMin;result.qty_max=s.quantityMax;result.inputs=inputs
-  return result
+  return self:RecipeNames(result)
 end
 -- Client-local names/links are presentation only. Imported tasks and identities stay unchanged.
 local I = {pending={},failed={},timeout=15}
@@ -161,7 +179,7 @@ function N:Capture()
     if item and C:Integer(price,true) and C:Integer(quantity) and purchasable~=false and extended~=true then
       local itemInfo=C.Items:Read(item)
       C.db.npc_quotes[item]={batch_price_copper=price,batch_quantity=quantity,unit_price_copper=math.ceil(price/quantity),
-        available=available and available>=0 and available or nil,observed_at=C:Now(),scope=self:Scope(),source="Открытый торговец",name=itemInfo and itemInfo.name}
+        available=available and available>=0 and available or nil,observed_at=C:Now(),scope=self:Scope(),source="Открытый торговец",name=itemInfo and itemInfo.name,locale=C:ClientLocale()}
     elseif item then C.db.npc_quotes[item]={blocked=true,observed_at=C:Now(),scope=self:Scope()} end
     if item and C.CollectorStatus and C.CollectorStatus:IsEnabled() and C.db.npc_quotes[item]
       and C:MarketBindingMatches(C.db.collector and C.db.collector.market or C.db.current_market) then
@@ -173,6 +191,7 @@ function N:Capture()
         local quote=C.db.npc_quotes[item]
         C.db.collector_observation_sequence=(C.db.collector_observation_sequence or 0)+1
         C.db.collector_npc[key]={item_id=item,npc_id=npc,npc_name=npc and UnitName("npc") or nil,
+          locale=C:ClientLocale(),item_name=quote.name,
           observation_id=C.db.device_id .. ":observation:" .. C.db.collector_observation_sequence,
           map_id=C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player"),
           batch_price_copper=quote.batch_price_copper,batch_quantity=quote.batch_quantity,

@@ -8,7 +8,7 @@ local function stringBytes(value)
   return #text+escaped*5+2
 end
 local function variantBytes(v)
-  return stringBytes(v.link)+stringBytes(v.name)+128
+  return stringBytes(v.link)+stringBytes(v.name)+stringBytes(v.base_name)+128
 end
 function M:ScanBytes(scan)
   if scan.packed_bytes then return scan.packed_bytes end
@@ -141,7 +141,7 @@ function M:Pack()
           local keyInfo=C_AuctionHouse.GetItemKeyInfo(key)
           local get=C_Item and C_Item.GetItemInfo or GetItemInfo
           local facts=type(get)=="function" and {get(link or item)} or {}
-          p.variants[variant]={link=link,name=info[1] or facts[1],
+          p.variants[variant]={link=link,name=info[1] or facts[1],base_name=type(get)=="function" and get(item) or nil,
             divisible=keyInfo and keyInfo.isCommodity,vendor_sell=facts[11]}
           p.bytes=p.bytes+variantBytes(p.variants[variant])
         end
@@ -183,7 +183,7 @@ function M:Finish()
   local _,build=GetBuildInfo()
   local scan={format_version=1,scan_id=C.db.device_id .. ":market:" .. C:Now() .. ":" .. C.db.collector.sequence,
     market=self.auction_context and self.auction_context.auction_type=="neutral" and (C.db.collector.market or C.db.current_market):gsub("%.alliance%.",".neutral."):gsub("%.horde%.",".neutral.") or C.db.collector.market or C.db.current_market,
-    realm=GetRealmName(),faction=string.lower(UnitFactionGroup("player") or ""),
+    realm=GetRealmName(),faction=string.lower(UnitFactionGroup("player") or ""),locale=C:ClientLocale(),
     observed_at=p.observed_at,requested_at=self.requested_at,received_at=p.observed_at,build=build,
     count=rows,reported_count=p.count,skipped=p.skipped,full=not p.error and p.skipped==0 and rows==p.count,
     error=p.error,variants=p.variants,data=table.concat(p.chunks,";"),packed_bytes=(p.bytes or 0)+4096,workspace_id=C.db.collector.workspace_id,

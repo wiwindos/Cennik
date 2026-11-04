@@ -18,6 +18,19 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
   await page.getByRole('link',{name:'Открыть полный Cennik',exact:true}).click();
   await page.getByRole('heading',{name:'Возможности',exact:true}).waitFor();
   await page.locator('[data-opportunity]').first().waitFor();
+  assert.equal(await page.locator('#game-language').inputValue(),'ruRU');
+  const itemName=()=>page.evaluate(async id=>{const r=await fetch('/cennik/m/'+id+'/api/v2/items?q=2589');return(await r.json()).items[0].name;},profile);
+  assert.equal(await itemName(),'Льняная ткань');
+  await page.locator('#game-language').selectOption('enUS');
+  await page.waitForFunction(()=>window.CennikNames?.language==='enUS');
+  await page.locator('[data-opportunity]').first().waitFor();
+  assert.equal(await itemName(),'Linen Cloth');
+  await page.reload();await page.locator('[data-opportunity]').first().waitFor();
+  assert.equal(await page.locator('#game-language').inputValue(),'enUS');
+  await page.locator('#game-language').selectOption('ruRU');
+  await page.waitForFunction(()=>window.CennikNames?.language==='ruRU');
+  await page.locator('[data-opportunity]').first().waitFor();
+  assert.equal(await itemName(),'Льняная ткань');
   assert.match(await page.locator('.beta-notice').innerText(),/Расчёт по бета-ценам/);
   assert.match(await page.locator('.beta-notice').innerText(),/forever.pvp.alliance.us/);
   const mainPages=['opportunities','bulk','sniper','market','archive','execution','accounting','production','leveling','collectors','sources','settings'];
@@ -52,10 +65,16 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
   await page.waitForFunction(async id=>{const d=await(await fetch('/cennik/m/'+id+'/api/v2/overview')).json();return d.settings.own_data_only&&d.analytics.settings_match&&!d.analytics.running;},profile,{timeout:30000});
   const own=await page.evaluate(async id=>(await(await fetch('/cennik/m/'+id+'/api/v2/overview')).json()),profile);
   assert(own.analytics.opportunity_count>0&&own.analytics.beta_baseline_active);
+  await page.route('**/api/v2/game-names*',route=>route.abort());
+  await page.reload();await page.locator('[data-opportunity]').first().waitFor();
+  await page.locator('#game-language-status').filter({hasText:'Названия временно недоступны'}).waitFor();
+  await page.unroute('**/api/v2/game-names*');
+  await page.evaluate(()=>window.CennikNames.refresh(true));
+  assert(await page.locator('#game-language-status').isHidden());
   await page.getByRole('link',{name:'← WIW Hub',exact:true}).click();await page.locator('.module-card').first().waitFor();
   assert(await page.locator('body').evaluate(e=>e.classList.contains('light')));
   assert.deepEqual(errors,[]);
-  const result={hub_single_login:true,pages:mainPages,bulk_from_beta:true,own_mode_automatic_calculation:true,theme_shared:true,desktop_mobile:true,js_http_errors:errors};
+  const result={game_names_ru_en:true,language_persisted:true,hub_single_login:true,pages:mainPages,bulk_from_beta:true,own_mode_automatic_calculation:true,theme_shared:true,desktop_mobile:true,js_http_errors:errors};
   fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  }catch(e){await page.screenshot({path:path.join(out,'failure.png'),fullPage:true});console.error(errors);console.error(await page.locator('body').innerText());throw e;}
  finally{await browser.close();}

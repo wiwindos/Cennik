@@ -88,7 +88,7 @@ class CollectorClient:
             context["session_id"] = hashlib.sha256(str(context.get("session_id", "")).encode()).hexdigest()
             data["auction_context"] = context
         data["data"] = ";".join(":".join(row.split(":")[:6]) for row in scan.get("data", "").split(";") if row)
-        data["variants"] = [{k: v for k, v in variant.items() if k in {"link", "name", "divisible", "vendor_sell"}} for variant in scan.get("variants") or []]
+        data["variants"] = [{k: v for k, v in variant.items() if k in {"link", "name", "base_name", "divisible", "vendor_sell"}} for variant in scan.get("variants") or []]
         data["error"] = "SCAN_PARTIAL" if data.get("error") else None
         return data
 
@@ -136,6 +136,8 @@ class CollectorClient:
                 recipes = saved.get("collector_recipes") or {}
                 for raw in (recipes.get("recipes") or {}).values():
                     data = {**raw, "observed_at": raw.get("observed_at", recipes.get("observed_at")), "coverage": recipes.get("coverage")}
+                    if "locale" not in data and recipes.get("locale"):
+                        data["locale"] = recipes["locale"]
                     data["inputs"] = self.stock(raw.get("inputs"))
                     self.queue("recipe", {**data, **public_scope})
                 for event in saved.get("collector_transforms") or []:

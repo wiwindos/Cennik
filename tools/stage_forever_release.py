@@ -55,6 +55,8 @@ def stage(destination):
     quick = (ROOT/"docs/CENNIK_FOREVER_QUICKSTART.md").read_text("utf-8")
     (destination/"QUICKSTART.md").write_text(quick.replace("CENNIK_HUB_RELEASE.md", "DEPLOY.md").replace("CENNIK_FOREVER_VERIFIED.md", "VERIFIED.md"), "utf-8")
     copy(ROOT/"docs/CENNIK_FOREVER_VERIFIED.md", destination/"VERIFIED.md")
+    copy(ROOT/"docs/CENNIK_GAME_NAMES.md", destination/"GAME_NAMES.md")
+    copy(ROOT/"docs/CENNIK_CLIENT_QUICKSTART.md", destination/"CLIENT_QUICKSTART.md")
     copy(ROOT/"deploy/hub-cennik.env.example", destination/"hub-cennik.env.example")
     integration = destination/"hub-integration"
     changes, patch = {}, []
@@ -70,7 +72,7 @@ def stage(destination):
     (integration/"changes.json").write_text(json.dumps(changes, indent=2)+"\n", "utf-8")
     (integration/"hub-cennik.patch").write_text("".join(patch), "utf-8")
     copy(ROOT/"tools/apply_hub_cennik.py", integration/"apply.py")
-    for product, folder in (("CennikWorker", "worker-0.5.0"), ("CennikCollector", "collector-0.5.0")):
+    for product, folder in (("CennikWorker", "worker-0.6.0"), ("CennikCollector", "collector-0.6.0")):
         build = ROOT/"dist"/folder
         expected = (build/(product+".sha256")).read_text("ascii").split()[0]
         if sha((build/(product+".exe")).read_bytes()) != expected:
@@ -86,7 +88,7 @@ def stage(destination):
         else:
             copy(addon/name, target)
     release = {"format_version": 1, "prepared_at": datetime.now(UTC).isoformat(), "seed": manifest,
-        "worker_version": "0.5.0", "collector_version": "0.5.0", "addon_version": "0.21.0",
+        "worker_version": "0.6.0", "collector_version": "0.6.0", "addon_version": "0.22.0",
         "archive": False, "server_modified": False, "hub_access": "administrator or cennik grant",
         "excluded_legacy_entrypoints": sorted(LEGACY)}
     (destination/"RELEASE.json").write_text(json.dumps(release, ensure_ascii=False, indent=2)+"\n", "utf-8")

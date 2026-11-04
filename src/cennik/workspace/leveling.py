@@ -47,6 +47,9 @@ def digest(value):
 
 
 class CapturedRecipe(Model):
+    locale: str | None = Field(default=None, max_length=10)
+    item_name: str | None = Field(default=None, max_length=300)
+    item_names: dict[str, str] = Field(default_factory=dict, max_length=101)
     spell_id: int = Field(gt=0, strict=True)
     name: str = Field(default="", max_length=500)
     item_id: int | None = Field(default=None, gt=0)
@@ -77,6 +80,7 @@ class ProfessionState(Model):
 
 
 class ProfessionSnapshot(Model):
+    locale: str | None = Field(default=None, max_length=10)
     format_version: Literal[1] = 1
     character: str = Field(min_length=1, max_length=80)
     realm: str = Field(min_length=1, max_length=100)

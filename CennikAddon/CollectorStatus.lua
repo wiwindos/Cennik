@@ -143,6 +143,7 @@ function S:CaptureRecipes()
         local qmin,qmax
         if GetTradeSkillNumMade then qmin,qmax=GetTradeSkillNumMade(i) end
         r.recipes[tostring(spell)]={spell_id=spell,item_id=output and output.item_id,name=output and output.item_name,inputs=inputs,qty_min=qmin,qty_max=qmax,observed_at=r.observed_at}
+        C:RecipeNames(r.recipes[tostring(spell)])
       end
     end
   elseif C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs and C_TradeSkillUI.GetRecipeInfo then
