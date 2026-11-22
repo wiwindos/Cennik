@@ -32,6 +32,8 @@ class PriceEngine:
     def __init__(self, provider: MarketDataProvider, config: AnalyticsConfig,
                  measure: Callable[[str], AbstractContextManager] | None = None):
         self.provider, self.config = provider, config
+        self.price_gaps: dict[int, dict] = {}
+        self.price_gaps_truncated = False
         self.measure = measure or (lambda _: nullcontext())
         with self.measure("current_prices"):
             self.current = provider.current_prices()
@@ -86,7 +88,35 @@ class PriceEngine:
         result.extend(self._item_flags.get(price.item_id, ()))
         return sorted(set(result))
 
-    def usable(self, price: PriceObservation | None) -> str | None:
+    def price_gap(self, item_id, strategy, purpose, reason):
+        if type(item_id) is not int or item_id <= 0 or not reason:
+            return
+        if item_id not in self.price_gaps:
+            if len(self.price_gaps) >= 5000:
+                self.price_gaps_truncated = True
+                return
+            self.price_gaps[item_id] = {"reasons": set(), "uses": set()}
+        row = self.price_gaps[item_id]
+        row["reasons"].add(reason)
+        row["uses"].add((strategy, purpose))
+
+    def gap_report(self, items):
+        rows = []
+        for identity, gap in self.price_gaps.items():
+            item = items.get(identity)
+            rows.append({"item_id": identity, "name": item.name if item else str(identity),
+                "reasons": sorted(gap["reasons"]),
+                "uses": [{"strategy_id": strategy, "purpose": purpose} for strategy, purpose in sorted(gap["uses"])]})
+        rows.sort(key=lambda r: (not any(u["purpose"] in {"material", "disenchant_sale"} for u in r["uses"]), r["item_id"]))
+        return {"items": rows, "total": len(rows), "truncated": self.price_gaps_truncated}
+
+    def usable(self, price: PriceObservation | None, *, item_id=None, strategy="", purpose="") -> str | None:
+        reason = self._usable(price)
+        if reason and strategy:
+            self.price_gap(item_id or (price.item_id if price else None), strategy, purpose, reason)
+        return reason
+
+    def _usable(self, price: PriceObservation | None) -> str | None:
         if price is None or price.min_copper is None or price.min_copper <= 0:
             return "missing_positive_buy_price"
         if self.age(price) > self.config.max_price_age_seconds and not price.beta_baseline:

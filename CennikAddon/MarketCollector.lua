@@ -1,5 +1,5 @@
 local _, C = ...
-local M = {elapsed=0,interval=15*60,maxQueue=3,maxBytes=48000000,maxTotalBytes=128000000,maxRows=2000000,maxVariants=300000}
+local M = {elapsed=0,interval=15*60,responseTimeout=10*60,maxQueue=3,maxBytes=48000000,maxTotalBytes=128000000,maxRows=2000000,maxVariants=300000}
 C.MarketCollector=M
 
 local function stringBytes(value)
@@ -33,6 +33,8 @@ function M:Notice(message)
   if C.UI and C.UI.section=="Market" then C:Refresh() end
 end
 function M:Failed(code, detail, reported)
+  self.cacheOwner=nil;self.cacheRows=nil;self.response_received_at=nil;self.expected_count=nil
+  self.auctionatorStarting=nil
   C.db.collector.last_scan={full=false,count=0,reported_count=reported or 0,code=code,
     error=detail or (C.CollectorStatus.codes[code] or {})[2] or code}
   if C.CollectorStatus then C.CollectorStatus:Set(code,detail) end
@@ -44,11 +46,23 @@ function M:Reserve(bytes, includeCount)
     C.db.collector.rotated=(C.db.collector.rotated or 0)+1
   end
 end
+function M:SetAutoScan(enabled)
+  local state=C.db.collector
+  state.enabled=enabled==true
+  if self.preferenceKey then
+    state.auto_scan_choices=state.auto_scan_choices or {}
+    state.auto_scan_choices[self.preferenceKey]=state.enabled
+  end
+  if state.enabled and C.CollectorStatus and C.CollectorStatus.db then C.CollectorStatus.db.paused=false end
+  self:Notice(state.enabled and "Автоскан включён: запрос при открытом аукционе раз в 15 минут" or "Автоскан выключен. Сканы Auctionator и другие наблюдения продолжают собираться; для отправки выполните /reload")
+  if C.CollectorUI then C.CollectorUI:Refresh() end
+end
 function M:Initialize()
   C.db.market_scans=C.db.market_scans or {}
   C.db.collector=C.db.collector or {enabled=false,next_at=0,sequence=0}
   self.openedAt=C.Adapter:Open() and GetTime() or nil
   local imported=CennikImport or {}
+  self.preferenceKey=nil
   local ack={}
   for _,id in ipairs(imported.acknowledged_scan_ids or {}) do ack[id]=true end
   local pending={}
@@ -68,27 +82,85 @@ function M:Initialize()
       C.db.current_market=C.db.current_market or config.market
     end
   end
+  if imported.worker_discovery or imported.collector_only then
+    local character=UnitGUID and UnitGUID("player") or (C:RealmName() .. ":" .. C:CharacterName())
+    self.preferenceKey=tostring(C.db.collector.market) .. ":" .. character
+    C.db.collector.auto_scan_choices=C.db.collector.auto_scan_choices or {}
+    C.db.collector.enabled=C.db.collector.auto_scan_choices[self.preferenceKey]==true
+  end
   self:Notice("Снимков ожидает записи/подтверждения: " .. #pending)
+  local bus=Auctionator and Auctionator.EventBus
+  local events=Auctionator and Auctionator.FullScan and Auctionator.FullScan.Events
+  if not self.listening and bus and events and type(bus.Register)=="function" then
+    self.listening=true
+    self.completeEvent,self.failedEvent,self.progressEvent,self.startEvent=events.ScanComplete,events.ScanFailed,events.ScanProgress,events.ScanStart
+    local names={self.completeEvent,self.failedEvent}
+    if self.progressEvent then names[#names+1]=self.progressEvent end
+    if self.startEvent then names[#names+1]=self.startEvent end
+    bus:Register(self,names)
+  end
   if not self.hooked and C_AuctionHouse and C_AuctionHouse.ReplicateItems then
     self.hooked=true
     hooksecurefunc(C_AuctionHouse,"ReplicateItems",function()
       if not C.db or not C.db.collector then return end
+      local started=M.auctionatorStarting;M.auctionatorStarting=nil
       if not (C.CollectorStatus and C.CollectorStatus:IsEnabled()) and not M.ownRequest then return end
+      M.requestObserved=true
+      if M.packing then
+        C.db.collector.next_at=C:Now()+M.interval
+        if M.packing.source then
+          M.auctionatorStarting=nil
+          M:Notice("Другой полный запрос начался во время упаковки; завершаем предыдущий снимок из готового кэша")
+          return
+        end
+        M.packing.error="Другой полный запрос изменил API во время обработки; сохранена прочитанная часть"
+        M:Finish()
+      end
       local context=C.AuctionContext:Snapshot()
       if not context then
         if C.CollectorStatus then C.CollectorStatus:Set("AUCTION_CONTEXT_UNKNOWN") end
         return
       end
       M.auction_context=context
+      local scanner=Auctionator and Auctionator.State and Auctionator.State.FullScanFrameRef
+      M.cacheOwner=started==scanner and M:CanReuseScanner(scanner) and scanner.inProgress and scanner or nil
+      M.cacheRows=nil;M.response_received_at=nil;M.expected_count=nil
       C.db.collector.next_at=C:Now()+M.interval
       M.requested_at=C:Now()
-      if C.CollectorStatus then C.CollectorStatus:Set(M.ownRequest and "REQUESTED" or "SHARED_SCAN") end
+      M.emptyResponse=nil
+      M.requestCode=M.ownRequest and "REQUESTED" or "SHARED_SCAN"
+      if C.CollectorStatus then C.CollectorStatus:Set(M.requestCode) end
       M:Notice("Ожидание массового ответа сервера")
     end)
   end
 end
-function M:Available()
+function M:CanReuseScanner(scanner)
+  return self.listening and self.startEvent and self.progressEvent and scanner
+    and type(scanner.CacheScanData)=="function" and type(scanner.ProcessBatch)=="function"
+    and type(scanner.EndProcessing)=="function"
+end
+function M:ScannerCanStart(scanner)
+  if scanner.inProgress then return false end
+  local ok,ready=pcall(scanner.CanInitiate,scanner)
+  return ok and ready
+end
+function M:Available(manual)
+  manual=manual==true
+  if C.Automation and C.Automation.config and C.Automation.config.any_character and not C.Automation.config.client_id then return false,"Подключаем персонажа к Worker","BUSY" end
   if C.Automation and C.Automation.quiescing then return false,"Подготовка безопасного сохранения","BUSY" end
+  if manual and
+      (#(C.db.market_scans or {})>=self.maxQueue or self:QueuedBytes()+self.maxBytes>self.maxTotalBytes) then
+    return false,"Очередь снимков заполнена: сохраните данные через /reload, дождитесь отправки и загрузите подтверждение ещё одним /reload","QUEUE_FULL"
+  end
+  if C.Automation and C.Automation:IsActive() and not C.Automation:ScanCapacity() then
+    return false,"Автоцикл ждёт выгрузки накопленных сканов; новый запрос не заменяет ожидающие снимки","QUEUE_FULL"
+  end
+  if C.Automation and C.Automation:IsActive() and C.Sniper and (C.Sniper.manualHold or C.Sniper.foreignTab) then
+    return false,"Ручная операция AH: автоматический скан ожидает возврата в Cennik","BUSY"
+  end
+  if C.Automation and C.Automation:IsActive() and ((GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus()) or (InCombatLockdown and InCombatLockdown())) then
+    return false,"Автоматический скан ждёт завершения ввода текста или боя","BUSY"
+  end
   local state=C.db.collector
   if not state or not C:MarketBindingMatches(state.market or C.db.current_market) then return false,"Подтвердите рынок персонажа","UNBOUND" end
   if not C.Adapter:Open() then return false,"Откройте аукцион","WAIT_AUCTION" end
@@ -98,21 +170,93 @@ function M:Available()
   if C:Now()<(state.next_at or 0) then return false,"Следующий запрос через " .. math.ceil((state.next_at-C:Now())/60) .. " мин","COOLDOWN" end
   local scanner=Auctionator and Auctionator.State and Auctionator.State.FullScanFrameRef
   if not scanner or type(scanner.InitiateScan)~="function" or type(scanner.CanInitiate)~="function" then return false,"Auctionator не предоставляет совместимый полный скан","UNSUPPORTED" end
-  if not scanner:CanInitiate() or not C.Adapter:Ready("collector") then return false,"Auctionator ещё не готов к полному скану","BUSY" end
+  if manual and C_AuctionHouse and type(C_AuctionHouse.IsThrottledMessageSystemReady)=="function" and not C_AuctionHouse.IsThrottledMessageSystemReady() then return false,"Игровой сервер пока не разрешает запросы аукциона. Повторите позже; точное время ожидания неизвестно","SCAN_REJECTED" end
+  if not self:ScannerCanStart(scanner) then
+    return false,manual and "Сервер / Auctionator пока не разрешает полный скан. Повторите позже; точное время ожидания неизвестно" or "Auctionator ещё не готов к полному скану",manual and "SCAN_REJECTED" or "BUSY"
+  end
+  if not C.Adapter:Ready("collector") then return false,"Аукцион занят поиском или другой операцией. Дождитесь её завершения","BUSY" end
   return true,scanner
 end
-function M:Start()
-  local ok,scanner,code=self:Available()
+function M:StartManual()
+  return self:Start(true)
+end
+function M:Start(manual)
+  manual=manual==true
+  local ok,scanner,code=self:Available(manual)
   if not ok then self:Notice(scanner);if C.CollectorStatus then C.CollectorStatus:Set(code,scanner) end; return false,scanner end
+  local previousNext=C.db.collector.next_at
   self.requested_at=C:Now()
+  self.emptyResponse=nil
+  self.requestCode="REQUESTED"
   self.auction_context=C.AuctionContext:Snapshot()
   C.db.collector.next_at=C:Now()+self.interval
   self.ownRequest=true
+  self.requestObserved=false
+  local sending=C.Adapter.sending;C.Adapter.sending=true
   local success,reason=pcall(scanner.InitiateScan,scanner)
+  C.Adapter.sending=sending
   self.ownRequest=false
+  if manual and not self.requestObserved then
+    C.db.collector.next_at=previousNext
+  end
   if not success then self.requested_at=nil;self:Notice("Ошибка Auctionator: " .. tostring(reason));self:Failed("SCAN_FAILED",tostring(reason)); return false,reason end
+  if manual and not self.requestObserved then
+    self.requested_at=nil
+    local detail="Auctionator не отправил полный запрос: разрешение изменилось или аукцион занят. Повторите позже"
+    self:Notice(detail);if C.CollectorStatus then C.CollectorStatus:Set("SCAN_REJECTED",detail) end
+    return false,detail
+  end
   self:Notice("Общий массовый запрос Auctionator / Cennik отправлен")
   return true
+end
+function M:ReceiveEvent(event, data)
+  if event==self.startEvent then
+    self.auctionatorStarting=Auctionator and Auctionator.State and Auctionator.State.FullScanFrameRef
+    return
+  end
+  if not self.requested_at or not self.cacheOwner or self.packing then return end
+  if event==self.progressEvent then
+    if type(data)=="number" and data>=.2 and data<.99 then
+      self:Receive()
+      if self.cacheOwner and type(self.cacheOwner.scanData)=="table" then self.cacheRows=self.cacheOwner.scanData end
+    end
+  elseif event==self.failedEvent then
+    self.requested_at=nil
+    self:Failed(C.Adapter:Open() and "SCAN_FAILED" or "SCAN_INTERRUPTED","Auctionator не завершил полный скан")
+  elseif event==self.completeEvent then self:ReceiveAuctionator(data) end
+end
+function M:ReceiveAuctionator(data)
+  if not self.requested_at or not self.cacheOwner or self.packing or not C.Adapter:Open() then return end
+  if not C.AuctionContext:Matches(self.auction_context) then
+    self.requested_at=nil;self:Failed("AUCTION_CONTEXT_UNKNOWN","Аукцион изменился во время обработки Auctionator")
+    return
+  end
+  if not self.response_received_at then self:Receive() end
+  if not self.expected_count then return end
+  if type(data)~="table" or #data>self.maxRows then
+    self.requested_at=nil;self:Failed("UNSUPPORTED","Auctionator не передал совместимый список лотов")
+    return
+  end
+  if #data>0 then
+    -- The complete event has no request ID. Match row identity against the
+    -- current scan's cache so a late callback from an older scan is ignored.
+    local matched=self.cacheRows and self.cacheRows[1]==data[1]
+    if not matched and self.cacheRows then
+      for _,row in pairs(self.cacheRows) do if row==data[1] then matched=true;break end end
+    end
+    if not matched then return end
+  elseif self.cacheRows and next(self.cacheRows)~=nil then return
+  end
+  local count,expected=#data,self.expected_count
+  self.packing={index=0,count=count,reported_count=expected,observed_at=self.response_received_at,
+    requested_at=self.requested_at,source=data,original=self.cacheRows,parts={},chunks={},rows=0,keys={},variants={},itemFacts={},
+    owner=C:CharacterName(),skipped=math.max(0,expected-count),bytes=0,limit=self.maxBytes-4096}
+  if count~=expected then
+    self.packing.error=string.format("Auctionator передал %d из %d исходных строк; снимок неполный",count,expected)
+  end
+  self.cacheRows=nil
+  if C.CollectorStatus then C.CollectorStatus:Set("PACKING","Упаковываем готовые лоты Auctionator: " .. count .. " / " .. expected) end
+  self:Pack()
 end
 function M:Pack()
   local p=self.packing
@@ -126,28 +270,36 @@ function M:Pack()
   local ok,reason=pcall(function()
     local clock=GetTimePreciseSec or GetTime
     local deadline=clock()+.004
-    local stop=math.min(p.index+500,p.count)
+    local stop=math.min(p.index+(p.source and 2000 or 500),p.count)
     for index=p.index,stop-1 do
-      local info={C_AuctionHouse.GetReplicateItemInfo(index)}
+      local cached=p.source and p.source[index+1]
+      if p.source and p.count==p.reported_count and cached~=p.original[index+1] then error("Лоты Auctionator не соответствуют исходному снимку; результат неполный") end
+      local info=p.source and (type(cached)=="table" and type(cached.replicateInfo)=="table" and cached.replicateInfo or {}) or {C_AuctionHouse.GetReplicateItemInfo(index)}
       local item,quantity,buyout,bid=info[17],info[3],info[10] or 0,info[11] or 0
       if C:Integer(item) and C:Integer(quantity) and C:Integer(buyout,true) and C:Integer(bid,true) then
-        local link=C_AuctionHouse.GetReplicateItemLink(index)
+        local link
+        if p.source then link=cached.itemLink else link=C_AuctionHouse.GetReplicateItemLink(index) end
         local variantKey=link or ("unknown:" .. item)
         local variant=p.keys[variantKey]
         if not variant then
           if #p.variants>=self.maxVariants then error("Слишком много вариантов предметов; сохранена прочитанная часть") end
           variant=#p.variants+1; p.keys[variantKey]=variant
-          local key=C_AuctionHouse.MakeItemKey(item)
-          local keyInfo=C_AuctionHouse.GetItemKeyInfo(key)
           local get=C_Item and C_Item.GetItemInfo or GetItemInfo
+          local itemFacts=p.itemFacts and p.itemFacts[item]
+          if not itemFacts then
+            local key=C_AuctionHouse.MakeItemKey(item)
+            local keyInfo=C_AuctionHouse.GetItemKeyInfo(key)
+            itemFacts={base_name=type(get)=="function" and get(item) or nil,divisible=keyInfo and keyInfo.isCommodity}
+            if p.itemFacts then p.itemFacts[item]=itemFacts end
+          end
           local facts=type(get)=="function" and {get(link or item)} or {}
-          p.variants[variant]={link=link,name=info[1] or facts[1],base_name=type(get)=="function" and get(item) or nil,
-            divisible=keyInfo and keyInfo.isCommodity,vendor_sell=facts[11]}
+          p.variants[variant]={link=link,name=info[1] or facts[1],base_name=itemFacts.base_name,
+            divisible=itemFacts.divisible,vendor_sell=facts[11]}
           p.bytes=p.bytes+variantBytes(p.variants[variant])
         end
-        local remaining=C_AuctionHouse.GetReplicateItemTimeLeft(index) or 0
+        local remaining=p.source and (cached.timeLeft or 0) or C_AuctionHouse.GetReplicateItemTimeLeft(index) or 0
         local owner=info[14]
-        local ownership=type(owner)=="string" and owner~="" and (owner==UnitName("player") and 1 or 2) or 0
+        local ownership=type(owner)=="string" and owner~="" and (owner==(p.owner or C:CharacterName()) and 1 or 2) or 0
         local row=string.format("%.0f:%.0f:%.0f:%.0f:%.0f:%d:%d",item,quantity,buyout,bid,remaining,variant,ownership)
         p.bytes=p.bytes+#row+1
         if p.bytes>p.limit then error("Скан превышает размер поддерживаемой очереди; сохранена прочитанная часть") end
@@ -183,9 +335,9 @@ function M:Finish()
   local _,build=GetBuildInfo()
   local scan={format_version=1,scan_id=C.db.device_id .. ":market:" .. C:Now() .. ":" .. C.db.collector.sequence,
     market=self.auction_context and self.auction_context.auction_type=="neutral" and (C.db.collector.market or C.db.current_market):gsub("%.alliance%.",".neutral."):gsub("%.horde%.",".neutral.") or C.db.collector.market or C.db.current_market,
-    realm=GetRealmName(),faction=string.lower(UnitFactionGroup("player") or ""),locale=C:ClientLocale(),
-    observed_at=p.observed_at,requested_at=self.requested_at,received_at=p.observed_at,build=build,
-    count=rows,reported_count=p.count,skipped=p.skipped,full=not p.error and p.skipped==0 and rows==p.count,
+    realm=C:RealmName(),faction=string.lower(UnitFactionGroup("player") or ""),locale=C:ClientLocale(),
+    observed_at=p.observed_at,requested_at=p.requested_at or self.requested_at,received_at=p.observed_at,build=build,
+    count=rows,reported_count=p.reported_count or p.count,skipped=p.skipped,full=not p.error and p.skipped==0 and rows==(p.reported_count or p.count),
     error=p.error,variants=p.variants,data=table.concat(p.chunks,";"),packed_bytes=(p.bytes or 0)+4096,workspace_id=C.db.collector.workspace_id,
     auction_context=C:Clone(self.auction_context)}
   if scan.full then self:Reserve((p.bytes or 0)+4096,true) end
@@ -194,10 +346,11 @@ function M:Finish()
   else
     C.db.collector.skipped_partial=(C.db.collector.skipped_partial or 0)+1
   end
-  if C.CollectorStatus then C.CollectorStatus:Finished(scan) end
+  if C.CollectorStatus then C.CollectorStatus:Finished(scan,p.code) end
   C.db.collector.last_scan={scan_id=scan.scan_id,full=scan.full,count=scan.count,reported_count=scan.reported_count,error=scan.error,
     code=not scan.full and C.CollectorStatus.db.current.code or nil}
   self.packing=nil; self.requested_at=nil
+  self.cacheOwner=nil;self.cacheRows=nil;self.response_received_at=nil;self.expected_count=nil
   self.emptyResponse=nil
   self:Notice((scan.full and "Полный снимок готов: " or "НЕПОЛНЫЙ снимок: ") .. scan.count .. " / " .. scan.reported_count .. " строк. " ..
     (scan.full and "Можно записать / reload" or "Не заменяет цены рынка; требуется повторный полный скан") ..
@@ -222,6 +375,14 @@ function M:Receive()
     self:Failed("SCAN_TOO_LARGE",tostring(count) .. " строк: превышен предел 2 млн. Предыдущие полные снимки сохранены",count)
     return
   end
+  if self.cacheOwner then
+    if not self.response_received_at then
+      self.response_received_at=C:Now();self.expected_count=count
+      self:Notice("Ответ сервера получен: " .. count .. " строк. Ждём готовые лоты Auctionator")
+    end
+    if C.CollectorStatus then C.CollectorStatus:Set("AUCTIONATOR_PROCESSING",count .. " исходных строк; повторно API лотов не читаем") end
+    return
+  end
   self.packing={index=0,count=count,observed_at=C:Now(),parts={},chunks={},rows=0,keys={},variants={},skipped=0,bytes=0,limit=self.maxBytes-4096}
   if C.CollectorStatus then C.CollectorStatus:Set("PACKING",tostring(count) .. " строк") end
   self:Pack()
@@ -231,11 +392,20 @@ function M:Tick(elapsed)
   if self.elapsed<1 then return end
   self.elapsed=0
   if not C.db or not C.db.collector then return end
-  if self.requested_at and not self.packing and C:Now()-self.requested_at>120 then
-    if self.emptyResponse then
-      self.packing={count=0,parts={},variants={},skipped=0,observed_at=C:Now(),error="API не вернул строки за 120 секунд; пустой ответ не подтверждает пустой рынок"}
-      self:Finish()
-    else self.requested_at=nil; self:Notice("Ответ сервера не пришёл. Соблюдаем срок следующего запроса");self:Failed("SCAN_TIMEOUT") end
+  if self.requested_at and not self.packing then
+    local waited=C:Now()-(self.response_received_at or self.requested_at)
+    if waited>self.responseTimeout then
+      local reason=self.response_received_at and string.format("Auctionator не завершил обработку за %d секунд после получения ответа сервера",self.responseTimeout) or string.format("API не вернул строки за %d секунд; пустой ответ не подтверждает пустой рынок",self.responseTimeout)
+      if self.emptyResponse then
+        self.packing={count=0,parts={},variants={},skipped=0,observed_at=C:Now(),error=reason,code="SCAN_TIMEOUT"}
+        self:Finish()
+      else
+        self.requested_at=nil;self:Notice(self.response_received_at and "Auctionator не завершил обработку полученного ответа. Повтор после разрешённого интервала" or "Ответ сервера не пришёл. Соблюдаем срок следующего запроса")
+        self:Failed("SCAN_TIMEOUT",reason)
+      end
+    elseif C.CollectorStatus then
+      C.CollectorStatus:Set(self.response_received_at and "AUCTIONATOR_PROCESSING" or self.requestCode or "REQUESTED",self.response_received_at and string.format("Сервер ответил; Auctionator обрабатывает %d строк: %d сек. Не закрывайте аукцион",self.expected_count or 0,waited) or string.format("Ожидаем ответ сервера: %d / %d сек. Не закрывайте аукцион и не делайте /reload",waited,self.responseTimeout))
+    end
   end
   if C.db.collector.enabled and not (C.CollectorStatus and C.CollectorStatus.db and C.CollectorStatus.db.paused) and not self.requested_at then
     if C.Adapter:Open() and not self.openedAt then self.openedAt=GetTime() end
@@ -255,7 +425,10 @@ function M:Tick(elapsed)
       end
     end
   elseif not C.db.collector.enabled and not self.requested_at and C.CollectorStatus then
-    C.CollectorStatus:Set(C.CollectorStatus:IsEnabled() and "PASSIVE" or "DISABLED")
+    local current=C.CollectorStatus.db and C.CollectorStatus.db.current
+    if not current or (current.level~="error" and current.code~="READY" and current.code~="SCAN_SAVED") or C:Now()-current.at>10 then
+      C.CollectorStatus:Set(C.CollectorStatus:IsEnabled() and "PASSIVE" or "DISABLED")
+    end
   end
   if C.CollectorUI then C.CollectorUI:Refresh() end
 end
@@ -276,5 +449,5 @@ frame:SetScript("OnEvent",function(_,event)
       if M.packing then M.packing.error="Аукцион закрыт во время обработки"; M:Finish() end
       M.requested_at=nil;M.emptyResponse=nil
     end
-  elseif event=="AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" and M.requested_at then M.requested_at=nil; M:Notice("Сервер отклонил запрос. Повтор после разрешённого интервала");M:Failed("SCAN_REJECTED") end
+  elseif event=="AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" and M.requested_at and not M.response_received_at and not M.packing then M.requested_at=nil; M:Notice("Сервер отклонил запрос. Повтор после разрешённого интервала");M:Failed("SCAN_REJECTED") end
 end)

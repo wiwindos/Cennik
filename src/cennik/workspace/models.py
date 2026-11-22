@@ -8,7 +8,7 @@ MARKET = "forever.pvp.alliance.us"
 
 
 class WorkspaceSettings(Model):
-    use_beta_prices: bool = True
+    use_beta_prices: bool = False
     own_data_only: bool = False
     auto_references: bool = True
     auto_history: bool = True

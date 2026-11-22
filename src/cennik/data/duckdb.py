@@ -55,25 +55,30 @@ class DuckDBProvider:
         fields = PriceObservation.model_fields
         return PriceObservation.model_validate({k: v for k, v in row.items() if k in fields})
 
-    def current_prices(self) -> dict[int, PriceObservation]:
+    def current_prices(self, item_ids=None) -> dict[int, PriceObservation]:
+        if item_ids is not None:
+            item_ids=sorted(set(item_ids))
+            if not item_ids:return {}
+        scope=' AND item_id IN (SELECT unnest(?))' if item_ids is not None else ''
+        params=[self.market,self.as_of]+([item_ids] if item_ids is not None else [])
         rows = self.rows("""WITH candidates AS (
             SELECT item_id,market,observed_at,'scan' AS granularity,min_copper,
                 median_copper,quantity,NULL::BIGINT AS auctions,source,raw_id,sha256,0 AS priority
-            FROM price_snapshots WHERE market=? AND observed_at<=?
+            FROM price_snapshots WHERE market=? AND observed_at<=?"""+scope+"""
             UNION ALL SELECT item_id,market,observed_at,granularity,min_copper,
                 median_copper,quantity,auctions,source,raw_id,sha256,1 AS priority
-            FROM price_history WHERE market=? AND observed_at<=?
+            FROM price_history WHERE market=? AND observed_at<=?"""+scope+"""
         ) SELECT * EXCLUDE(priority) FROM candidates QUALIFY row_number() OVER (
             PARTITION BY item_id ORDER BY observed_at DESC,
             CASE granularity WHEN 'scan' THEN 0 WHEN 'hour' THEN 1 ELSE 2 END,
-            priority,source,raw_id)=1""", [self.market, self.as_of, self.market, self.as_of])
+            priority,source,raw_id)=1""", params+params)
         # Sales are source estimates, with their own observation timestamp. Never infer
         # them from supply changes and never backfill a missing field with zero.
         sales = {r["item_id"]: r for r in self.rows("""SELECT item_id,observed_at,sales_estimated_per_day,source
             FROM price_snapshots WHERE market=? AND observed_at<=?
-            AND sales_estimated_per_day IS NOT NULL
+            AND sales_estimated_per_day IS NOT NULL"""+scope+"""
             QUALIFY row_number() OVER (PARTITION BY item_id ORDER BY observed_at DESC,source,raw_id)=1""",
-            [self.market, self.as_of])}
+            params)}
         result = {}
         for row in rows:
             sale = sales.get(row["item_id"])
@@ -128,17 +133,6 @@ class DuckDBProvider:
             JOIN dataset_metadata m ON m.raw_id=r.raw_id AND m.dataset='crafting'
             WHERE m.retrieved_at<=? AND r.retrieved_at<=?
             AND m.status NOT IN ('FAILED','NOT_AVAILABLE')"""
-        rows = self.rows(f"""WITH provenance AS ({source})
-            SELECT DISTINCT r.spell_id,r.version_hash,r.result_item_id,
-            r.qty_min,r.qty_max,r.name,r.profession,r.skill_required,r.acquisition,
-            m.raw_id,r.payload_json,m.market AS source_market,
-            m.retrieved_at AS source_retrieved_at,
-            coalesce(try_cast(json_extract_string(m.payload_json,'$.response_metadata.generatedAt') AS TIMESTAMPTZ),
-                     try_cast(json_extract_string(m.payload_json,'$.generatedAt') AS TIMESTAMPTZ),
-                     m.retrieved_at) AS source_generated_at
-            FROM recipes r JOIN provenance m USING(spell_id,version_hash)
-            WHERE m.market=? OR m.market IS NULL ORDER BY r.spell_id,r.version_hash,m.raw_id""",
-            [self.as_of, self.as_of, self.market])
         # A new all=1 snapshot supersedes its profession's older membership, even
         # when capped/PARTIAL. Absence never resurrects a removed old recipe.
         snapshots = self.rows("""SELECT raw_id,market,retrieved_at,
@@ -160,8 +154,29 @@ class DuckDBProvider:
                 latest[key] = (stamp, {snapshot['raw_id']})
             elif stamp == old[0]:
                 old[1].add(snapshot['raw_id'])
+        # Filter snapshot membership before transferring mechanics to Python.
+        # The former wide join materialized every hourly copy of every recipe.
+        candidates=f"""WITH provenance AS ({source}), candidates AS (
+            SELECT DISTINCT r.spell_id,r.version_hash,lower(coalesce(r.profession,'')) profession,
+                m.raw_id,m.market AS source_market,m.retrieved_at AS source_retrieved_at,
+                coalesce(try_cast(json_extract_string(m.payload_json,'$.response_metadata.generatedAt') AS TIMESTAMPTZ),
+                    try_cast(json_extract_string(m.payload_json,'$.generatedAt') AS TIMESTAMPTZ),m.retrieved_at) source_generated_at
+            FROM recipes r JOIN provenance m USING(spell_id,version_hash)
+            WHERE m.market=? OR m.market IS NULL) """
+        conditions=['c.source_generated_at<=?'];args=[self.as_of,self.as_of,self.market,self.as_of]
+        for profession in sorted({key[1] for key in latest}):
+            local=latest.get((self.market,profession));scope=local or latest.get((None,profession))
+            if scope:
+                conditions.append('(c.profession<>?'+(' OR c.source_market IS NOT NULL' if not local else '')+' OR c.raw_id IN (SELECT unnest(?)))')
+                args.extend([profession,sorted(scope[1])])
+        where=' AND '.join(conditions)
+        excluded=self.rows(candidates+'SELECT count(*) n FROM candidates c WHERE NOT ('+where+')',args)[0]['n']
+        rows=self.rows(candidates+"""SELECT r.spell_id,r.version_hash,r.result_item_id,r.qty_min,r.qty_max,
+            r.name,r.profession,r.skill_required,r.acquisition,c.raw_id,r.payload_json,c.source_market,
+            c.source_retrieved_at,c.source_generated_at FROM candidates c
+            JOIN recipes r USING(spell_id,version_hash) WHERE """+where+
+            ' ORDER BY r.spell_id,r.version_hash,c.raw_id',args)
         eligible: dict[int, list[dict]] = {}
-        excluded = 0
         for row in rows:
             profession = (row['profession'] or '').casefold()
             scope = latest.get((self.market, profession)) or latest.get((row['source_market'], profession))
@@ -185,7 +200,9 @@ class DuckDBProvider:
         self.recipe_selection.update(selected=len(selected), ambiguous=ambiguous,
                                      superseded_versions=superseded, outside_latest_snapshot=excluded)
         inputs = self.rows("""SELECT spell_id,version_hash,item_id,quantity
-            FROM recipe_inputs ORDER BY spell_id,version_hash,item_id""")
+            FROM recipe_inputs WHERE (spell_id,version_hash) IN (SELECT unnest(?),unnest(?))
+            ORDER BY spell_id,version_hash,item_id""",[[r['spell_id'] for r in selected],
+                [r['version_hash'] for r in selected]]) if selected else []
         grouped: dict[tuple, list[RecipeInput]] = {}
         for row in inputs:
             grouped.setdefault((row["spell_id"], row["version_hash"]), []).append(

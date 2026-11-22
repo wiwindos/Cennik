@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--unbound", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "tests"))
@@ -39,6 +40,9 @@ def main():
     saved = game / "WTF/Account/fixture/SavedVariables/CennikAddon.lua"
     saved.parent.mkdir(parents=True)
     source = sample()
+    if args.unbound:
+        source = {"device_id": "fixture", "collector_status": {"realm": "Actual Realm", "faction": "alliance", "binding_reason": "realm_mismatch",
+            "current": {"at": int(time.time()), "code": "UNBOUND", "level": "error"}, "scans": 0, "rows": 0}}
     saved.write_text("CennikAddonDB="+lua_literal(source), "utf-8")
     server = uvicorn.Server(uvicorn.Config(hub, host="127.0.0.1", port=port, log_level="warning", proxy_headers=False))
     thread = threading.Thread(target=server.run)
@@ -53,18 +57,24 @@ def main():
         process = subprocess.run([str(args.exe.resolve()), "--root", str(agent.root), "--smoke-test", str(result_path)], timeout=90, check=True)
         assert process.returncode == 0
         result = json.loads(result_path.read_text("utf-8"))
+        assert "Ключ сохранён" in result["key_status"], result["key_status"]
+        assert "Сервер подтвердил" in result["key_status"], result["key_status"]
         assert result["frozen"] and result["tray_visible"] and result["hide_to_tray"] and result["restored"]
         assert not result["sql_loaded"]
         counts = hub.state.hub.overview()["members"][0]["counts"]
-        assert counts["full_scans"] == 1 and counts["rows"] == 2, counts
-        assert counts["npc"] == counts["recipe"] == counts["disenchant"] == 1, counts
+        if args.unbound:
+            assert result["status"] == "Сбор заблокирован"
+            assert counts["diagnostic"] == 1 and counts["full_scans"] == 0, counts
+        else:
+            assert counts["full_scans"] == 1 and counts["rows"] == 2, counts
+            assert counts["npc"] == counts["recipe"] == counts["disenchant"] == 1, counts
         assert agent.client.overview()["pending"] == 0
         parser = Parser((game / "Interface/AddOns/CennikAddon/ImportedData.lua").read_text("utf-8"))
         assert parser.identifier() == "CennikImport"
         parser.require("=")
         payload = parser.value()
         assert payload["collector_only"] and payload["auctioneer_registry"]["entries"]
-        assert payload["acknowledged_scan_ids"] == [source["market_scans"][0]["scan_id"]]
+        assert payload["acknowledged_scan_ids"] == ([source["market_scans"][0]["scan_id"]] if not args.unbound else {})
         assert not list(agent.root.rglob("*.sqlite")) and not list(agent.root.rglob("*.duckdb"))
         print(json.dumps({"exe": "passed", "native_tray": True, "sql_loaded": False, "counts": counts}, ensure_ascii=False))
     finally:

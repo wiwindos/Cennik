@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 
@@ -19,7 +20,13 @@ from cennik.workspace.presentation import page
 from cennik.workspace.web import create_app as create_workspace_app
 
 from .auth import OwnerAuth
-from .bridge import DiscoverCharacters, ExchangeRequest, PrivateBridge, RegisterDevice
+from .bridge import (
+    AssignAuctioneer,
+    DiscoverCharacters,
+    ExchangeRequest,
+    PrivateBridge,
+    RegisterDevice,
+)
 from .catalog import Catalog, MarketProfile
 from .collectors import ServerCollectors
 from .hub_auth import verify_hub
@@ -73,6 +80,7 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
             catalog.close()
 
     app = FastAPI(title="Cennik Server", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
     app.state.catalog, app.state.bridge, app.state.hub, app.state.collectors = catalog, bridge, intake.state.hub, collectors
 
     def mount_profile(profile):
@@ -196,6 +204,10 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
     def register_worker(identity: str, value: RegisterDevice):
         return bridge.register(identity, value)
 
+    @app.post('/server/api/workers/{identity}/auctioneer')
+    def assign_auctioneer(identity: str, value: AssignAuctioneer):
+        return bridge.assign_auctioneer(identity, value)
+
     @app.post("/pair/v1/start")
     def pair_start(value: PairStart, request: Request):
         hub = verify_hub(request, hub_secret)
@@ -225,7 +237,8 @@ def create_server(root: Path, owner_key: str, *, public_origin="http://127.0.0.1
 
     @app.get("/bridge/v1/manifest")
     def manifest(request: Request):
-        return bridge.manifest(request.state.device, extended=request.headers.get("X-Cennik-Worker")=="0.2")
+        version = request.headers.get('X-Cennik-Worker')
+        return bridge.manifest(request.state.device, extended=version in {'0.2', '0.3','0.4'}, include_registry=version in {'0.3','0.4'},automatic=version=='0.4')
 
     @app.post("/bridge/v1/characters")
     def discovered_characters(value: DiscoverCharacters, request: Request):

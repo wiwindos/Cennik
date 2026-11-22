@@ -17,6 +17,7 @@ from cennik.addon.models import ExportRequest, Package
 from cennik.core.models import AnalyticsConfig, Model, Opportunity, Run
 from cennik.engines.craft_graph import MaterialOffer, PriceLevel
 from cennik.engines.economics import auction_net, roi
+from cennik.engines.liquidity import batch_sales_limit
 from cennik.markets import MARKET_PATTERN
 
 from .graph_plans import auction_items, recalculate
@@ -187,6 +188,8 @@ class BulkChecks:
                 o = self.w.store.detail(self.w.market_key, identity)
                 if o is None or o.run_id != run.run_id:
                     raise ValueError("Выбор относится к прежнему расчёту; обновите список")
+                from cennik.core.calculation import require_current
+                require_current(o,run.generation,run.config)
                 if not materials(o):
                     raise ValueError("Нет полного состава закупки: " + o.item_name)
                 candidates.append(o.model_dump(mode="json"))
@@ -284,8 +287,8 @@ class BulkChecks:
                    for r in disenchant["yields"]] if disenchant else [(o.details.get("liquidity", {}), Decimal(o.quantity))]
         limits = []
         for evidence, quantity in outputs:
-            if evidence.get("enabled"):
-                sales = Decimal(evidence.get("conservative_sales_per_day") or "0")
+            sales = batch_sales_limit(evidence)
+            if sales is not None:
                 percent = Decimal(evidence.get("thresholds", {}).get("max_batch_sales_percent", "0"))
                 limits.append(int(sales * percent / 100 / quantity) if quantity > 0 else 0)
         return min(limits) if limits else None
@@ -407,6 +410,10 @@ class BulkChecks:
             warnings.append("Условная цена NPC: buy за 1 шт.; единица цены не подтверждена")
         if "npc_catalog_release_refresh_required" in o.risk_flags:
             warnings.append("Справочник NPC беты требует актуализации на релизе")
+        if "liquidity_unknown" in o.risk_flags:
+            warnings.append("Спрос неизвестен: лимит партии по продажам не рассчитан; проверьте объём закупки и бюджет")
+            if config.craft_liquidity_enabled and not config.craft_allow_unknown_sales and not config.own_data_only:
+                errors.append("Показ при неизвестном спросе выключен; обновите анализ")
         if any(x > MAX_INT for x in (total, gross, net)):
             errors.append("Суммы превышают точность Lua")
         limit = o.details.get("max_batch_by_liquidity")

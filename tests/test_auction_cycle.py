@@ -111,6 +111,40 @@ def test_stale_or_missing_signal_and_foreground_never_trigger_keys(tmp_path):
     assert helper.error_code == "ADDON_BLOCKED" and not window.sent
 
 
+def test_heartbeat_change_during_final_capture_does_not_cancel_reload(tmp_path):
+    helper, window, clock, tick = cycle(tmp_path)
+    tick()
+    reads=[Signal(3,4,1),Signal(3,5,1)]
+    window.signal=lambda *args: reads.pop(0)
+    clock[0]=4
+    helper.tick(paused=False,route=ROUTE,stamp=(10,1),delivered=True)
+    assert window.sent==['F8']
+
+
+@pytest.mark.parametrize('last',[None,Signal(6,5,1),Signal(3,5,2)])
+def test_changed_state_or_boot_still_prevents_key(last,tmp_path):
+    helper, window, clock, tick = cycle(tmp_path)
+    tick()
+    reads=[Signal(3,4,1),last]
+    window.signal=lambda *args: reads.pop(0)
+    clock[0]=4
+    helper.tick(paused=False,route=ROUTE,stamp=(10,1),delivered=True)
+    assert not window.sent
+
+
+def test_cycle_journal_is_bounded_and_keeps_key_events_without_token(tmp_path):
+    import json
+    helper, window, clock, tick=cycle(tmp_path)
+    tick()
+    tick()
+    events=json.loads(helper.events_path.read_text('utf-8'))
+    assert any(e['event']=='key_sent' and e['purpose']=='reload' for e in events)
+    assert helper.settings['token'] not in helper.events_path.read_text('utf-8')
+    for i in range(210):
+        helper.record('fixture',index=i)
+    assert len(json.loads(helper.events_path.read_text('utf-8')))==200
+
+
 def test_restart_keeps_uncertain_reload_and_never_sends_it_twice(tmp_path):
     helper, window, clock, tick = cycle(tmp_path)
     tick()
@@ -142,3 +176,34 @@ def test_signal_requires_matching_token_inverse_and_framing():
     assert decode_signal(image, "000000000000") is None
     draw.rectangle((52, 12, 61, 21), fill="black")
     assert decode_signal(image, token) is None
+
+
+def test_hidden_or_active_window_does_not_lose_confirmed_reload_on_return(tmp_path):
+    helper, window, clock, tick = cycle(tmp_path)
+    tick()
+    tick()
+    assert window.sent == ['F8']
+    window.background=False
+    tick(4,2,seconds=180,stamp=(11,2))
+    assert not helper.error_code
+    window.background=True
+    tick(4,2,stamp=(11,2),delivered=False)
+    tick(4,2,stamp=(11,2),delivered=False)
+    assert helper.state['phase']=='reopen' and window.sent==['F8']
+    tick(4,2,seconds=8,stamp=(11,2),delivered=True)
+    assert window.sent==['F8','F9']
+
+
+@pytest.mark.parametrize('cell', [4, 5, 7, 8, 10, 12, 15, 20, 24])
+def test_scaled_indicator_keeps_token_and_inverse_checks(cell):
+    image=Image.new('RGB',(440,220),'black')
+    draw=ImageDraw.Draw(image)
+    token='123456abcdef'
+    data=(56,156,72)
+    colors=[(208,49,169),(0x12,0x34,0x56),(0xab,0xcd,0xef),data,tuple(255-v for v in data),END,VERSION_COLOR]
+    for i,color in enumerate(colors):
+        draw.rectangle((8+i*cell,8,7+(i+1)*cell,7+cell),fill=color)
+    assert decode_signal(image,token)[0]==Signal(1,10,4)
+    assert decode_signal(image,'000000000000') is None
+    draw.rectangle((8+4*cell,8,7+5*cell,7+cell),fill='black')
+    assert decode_signal(image,token) is None

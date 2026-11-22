@@ -50,8 +50,9 @@ def main():
         saved.parent.mkdir(parents=True)
         saved.write_text("CennikAddonDB=" + lua_literal({"character_profiles": {"test": {
             "role": "auctioneer", "character": "FixturePlayer", "realm": "FixtureRealm",
-            "faction": profile.faction, "professions": [],
-        }}}), "utf-8")
+            "faction": profile.faction, "professions": [], "market": profile.market, "game_version": "1.60.1",
+        }, "early-login": {"role": "unassigned", "character": "FixturePlayer", "realm": "",
+                              "faction": profile.faction, "professions": {}}}}), "utf-8")
         with httpx.Client(base_url=origin, trust_env=False) as client:
             approved = client.post(
                 "/server/api/pairing/approve",
@@ -77,12 +78,16 @@ def main():
         assert not (agent.root / "pairing.json").exists()
         manifest = json.loads((agent.root / "manifest.json").read_text("utf-8"))
         assert len(manifest["clients"]) == 1
+        installed = game / "Interface/AddOns/CennikAddon"
+        assert '## Version: 0.37.0' in (installed / 'CennikAddon.toc').read_text('utf-8')
+        assert 'function C:TryInitialize()' in (installed / 'Core.lua').read_text('utf-8')
         assert manifest["clients"][0]["role"] == "auctioneer"
         parsed = Parser((game / "Interface/AddOns/CennikAddon/ImportedData.lua").read_text("utf-8"))
         assert parsed.identifier() == "CennikImport"
         parsed.require("=")
         payload = parsed.value()
         assert payload["discovery"]["worker_discovery"]
+        assert payload['discovery']['auctioneer_registry']['format_version'] == 1
         assert "FixtureRealm:FixturePlayer" in payload["routes"]
         assert not list((app.state.catalog.root / "pairing").glob("*.json"))
         print(

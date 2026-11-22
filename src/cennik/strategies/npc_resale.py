@@ -5,7 +5,7 @@ from decimal import Decimal
 from cennik.core.interfaces import EvaluationContext
 from cennik.core.models import Item, Opportunity
 from cennik.engines.economics import auction_net
-from cennik.engines.liquidity import CraftLiquidity
+from cennik.engines.liquidity import CraftLiquidity, batch_sales_limit
 from cennik.strategies.common import opportunity
 
 UNTRADEABLE = {"bop", "bind on pickup", "bind_on_pickup", "on_pickup", "1", "soulbound",
@@ -14,7 +14,7 @@ UNTRADEABLE = {"bop", "bind on pickup", "bind_on_pickup", "on_pickup", "1", "sou
 
 class NpcToAuction:
     id = "npc_to_auction"
-    version = "1.1.0"
+    version = "1.2.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
         results = []
@@ -60,9 +60,9 @@ class NpcToAuction:
             if profit < context.config.min_profit_copper:
                 context.reject(self.id, "not_profitable_after_cut")
                 continue
-            sales = evidence["conservative_sales_per_day"]
+            sales = batch_sales_limit(evidence)
             max_batch = (int(context.config.craft_max_batch_sales_percent * Decimal(sales) / 100)
-                         if context.config.craft_liquidity_enabled and sales is not None else None)
+                         if sales is not None else None)
             flags = ["npc_stock_and_access_unconfirmed", "npc_live_buy_price_unconfirmed", "result_sale_unconfirmed"]
             unit_unknown = bool(use_catalog and catalog["buy_quantity"] is None)
             if use_catalog:

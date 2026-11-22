@@ -1,0 +1,6 @@
+DejaVu Sans, unmodified TrueType font.
+Project: https://dejavu-fonts.github.io/
+Distribution source: https://github.com/matplotlib/matplotlib/tree/main/lib/matplotlib/mpl-data/fonts/ttf
+Font: https://raw.githubusercontent.com/matplotlib/matplotlib/main/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf
+License: DejaVu-LICENSE.txt (distributed alongside this file).
+SHA256: 3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22

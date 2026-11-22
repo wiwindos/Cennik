@@ -132,9 +132,21 @@ def test_craft_uses_cheaper_intermediate_path_and_rejects_cycles(rules):
 
 
 def test_output_liquidity_is_checked_per_material(rules):
-    ctx = context(rules, craft_liquidity_enabled=True, craft_liquidity_source="latest_source")
+    ctx = context(rules, craft_liquidity_enabled=True, craft_liquidity_source="latest_source", craft_allow_unknown_sales=False)
     assert BuyDisenchant().evaluate(ctx) == []
     assert ctx.diagnostics["buy_disenchant"]["disenchant_material_liquidity_unknown_sales"] == 1
+
+
+def test_unknown_demand_allows_disenchant_but_never_missing_material_prices(rules):
+    ctx = context(rules, craft_liquidity_enabled=True)
+    for strategy in (BuyDisenchant(), CraftDisenchant()):
+        signal = strategy.evaluate(ctx)[0]
+        assert "liquidity_unknown" in signal.risk_flags
+        assert all(row["liquidity"]["status"] == "unknown" for row in signal.details["disenchant"]["yields"])
+    del ctx.prices.current[10938]
+    assert not BuyDisenchant().evaluate(ctx)
+    gaps = ctx.prices.gap_report(ctx.items)
+    assert any(row["item_id"] == 10938 for row in gaps["items"])
 
 
 def test_rounding_scales_expected_outputs_before_rounding(rules):

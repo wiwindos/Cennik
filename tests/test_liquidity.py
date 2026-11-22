@@ -15,6 +15,7 @@ from cennik.strategies.craft_graph import CraftGraphArbitrage
 
 
 def liquidity_context(root, **changes):
+    changes.setdefault("craft_allow_unknown_sales", False)
     config = AnalyticsConfig(craft_liquidity_enabled=True, **changes)
     provider = DuckDBProvider(root / "analytics/ahledger.duckdb", "market-a", NOW)
     return provider, context(provider, config)
@@ -92,3 +93,56 @@ def test_filter_requires_known_sales_timestamp_and_valid_window(analytics_root):
         assert CraftLiquidity(ctx).check(price, 2)[1] == "liquidity_unknown_sales"
     with pytest.raises(ValueError):
         AnalyticsConfig(craft_min_sales_days=4, craft_sales_window_days=3)
+
+
+@pytest.mark.parametrize(("values", "changes", "unknown_reason"), [
+    ((None,), {}, "liquidity_unknown_sales"),
+    (("30",), {}, "liquidity_insufficient_sales_history"),
+    (("30", "20"), {"craft_sales_max_age_seconds": 60}, "liquidity_stale_sales"),
+])
+def test_startup_mode_keeps_profitable_unknown_demand_without_fabricating_a_limit(analytics_root, values, changes, unknown_reason):
+    from cennik.engines.liquidity import batch_sales_limit
+
+    sales(analytics_root, values)
+    provider, ctx = liquidity_context(analytics_root, craft_allow_unknown_sales=True, **changes)
+    with provider:
+        signal = SimpleCraftArbitrage().evaluate(ctx)[0]
+        evidence = signal.details["liquidity"]
+        assert signal.potential_profit_copper > 0
+        assert "liquidity_unknown" in signal.risk_flags
+        assert evidence["status"] == "unknown" and evidence["passed"] is None
+        assert evidence["unknown_reason"] == unknown_reason
+        assert batch_sales_limit(evidence) is None
+
+
+def test_zero_settings_disable_minima_and_history_but_keep_latest_sales(analytics_root):
+    from cennik.engines.liquidity import batch_sales_limit
+
+    config = AnalyticsConfig(craft_min_sales_per_day=0, craft_sales_window_days=0, craft_min_sales_days=0)
+    assert config.craft_allow_unknown_sales
+    for field in ("craft_min_sales_per_day", "craft_sales_window_days", "craft_min_sales_days"):
+        with pytest.raises(ValueError):
+            AnalyticsConfig(**{field: -1})
+    sales(analytics_root, ("30",))
+    provider, ctx = liquidity_context(analytics_root, craft_sales_window_days=0, craft_min_sales_days=0,
+                                     craft_min_sales_per_day=0)
+    with provider:
+        ctx.prices.sales_history = lambda _: pytest.fail("zero window must not load history")
+        evidence, reason = CraftLiquidity(ctx).check(ctx.prices.current[20], 2)
+        assert reason is None and evidence["method"] == "latest_source"
+        assert batch_sales_limit(evidence) == Decimal(30)
+        evidence["conservative_sales_per_day"] = "0"
+        assert batch_sales_limit(evidence) == 0  # known zero is not unknown
+
+
+@pytest.mark.parametrize(("values", "quantity", "reason"), [
+    (("1",), 10, "liquidity_low_sales"),
+    (("1", "1"), 10, "liquidity_low_sales"),
+    (("20", "20"), 100, "liquidity_high_supply"),
+])
+def test_startup_mode_preserves_known_demand_filters(analytics_root, values, quantity, reason):
+    sales(analytics_root, values, quantity)
+    provider, ctx = liquidity_context(analytics_root, craft_allow_unknown_sales=True)
+    with provider:
+        assert not SimpleCraftArbitrage().evaluate(ctx)
+        assert ctx.diagnostics["simple_craft"][reason] == 1

@@ -5,6 +5,8 @@
   const fetchRaw=window.fetch.bind(window);
   const professions={tailoring:['Портняжное дело','Tailoring'],blacksmithing:['Кузнечное дело','Blacksmithing'],leatherworking:['Кожевничество','Leatherworking'],alchemy:['Алхимия','Alchemy'],engineering:['Инженерное дело','Engineering'],enchanting:['Наложение чар','Enchanting'],cooking:['Кулинария','Cooking'],'first aid':['Первая помощь','First Aid'],mining:['Горное дело','Mining'],jewelcrafting:['Ювелирное дело','Jewelcrafting'],herbalism:['Травничество','Herbalism'],skinning:['Снятие шкур','Skinning'],fishing:['Рыбная ловля','Fishing']};
   let language='ruRU',key='cennik.game-language.local',catalog={item:{},recipe:{},npc:{}},revision=null,lastCheck=0,loading=null;
+  const cacheKey='cennik.game-names.v1:'+prefix;
+  try{const cached=JSON.parse(sessionStorage.getItem(cacheKey)||'null');if(cached?.names&&cached.revision){catalog=cached.names;revision=cached.revision;}}catch{}
   function catalogStatus(error){const status=document.getElementById('game-language-status');if(status){status.hidden=!error;status.textContent=error?'Названия временно недоступны':'';}}
   function profession(value){const normalized=String(value||'').toLowerCase();const row=professions[normalized]||Object.values(professions).find(p=>p.some(n=>n.toLowerCase()===normalized));return row?row[language==='ruRU'?0:1]:value;}
   function label(kind,id,fallback){const entry=catalog[kind]?.[String(id)];if(entry?.[language])return entry[language];const other=language==='ruRU'?'enUS':'ruRU';if(entry?.[other])return entry[other]+' ['+(other==='ruRU'?'RU':'EN')+']';return fallback&&!/\[(?:RU|EN|без перевода)\]$/.test(fallback)?fallback+' [без перевода]':fallback;}
@@ -29,7 +31,7 @@
   async function refresh(force=false){
     if(loading)return loading;
     if(!force&&Date.now()-lastCheck<15000)return;
-    loading=(async()=>{try{const r=await fetchRaw(prefix+'/api/v2/game-names'+(revision?'?revision='+encodeURIComponent(revision):''));if(!r.ok)throw Error('Не удалось загрузить игровые названия');const data=await r.json();if(data.names)catalog=data.names;revision=data.revision;catalogStatus(false);}catch{catalogStatus(true);}finally{lastCheck=Date.now();}})().finally(()=>loading=null);
+    loading=(async()=>{try{const r=await fetchRaw(prefix+'/api/v2/game-names'+(revision?'?revision='+encodeURIComponent(revision):''));if(!r.ok)throw Error('Не удалось загрузить игровые названия');const data=await r.json();if(data.names){catalog=data.names;try{const cached=JSON.stringify({names:catalog,revision:data.revision});if(cached.length<2000000)sessionStorage.setItem(cacheKey,cached);}catch{}}revision=data.revision;catalogStatus(false);}catch{catalogStatus(true);}finally{lastCheck=Date.now();}})().finally(()=>loading=null);
     return loading;
   }
   const ready=(async()=>{
@@ -45,10 +47,9 @@
   window.fetch=async(input,options)=>{
     const url=new URL(typeof input==='string'?input:input.url,location.href);
     const localized=url.origin===location.origin&&url.pathname.startsWith(prefix+'/api/v2/')&&!/\/(settings|sources|npc\/catalog|disenchant\/rules|game-names)(\/|$)/.test(url.pathname);
-    if(localized)await ready;
     const response=await fetchRaw(input,options);
     if(localized&&response.ok&&response.headers.get('content-type')?.includes('application/json')){
-      await refresh();const json=response.json.bind(response);response.json=async()=>transform(await json());
+      void refresh();const json=response.json.bind(response);response.json=async()=>{const data=await json();await ready;return transform(data);};
     }
     return response;
   };

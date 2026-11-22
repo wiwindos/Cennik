@@ -12,7 +12,7 @@ from ahledger.util import atomic_json
 from cennik.collector.auctioneers import AuctioneerProposal, Review, validate_snapshot
 from cennik.collector.client import CollectorClient
 from cennik.collector.protocol import Connection, Observation
-from cennik.markets import MarketBinding
+from cennik.markets import MarketBinding, realm_matches
 
 
 class ServerCollectors:
@@ -78,7 +78,7 @@ class ServerCollectors:
                     unbound = profile is None or (
                         value.kind != "scan" and (
                             data.get("market") != profile.market
-                            or data.get("realm") not in profile.realm_names
+                            or not realm_matches(profile, data.get("realm"))
                         )
                     )
                     if unbound or value.kind == "scan" and receipt.get("scope") == "unknown":
@@ -210,19 +210,18 @@ class HubAdapter(CollectorClient):
             return {"revoked": True}
         if path == "/v1/admin/auctioneers":
             profile = self.server.catalog.profile(self.profile.id)
-            result = hub.auctioneers.overview()
             rows = []
-            for p in result["items"]:
-                if p["data"]["realm"] not in profile.realm_names or p["data"].get("server_id") not in {None, "", profile.id}:
+            for p in hub.auctioneers.proposals():
+                if not realm_matches(profile, p["data"]["realm"]) or p["data"].get("server_id") not in {None, "", profile.id}:
                     continue
                 bound = AuctioneerProposal.model_validate({**p["data"], "server_id": profile.id, "market": profile.market})
-                rows.append({**p, "registry": hub.auctioneers.entry(bound.scope_id())})
-            return {**result, "items": rows, **self.registry()}
+                rows.append({**p, 'scope_id': bound.scope_id(), 'data': bound.model_dump(mode='json')})
+            return {**hub.auctioneers.overview(rows), **self.registry()}
         if path.endswith("/review"):
             identity = path.split('/')[-2]
             profile = self.server.catalog.profile(self.profile.id)
             proposal = next((p for p in hub.auctioneers.proposals() if p["record_id"] == identity), None)
-            if not proposal or proposal["data"]["realm"] not in profile.realm_names or proposal["data"].get("server_id") not in {None, "", profile.id}:
+            if not proposal or not realm_matches(profile, proposal["data"]["realm"]) or proposal["data"].get("server_id") not in {None, "", profile.id}:
                 raise ValueError("Аукционист не относится к выбранному серверу")
             return hub.auctioneers.review(identity, Review.model_validate({**body, "server_id": profile.id, "market": profile.market}))
         raise ValueError("Неизвестная административная операция")

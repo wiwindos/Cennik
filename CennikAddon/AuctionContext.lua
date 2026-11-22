@@ -30,7 +30,7 @@ function A:Read()
   if x~=x or y~=y or x<0 or x>1 or y<0 or y>1 then return end
   local info=C_Map.GetMapInfo and safe(C_Map.GetMapInfo,map)
   local build=GetBuildInfo and select(2,GetBuildInfo())
-  return {npc_id=npc,npc_name=name,realm=GetRealmName(),map_id=map,map_name=info and info.name or "",locale=C:ClientLocale(),
+  return {npc_id=npc,npc_name=name,realm=C:RealmName(),map_id=map,map_name=info and info.name or "",locale=C:ClientLocale(),
     server_id=C.db.server_binding and C.db.server_binding.id or "",market=C.db.server_binding and C.db.server_binding.market or "",
     x=math.floor(x*1000+.5)/10,y=math.floor(y*1000+.5)/10,observed_at=math.floor(C:Now()),build=tostring(build or "")}
 end
@@ -40,7 +40,7 @@ function A:Resolve()
   if not data or registry.format_version~=1 or not registry.fetched_at or C:Now()<registry.fetched_at-300 or C:Now()-registry.fetched_at>86400 then return nil,data end
   for _,entry in ipairs(registry.entries or {}) do
     local d=entry.data
-    if entry.approved and d and d.npc_id==data.npc_id and d.realm==data.realm and d.map_id==data.map_id
+    if entry.approved and d and d.npc_id==data.npc_id and C:EquivalentRealms(d.realm,data.realm,C.db.server_binding) and d.map_id==data.map_id
       and (d.server_id or "")==data.server_id and (d.market or "")==data.market
       and math.abs(d.x-data.x)<=2 and math.abs(d.y-data.y)<=2
       and (entry.auction_type=="ordinary" or entry.auction_type=="neutral") then
@@ -77,6 +77,10 @@ end
 function A:Propose(kind)
   if kind~="ordinary" and kind~="neutral" then return false end
   local existing=self:Resolve()
+  if existing then
+    if C.CollectorStatus then C.CollectorStatus:Set("AUCTION_ALREADY_REVIEWED","Аукционист уже подтверждён владельцем для всех участников рынка. Повторная заявка не нужна.") end
+    return true
+  end
   local data=self:Read()
   if not data then
     if C.CollectorStatus then C.CollectorStatus:Set("AUCTION_CONTEXT_UNKNOWN","Не удалось прочитать ID, имя или координаты аукциониста") end
@@ -91,8 +95,7 @@ function A:Propose(kind)
   data.proposed_type=kind
   C.db.auctioneer_proposals[key]=data
   if C.CollectorStatus then C.CollectorStatus:Set("AUCTION_PROPOSAL_PENDING",
-    existing and "Новое предложение сохранено; до решения владельца действует прежний подтверждённый тип. Передача после /reload или выхода"
-    or "Заявка сохранена. После /reload или выхода приложение передаст её владельцу; до одобрения операции заблокированы") end
+    "Заявка сохранена. После /reload или выхода приложение передаст её владельцу; до одобрения операции заблокированы") end
   return true
 end
 function A:Summary()
@@ -103,7 +106,7 @@ function A:Summary()
     lines[#lines+1]=data.map_name .. " (#" .. data.map_id .. ") · " .. data.x .. ", " .. data.y .. " — положение игрока при общении"
     local key=tostring(data.npc_id) .. ":" .. data.realm .. ":" .. data.map_id
     local proposal=C.db.auctioneer_proposals[key]
-    if proposal then lines[#lines+1]="Предложено игроком: " .. (proposal.proposed_type=="neutral" and "межфракционный" or "обычный") .. "; предложение не является подтверждением" end
+    if proposal and not context then lines[#lines+1]="Предложено игроком: " .. (proposal.proposed_type=="neutral" and "межфракционный" or "обычный") .. "; предложение не является подтверждением" end
   else lines[#lines+1]="Откройте аукцион у NPC, чтобы прочитать его имя и местоположение" end
   return table.concat(lines,"\n")
 end

@@ -1,0 +1,5 @@
+﻿PASS: alternating 3/4 in two background windows; matched broadcasts; keyup pairing and flags; random intervals; unchanged foreground.
+PASS: cancellation during key hold releases the key and interrupts a 120-second delay in under 500 ms.
+PASS: closing all target windows stops the sender without further input.
+PASS: application form, hotkey registration and settings construct and render successfully.
+All checks passed. 2026-11-05T10:46:25.0357660+05:00

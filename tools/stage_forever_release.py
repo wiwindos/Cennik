@@ -80,7 +80,8 @@ def stage(destination):
         for suffix in (".exe", ".NOTICES.txt", ".sha256"):
             copy(build/(product+suffix), destination/"clients"/(product+suffix))
     addon = ROOT/"CennikAddon"
-    for name in ["CennikAddon.toc"] + [line.strip() for line in (addon/"CennikAddon.toc").read_text("utf-8").splitlines() if line.strip() and not line.startswith("#")]:
+    from cennik.workspace.install import addon_files
+    for name in addon_files(addon):
         target = destination/"clients/CennikAddon"/name
         if name == "ImportedData.lua":
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +89,7 @@ def stage(destination):
         else:
             copy(addon/name, target)
     release = {"format_version": 1, "prepared_at": datetime.now(UTC).isoformat(), "seed": manifest,
-        "worker_version": "0.6.0", "collector_version": "0.6.0", "addon_version": "0.22.0",
+        "worker_version": "0.6.0", "collector_version": "0.6.0", "addon_version": "0.23.0",
         "archive": False, "server_modified": False, "hub_access": "administrator or cennik grant",
         "excluded_legacy_entrypoints": sorted(LEGACY)}
     (destination/"RELEASE.json").write_text(json.dumps(release, ensure_ascii=False, indent=2)+"\n", "utf-8")

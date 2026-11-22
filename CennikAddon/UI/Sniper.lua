@@ -50,7 +50,7 @@ function S:WindowForControl(control)
 end
 function S:WatchWindowFocus()
   if not self.focusListener then
-    local listener=CreateFrame("Frame"); self.focusListener=listener
+    local listener=C.Fonts:CreateFrame("Frame"); self.focusListener=listener
     pcall(listener.RegisterEvent,listener,"GLOBAL_MOUSE_DOWN")
     listener:SetScript("OnEvent",function()
       local foci=GetMouseFoci and GetMouseFoci() or (GetMouseFocus and {GetMouseFocus()}) or {}
@@ -74,12 +74,12 @@ function S:WatchWindowFocus()
 end
 local function money(n) return n and GetMoneyString(n,true) or "нет данных" end
 local function text(parent,value,x,y,width)
-  local f=parent:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
+  local f=C.Fonts:CreateFontString(parent,nil,"OVERLAY","GameFontHighlightSmall")
   if type(parent.cennikWidth)=="number" and y>=-30 then width=math.min(width or 420,parent.cennikWidth-x-36) end
   f:SetPoint("TOPLEFT",x,y); f:SetWidth(width or 420); f:SetJustifyH("LEFT"); f:SetText(value); return f
 end
 local function button(parent,value,x,y,width,callback)
-  local f=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate")
+  local f=C.Fonts:CreateFrame("Button",nil,parent,"UIPanelButtonTemplate")
   f:SetSize(width,25); f:SetPoint("TOPLEFT",x,y); f:SetText(value)
   local function focus() S:FocusWindow(S:WindowForControl(f)) end
   f:HookScript("OnMouseDown",focus)
@@ -90,13 +90,13 @@ local function button(parent,value,x,y,width,callback)
   return f
 end
 local function input(parent,value,x,y,width,multiline)
-  local f=CreateFrame("EditBox",nil,parent,"InputBoxTemplate")
+  local f=C.Fonts:CreateFrame("EditBox",nil,parent,"InputBoxTemplate")
   f:SetPoint("TOPLEFT",x,y); f:SetSize(width,25); f:SetAutoFocus(false); f:SetText(tostring(value or ""))
   if multiline then f:SetMultiLine(true) end
   return f
 end
 local function panel(width,height)
-  local p=CreateFrame("Frame",nil,UIParent or AuctionHouseFrame,BackdropTemplateMixin and "BackdropTemplate" or nil)
+  local p=C.Fonts:CreateFrame("Frame",nil,UIParent or AuctionHouseFrame,BackdropTemplateMixin and "BackdropTemplate" or nil)
   p:Hide()
   p:SetSize(width,height); p:SetPoint("CENTER"); p:SetFrameStrata("DIALOG"); p:EnableMouse(true)
   p.cennikWidth=width
@@ -108,7 +108,7 @@ local function panel(width,height)
   else background:SetTexture("Interface\\Buttons\\WHITE8X8"); background:SetVertexColor(0.04,0.08,0.11,1) end
   p.cennikBackground=background
   if p.SetBackdrop then p:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=16,insets={left=4,right=4,top=4,bottom=4}}); p:SetBackdropColor(0.04,0.08,0.11,0.98) end
-  local close=CreateFrame("Button",nil,p,"UIPanelCloseButton"); close:SetSize(28,28); close:SetPoint("TOPRIGHT",-3,-3)
+  local close=C.Fonts:CreateFrame("Button",nil,p,"UIPanelCloseButton"); close:SetSize(28,28); close:SetPoint("TOPRIGHT",-3,-3)
   close:SetScript("OnClick",function() if p.onUserClose then p.onUserClose() end; p:Hide() end); p.cennikClose=close
   S.popupFrames=S.popupFrames or {}; S.popupFrames[p]=true
   p:SetMovable(true); p:RegisterForDrag("LeftButton")
@@ -131,18 +131,20 @@ function S:WatchAuctionTabs()
     local lib=LibStub and LibStub("LibAHTab-1-0",true)
     if lib and lib.SetSelected then
       hooksecurefunc(lib,"SetSelected",function(_,id)
+        if C.MarketCollector and C.MarketCollector.ownRequest then return end
         S:ClosePopups(); S.foreignTab=id~="Cennik"
-        if S.foreignTab then S:HoldForManualSearch("Открыта другая вкладка аукциона") end
+        if S.foreignTab then S:HoldForManualSearch("Открыта другая вкладка аукциона","tab") end
       end)
       self.libTabHook=true
     end
   end
   if not self.nativeTabHook and AuctionHouseFrame and AuctionHouseFrame.SetDisplayMode then
     local function selected(_,mode)
+      if C.MarketCollector and C.MarketCollector.ownRequest then return end
       S:ClosePopups()
       -- LibAHTab calls SetDisplayMode({}) while selecting an addon tab.
       if (type(mode)=="table" or type(mode)=="string") and #mode>0 then
-        S.foreignTab=true; S:HoldForManualSearch("Открыта обычная вкладка аукциона")
+        S.foreignTab=true; S:HoldForManualSearch("Открыта обычная вкладка аукциона","tab")
       end
     end
     hooksecurefunc(AuctionHouseFrame,"SetDisplayMode",selected); self.nativeTabHook=true
@@ -186,7 +188,7 @@ function S:ShowEditor(item,existing,preset)
     local id=tonumber(entry:GetText()) or tonumber(entry:GetText():match("item:(%d+)"))
     if id then S:ShowCard(id) else p.itemInfo:SetText("Сначала найдите и выберите предмет") end
   end)
-  local bags=CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); bags:SetPoint("TOPLEFT",165,-143); bags:SetSize(26,26); bags:SetChecked(def.use_bags)
+  local bags=C.Fonts:CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); bags:SetPoint("TOPLEFT",165,-143); bags:SetSize(26,26); bags:SetChecked(def.use_bags)
   text(p,"Вычесть сумки один раз",195,-151,285)
   local priceLabel=text(p,"",18,-223,470)
   local price=input(p,0,22,-245,180) -- discount only
@@ -234,7 +236,7 @@ function S:ShowEditor(item,existing,preset)
     def.priority=def.priority=="normal" and "high" or def.priority=="high" and "low" or "normal"; self:SetText(priorities[def.priority])
   end)
   priority:SetText(priorities[def.priority])
-  local exact=CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); exact:SetPoint("TOPLEFT",15,-280); exact:SetSize(26,26); exact:SetChecked(def.item_level~=nil)
+  local exact=C.Fonts:CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); exact:SetPoint("TOPLEFT",15,-280); exact:SetSize(26,26); exact:SetChecked(def.item_level~=nil)
   text(p,"Точный вариант из поиска Auctionator",45,-287,440)
   note=text(p,"Пример цены: 5 з / 48 с / 98 м. Предел — за одну штуку.\nСкидка 50%: медиана 2 з → порог 1 з. Сумки вычитаются один раз.",18,-317,475)
   button(p,"Сохранить цель",18,-380,220,function()
@@ -262,9 +264,9 @@ function S:ShowTransfer()
   if self.transfer then self.transfer:Hide() end
   local p=panel(600,405); self.transfer=p
   text(p,"Список снайпера: экспорт / импорт",18,-18,550)
-  local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",24,-48); scroll:SetSize(530,230); scroll:SetClipsChildren(true)
+  local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",24,-48); scroll:SetSize(530,230); scroll:SetClipsChildren(true)
   local box=input(scroll,self:Export(),0,0,515,true); box:SetHeight(230); box:SetMaxLetters(200000)
-  box:SetFontObject(GameFontHighlightSmall); box:SetJustifyH("LEFT"); box:SetJustifyV("TOP")
+  C.Fonts:FontObject(box,GameFontHighlightSmall); box:SetJustifyH("LEFT"); box:SetJustifyV("TOP")
   scroll:SetScrollChild(box)
   box:SetScript("OnTextChanged",function(self) self:SetHeight(math.max(230,self:GetStringHeight()+20)); scroll:UpdateScrollChildRect() end)
   local note=text(p,"Скопируйте список или вставьте другой для предварительного просмотра.",18,-290,550)
@@ -297,8 +299,8 @@ end
 function S:ShowHistory()
   local p=panel(565,420)
   text(p,"Журнал снайпера · последние 200 событий",18,-18,520)
-  local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-48); scroll:SetSize(510,305); scroll:SetClipsChildren(true)
-  local body=CreateFrame("Frame",nil,scroll); body:SetSize(495,305); scroll:SetScrollChild(body)
+  local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-48); scroll:SetSize(510,305); scroll:SetClipsChildren(true)
+  local body=C.Fonts:CreateFrame("Frame",nil,scroll); body:SetSize(495,305); scroll:SetScrollChild(body)
   local lines={}; local names={started="Отправлена",unknown="Результат неизвестен",bought="Куплено",not_bought="Не куплено",cancelled="Отменена",api_error="Ошибка API"}
   for i=#(C.db.sniper.history or {}),1,-1 do
     local event=C.db.sniper.history[i]
@@ -339,8 +341,8 @@ function U:SniperPanel()
     local p=panel(500,math.min(500,135+35*#task.lines))
     text(p,"Добавить цель из задания",18,-18,450)
     button(p,"Готовый предмет",18,-48,440,function() p:Hide(); S:ShowEditor(task.item_id) end)
-    local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-80); scroll:SetSize(435,math.min(340,35*#task.lines))
-    local body=CreateFrame("Frame",nil,scroll); body:SetSize(420,35*#task.lines); scroll:SetScrollChild(body)
+    local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-80); scroll:SetSize(435,math.min(340,35*#task.lines))
+    local body=C.Fonts:CreateFrame("Frame",nil,scroll); body:SetSize(420,35*#task.lines); scroll:SetScrollChild(body)
     for i,line in ipairs(task.lines) do
       button(body,C.Items:Label(line.item_id) .. " × " .. line.quantity,0,-35*(i-1),415,function()
         p:Hide(); S:ShowEditor(line.item_id,nil,{item_id=line.item_id,quantity=line.quantity,mode="any",priority="normal",discount_bps=5000,unit_limit_copper=0,use_bags=true})

@@ -115,6 +115,7 @@ class SniperBook:
                 CREATE TABLE IF NOT EXISTS sniper_references(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS sniper_progress(id INTEGER PRIMARY KEY,payload TEXT NOT NULL);""")
             db.execute("CREATE TABLE IF NOT EXISTS sniper_recipe_requests(id TEXT PRIMARY KEY,item_id INTEGER,completed INTEGER DEFAULT 0)")
+            db.execute('CREATE TABLE IF NOT EXISTS sniper_client_progress(owner TEXT PRIMARY KEY,payload TEXT NOT NULL)')
             db.execute("INSERT OR IGNORE INTO sniper_meta VALUES(1,?,?)", [uuid4().hex, self.w.settings().budget_copper])
 
     @staticmethod
@@ -142,8 +143,26 @@ class SniperBook:
             "rules": [r.model_dump(mode="json") for r in rules], "references": references, "reports": reports,
             "names": names, "game": json.loads(progress[0]) if progress else None}
 
-    def wire(self):
-        return self.listing(wire=True)
+    def wire(self, owner='local'):
+        result=self.listing(wire=True)
+        with self.w.store.connection() as db:
+            rows=[(key,json.loads(payload)) for key,payload in db.execute('SELECT owner,payload FROM sniper_client_progress ORDER BY rowid')]
+            events=[json.loads(row[0]) for row in db.execute("SELECT payload FROM sniper_reports WHERE json_extract(payload,'$.kind')='purchase' ORDER BY rowid")]
+        totals={}
+        for key,progress in rows:
+            for identity,row in progress.items():
+                total=totals.setdefault(identity,{'bought':0,'spent':0,'stock':row.get('stock',0),'own_bought':0,'own_spent':0})
+                total['bought']+=row['bought']
+                total['spent']+=row['spent']
+                if key==owner:
+                    total['own_bought'],total['own_spent']=row['bought'],row['spent']
+        attempts={}
+        for event in events:
+            if event.get('attempt_id'):
+                attempts[event['attempt_id']]=event.get('state')
+        result['shared_progress']=totals
+        result['purchase_unresolved']=any(state in {'started','unknown'} for state in attempts.values())
+        return result
 
     def budget(self, value: int):
         with self.w.store.connection() as db:
@@ -287,7 +306,7 @@ class SniperBook:
             db.execute("UPDATE sniper_meta SET revision=?", [uuid4().hex])
         return result
 
-    def accept_game(self, data: dict):
+    def accept_game(self, data: dict, owner='local'):
         if not isinstance(data, dict) or data.get("workspace_id") != self.w.identity:
             return []
         events = data.get("events") or []
@@ -334,10 +353,28 @@ class SniperBook:
             if changed:
                 db.execute("UPDATE sniper_meta SET revision=?", [uuid4().hex])
             progress = {}
+            own_progress = {}
             for identity, rule in state.items():
                 if not isinstance(rule, dict):
                     continue
                 progress[str(identity)] = {key: rule.get(key) for key in ("goal", "stock", "bought", "spent", "enabled", "last_check_epoch", "reason")}
+                owned={}
+                for key in ('bought','spent','stock'):
+                    value=rule.get('own_'+key,rule.get(key,0)) if key!='stock' else rule.get('stock',0)
+                    if type(value) is not int or not 0<=value<=MAX_INTEGER:
+                        value=0
+                    owned[key]=value
+                own_progress[str(identity)]=owned
+            previous=db.execute('SELECT payload FROM sniper_client_progress WHERE owner=?',[owner]).fetchone()
+            previous=json.loads(previous[0]) if previous else {}
+            for identity,row in own_progress.items():
+                old=previous.get(identity,{})
+                if 'stock' in old:
+                    row['stock']=old['stock']
+                for key in ('bought','spent'):
+                    row[key]=max(row[key],old.get(key,0))
+                previous[identity]=row
+            db.execute('INSERT INTO sniper_client_progress VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET payload=excluded.payload',[owner,dumps(previous)])
             db.execute("INSERT OR REPLACE INTO sniper_progress VALUES(1,?)", [dumps({"received_at": datetime.now(UTC).isoformat(),
                 "spent": data.get("spent"), "rules": progress})])
         return accepted

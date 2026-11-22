@@ -9,14 +9,14 @@ from cennik.strategies.common import opportunity
 
 class SimpleCraftArbitrage:
     id = "simple_craft"
-    version = "0.3.0"
+    version = "0.4.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
         results = []
         liquidity = CraftLiquidity(context)
         for recipe in context.provider.recipes():
             output = context.prices.current.get(recipe.result_item_id) if recipe.result_item_id is not None else None
-            problem = context.prices.usable(output)
+            problem = context.prices.usable(output, item_id=recipe.result_item_id, strategy=self.id, purpose="sale")
             if problem:
                 context.reject(self.id, "result_" + problem)
                 continue
@@ -46,9 +46,11 @@ class SimpleCraftArbitrage:
                 auction = price.min_copper if price and not context.prices.usable(price) else None
                 offer = cheapest_material(auction, item.vendor_buy_copper if item else None)
                 if reagent.quantity <= 0 or offer is None:
+                    if offer is None:
+                        context.prices.price_gap(reagent.item_id, self.id, "material", context.prices.usable(price))
                     context.reject(self.id, "missing_material_price_or_quantity")
                     valid = False
-                    break
+                    continue
                 unit, source = offer
                 total += unit * reagent.quantity
                 entry: dict[str, Any] = {"item_id": reagent.item_id, "item_name": item.name if item else None,

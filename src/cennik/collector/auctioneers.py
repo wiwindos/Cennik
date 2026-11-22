@@ -13,7 +13,13 @@ from pydantic import Field
 
 from ahledger.util import atomic_json
 from cennik.core.models import Model
-from cennik.markets import MarketBinding, neutral_market, valid_market
+from cennik.markets import (
+    MarketBinding,
+    equivalent_realms,
+    forever_realm_identity,
+    neutral_market,
+    valid_market,
+)
 
 
 class AuctioneerProposal(Model):
@@ -99,6 +105,30 @@ class AuctioneerRegistry:
         path = self.root / "registry" / (checked_id(identity)+".json")
         return json.loads(path.read_text("utf-8")) if path.exists() else None
 
+    @staticmethod
+    def group(data):
+        identity = forever_realm_identity(data.get("realm"))
+        market = data.get("market", "")
+        if identity and data.get("server_id") and valid_market(market) and market.split('.')[1] == data['server_id'] and market.split('.')[-1] == identity[0]:
+            return data['server_id'], identity, data['npc_id'], data['map_id']
+        return AuctioneerProposal.model_validate(data).scope_id()
+
+    def effective_entries(self):
+        groups = {}
+        orders = {}
+        for path in (self.root / "registry").glob("*.json"):
+            row = json.loads(path.read_text("utf-8"))
+            key = self.group(row['data'])
+            order = (row['reviewed_at'], row.get('reviewed_at_ns', path.stat().st_mtime_ns), row['revision'], row['scope_id'])
+            if key not in orders or order > orders[key]:
+                groups[key] = row
+                orders[key] = order
+        return list(groups.values())
+
+    def for_proposal(self, data):
+        key = self.group(data)
+        return next((row for row in self.effective_entries() if self.group(row['data']) == key), None)
+
     def suggest(self, record_id, data, contributor):
         proposal = AuctioneerProposal.model_validate(data)
         if proposal.observed_at > int(time.time())+300:
@@ -119,26 +149,34 @@ class AuctioneerRegistry:
             if proposal is None:
                 raise ValueError("Заявка не найдена")
             data = AuctioneerProposal.model_validate({**proposal["data"], **({"server_id": value.server_id, "market": value.market} if value.server_id else {})})
+            old = self.for_proposal(data.model_dump(mode="json"))
+            if old:
+                data = data.model_copy(update={"realm": old['data']['realm']})
             scope_id = data.scope_id()
-            old = self.entry(scope_id)
             revision = old["revision"] if old else 0
             if revision != value.expected_revision:
                 raise ValueError("Решение уже изменено; обновите страницу")
             action = {"at": int(time.time()), "record_id": record_id, "scope_id": scope_id, **value.model_dump(mode="json")}
+            unchanged = bool(old and old['approved'] and value.action == 'approve' and old['auction_type'] == value.auction_type
+                             and abs(old['data']['x']-data.x) <= 2 and abs(old['data']['y']-data.y) <= 2)
+            next_revision = revision + (value.action != 'reject' and not unchanged)
             if value.action != "reject":
                 if value.action == "approve" and value.auction_type is None:
                     raise ValueError("Выберите подтверждённый тип")
-                entry = {"scope_id": scope_id, "revision": revision+1, "approved": value.action == "approve",
-                    "auction_type": value.auction_type, "data": data.model_dump(mode="json"), "reviewed_at": action["at"],
+                entry = {"scope_id": scope_id, "revision": next_revision, "approved": value.action == "approve",
+                    "auction_type": value.auction_type, "data": old['data'] if unchanged else data.model_dump(mode="json"), "reviewed_at": action["at"], "reviewed_at_ns": time.time_ns(),
                     "history": [*(old.get("history", []) if old else []), action]}
                 atomic_json(self.root / "registry" / (entry["scope_id"]+".json"), entry)
             atomic_json(self.root / "reviews" / (checked_id(record_id)+".json"), action)
-            return {"scope_id": scope_id, "revision": revision+(value.action != "reject"), "action": value.action}
+            return {"scope_id": scope_id, "revision": next_revision, "action": value.action}
 
     def wire(self):
         with self.lock:
+            effective = {self.group(e['data']): e for e in self.effective_entries()}
             entries = [json.loads(p.read_text("utf-8")) for p in (self.root / "registry").glob("*.json")]
-            public = [{k: v for k, v in e.items() if k != "history"} for e in entries if e["approved"]]
+            entries = [e for e in entries if effective[self.group(e['data'])]['approved']
+                       and e['auction_type'] == effective[self.group(e['data'])]['auction_type']]
+            public = [{k: v for k, v in e.items() if k not in {"history", "reviewed_at_ns"}} for e in entries if e["approved"]]
             # Locale is observation evidence, not part of the execution registry.
             # Keep the old registry contract readable by already distributed clients.
             for entry in public:
@@ -146,12 +184,27 @@ class AuctioneerRegistry:
             public.sort(key=lambda e: e["scope_id"])
             return {"format_version": 1, "version": hashlib.sha256(json.dumps(public, sort_keys=True).encode()).hexdigest(), "entries": public}
 
-    def overview(self):
-        rows = []
-        for p in self.proposals():
+    def overview(self, proposals=None):
+        groups = {}
+        for p in self.proposals() if proposals is None else proposals:
             path = self.root / "reviews" / (p["record_id"]+".json")
             review = json.loads(path.read_text("utf-8")) if path.exists() else None
-            rows.append({**p, "registry": self.entry(review.get("scope_id", p["scope_id"]) if review else p["scope_id"]), "review": review})
+            source = self.root / 'proposals' / (p['record_id']+'.json')
+            order = (p['data']['observed_at'], source.stat().st_mtime_ns, p['record_id'])
+            key = self.group(p['data'])
+            group = groups.setdefault(key, {'row': p, 'order': order, 'contributors': set(), 'reviews': [], 'count': 0})
+            if order > group['order']:
+                group.update(row=p, order=order)
+            group['contributors'].update(p['contributors'])
+            group['count'] += 1
+            if review:
+                group['reviews'].append(((review['at'], path.stat().st_mtime_ns), review))
+        rows = []
+        for group in groups.values():
+            p = group['row']
+            rows.append({**p, 'contributors': sorted(group['contributors']), 'observation_count': group['count'],
+                         'registry': self.for_proposal(p['data']),
+                         'review': max(group['reviews'], key=lambda r: r[0])[1] if group['reviews'] else None})
         return {"items": sorted(rows, key=lambda p: p["data"]["observed_at"], reverse=True), **self.wire()}
 
 
@@ -171,14 +224,15 @@ def scan_scope(scan: dict, snapshot: dict) -> str:
         d = entry["data"]
         if context.get("server_id", "") != d.get("server_id", ""):
             return "unknown"
-        if any(context.get(k) != d[k] for k in ("npc_id", "realm", "map_id")):
+        binding = next((b for b in snapshot.get('market_catalog', []) if b.get('id') == context.get('server_id')), None)
+        if any(context.get(k) != d[k] for k in ("npc_id", "map_id")) or not equivalent_realms(context.get('realm'), d['realm'], binding):
             return "unknown"
         x, y = float(context["x"]), float(context["y"])
         if not math.isfinite(x) or not math.isfinite(y) or not 0 <= x <= 100 or not 0 <= y <= 100:
             return "unknown"
         if abs(x-d["x"])>2 or abs(y-d["y"])>2:
             return "unknown"
-        if context.get("auction_type") != entry["auction_type"] or scan.get("realm") != d["realm"]:
+        if context.get("auction_type") != entry["auction_type"] or scan.get("realm") != context.get('realm'):
             return "unknown"
         base_market = d.get("market") or "forever.pvp.alliance.us"
         market = neutral_market(base_market) if entry["auction_type"] == "neutral" else base_market

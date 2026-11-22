@@ -11,8 +11,8 @@ function S:ShowPicker(rows,callback)
   if #rows==1 then callback(rows[1].item_id); return end
   local p=panel(540,390)
   text(p,#rows>0 and "Выберите предмет" or "Не найдено. Попробуйте другое название или ID.",18,-18,490)
-  local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-50); scroll:SetSize(485,275); scroll:SetClipsChildren(true)
-  local body=CreateFrame("Frame",nil,scroll); body:SetSize(470,math.max(275,#rows*30)); scroll:SetScrollChild(body)
+  local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-50); scroll:SetSize(485,275); scroll:SetClipsChildren(true)
+  local body=C.Fonts:CreateFrame("Frame",nil,scroll); body:SetSize(470,math.max(275,#rows*30)); scroll:SetScrollChild(body)
   for i,row in ipairs(rows) do button(body,C.Items:Label(row.item_id) .. " (#" .. row.item_id .. ")",0,-30*(i-1),465,function() p:Hide(); callback(row.item_id) end) end
   button(p,"Закрыть",365,-345,145,function() p:Hide() end)
   self:OpenWindow(p)
@@ -40,8 +40,8 @@ function S:ShowCard(item,index)
       if not C:Integer(n) or n>10000 then self:Notice("Число крафтов: от 1 до 10000"); return end
       self:ShowMaterialPreview(recipe,n)
     end)
-    local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-170); scroll:SetSize(525,250); scroll:SetClipsChildren(true)
-    local body=CreateFrame("Frame",nil,scroll); body:SetSize(510,math.max(250,#recipe.materials*47)); scroll:SetScrollChild(body)
+    local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-170); scroll:SetSize(525,250); scroll:SetClipsChildren(true)
+    local body=C.Fonts:CreateFrame("Frame",nil,scroll); body:SetSize(510,math.max(250,#recipe.materials*47)); scroll:SetScrollChild(body)
     for i,line in ipairs(recipe.materials) do
       local facts=self:CatalogItem(line.item_id); local npc=facts and facts.vendor_buy_copper and facts.vendor_buy_copper>0
       itemText(body,line.item_id," × " .. line.quantity .. (npc and " · есть цена NPC" or " · аукцион"),0,-47*(i-1),335)
@@ -66,10 +66,10 @@ function S:ShowMaterialPreview(recipe,batches)
     lines[#lines+1]=C.Items:Label(line.item_id) .. " × " .. n .. (npc and " · NPC: отдельно" or " · добавить в снайпер")
     if not npc then auction[#auction+1]={item_id=line.item_id,quantity=n} end
   end
-  local scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-50); scroll:SetSize(510,230); scroll:SetClipsChildren(true)
-  local body=CreateFrame("Frame",nil,scroll); body:SetSize(495,230); scroll:SetScrollChild(body)
+  local scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); scroll:SetPoint("TOPLEFT",18,-50); scroll:SetSize(510,230); scroll:SetClipsChildren(true)
+  local body=C.Fonts:CreateFrame("Frame",nil,scroll); body:SetSize(495,230); scroll:SetScrollChild(body)
   local label=text(body,table.concat(lines,"\n\n"),0,0,490); body:SetHeight(math.max(230,label:GetStringHeight()+20))
-  local bags=CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); bags:SetPoint("TOPLEFT",15,-292); bags:SetChecked(false)
+  local bags=C.Fonts:CreateFrame("CheckButton",nil,p,"UICheckButtonTemplate"); bags:SetPoint("TOPLEFT",15,-292); bags:SetChecked(false)
   text(p,"Вычесть сумки один раз при добавлении",48,-300,490)
   text(p,"Режим по умолчанию: «Любая цена». После добавления можно изменить\nусловие каждого материала. Новые цели приостановлены.",18,-338,520)
   local note=text(p,"",18,-383,520)

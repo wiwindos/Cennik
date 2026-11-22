@@ -7,6 +7,8 @@ from pathlib import Path
 
 from cennik.core.diagnostics import empty_metadata_summary, summarize_run
 from cennik.core.models import AnalyticsSettings, Opportunity, Run
+from .retention import rotate_results
+from cennik.core.calculation import HEAVY,config_key,extended_stale,rehome
 
 
 class Store:
@@ -31,6 +33,8 @@ class Store:
             """)
             if "summary" not in {row["name"] for row in db.execute("PRAGMA table_info(runs)")}:
                 db.execute("ALTER TABLE runs ADD COLUMN summary TEXT")
+            if 'results_retained' not in {row['name'] for row in db.execute('PRAGMA table_info(runs)')}:
+                db.execute('ALTER TABLE runs ADD COLUMN results_retained INTEGER NOT NULL DEFAULT 1')
 
     @contextmanager
     def connection(self):
@@ -70,28 +74,60 @@ class Store:
     def cached(self, identity: str, *, summary: bool = False) -> Run | None:
         with self.connection() as db:
             column = "run_id" if summary else "payload"
-            row = db.execute(f"SELECT {column} FROM runs WHERE fingerprint=? AND status='completed' ORDER BY started_at DESC LIMIT 1", [identity]).fetchone()
+            row = db.execute(f"SELECT {column} FROM runs WHERE fingerprint=? AND status='completed' AND results_retained=1 ORDER BY started_at DESC LIMIT 1", [identity]).fetchone()
         return self.run_summary(row[0]) if summary and row else Run.model_validate_json(row[0]) if row else None
 
     def publish_cached(self, run: Run) -> None:
         with self.connection() as db:
+            if not db.execute("SELECT 1 FROM runs WHERE run_id=? AND status='completed' AND results_retained=1", [run.run_id]).fetchone():
+                raise ValueError('Подробный результат этого расчёта уже снят с хранения; требуется новый расчёт')
             db.execute("INSERT OR REPLACE INTO published VALUES(?,?)", [run.market, run.run_id])
+            rotate_results(db)
 
     def finish(self, run: Run, opportunities: list[Opportunity]) -> None:
         # Rows, completed run and market pointer commit together. Failure never changes
         # the last successful pointer, and partially calculated signals stay invisible.
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
             if run.status == "completed":
-                db.executemany("INSERT INTO opportunities VALUES(?,?,?,?,?,?,?,?,?,?)", [
+                scope=run.diagnostics.get('calculation_scope')
+                if scope in {'light','extended'}:
+                    previous=db.execute('SELECT coalesce(r.summary,r.payload) FROM runs r JOIN published p ON p.run_id=r.run_id WHERE p.market=?',[run.market]).fetchone()
+                    old=Run.model_validate_json(previous[0]) if previous else None
+                    if scope=='extended' and old:
+                        run.generation=old.generation
+                    carry=[]
+                    if old:
+                        match='IN' if scope=='light' else 'NOT IN'
+                        for row in db.execute('SELECT payload FROM opportunities WHERE run_id=? AND strategy '+match+' (?,?)',[old.run_id,*sorted(HEAVY)]):
+                            item=Opportunity.model_validate_json(row[0])
+                            if (item.strategy_id in HEAVY)==(scope=='light'):
+                                if item.strategy_id not in run.config.enabled_strategies:continue
+                                if scope=='extended' and config_key(old.config)!=config_key(run.config):continue
+                                if item.strategy_id in HEAVY and 'extended_analysis' not in item.details:
+                                    item.details['extended_analysis']={'generation':old.generation,'config':config_key(old.config),'computed_at':old.as_of.isoformat(),'selection':{}}
+                                carry.append(rehome(item,run))
+                    if scope=='light' and old and old.diagnostics.get('extended_analysis'):
+                        run.diagnostics['extended_analysis']=old.diagnostics['extended_analysis']
+                    elif scope=='light' and carry:
+                        evidence=next((v.details.get('extended_analysis') for v in carry if v.strategy_id in HEAVY),None)
+                        if evidence:run.diagnostics['extended_analysis']=evidence
+                    opportunities=[*opportunities,*carry]
+                    for item in opportunities:
+                        if item.strategy_id in HEAVY:
+                            item.details['extended_stale']=extended_stale(item,run.generation,run.config) or item.strategy_version!=run.strategy_versions.get(item.strategy_id)
+                    run.signal_count=len(opportunities)
+                db.executemany("INSERT INTO opportunities VALUES(?,?,?,?,?,?,?,?,?,?)", (
                     (o.id, o.run_id, o.market, o.strategy_id, o.potential_profit_copper,
                      str(o.roi_percent), str(o.rating), o.data_age_seconds, o.confidence, o.model_dump_json())
-                    for o in opportunities])
+                    for o in opportunities))
                 db.execute("INSERT OR REPLACE INTO published VALUES(?,?)", [run.market, run.run_id])
             signals = {strategy: 0 for strategy in run.strategy_versions}
             for opportunity in opportunities:
                 signals[opportunity.strategy_id] = signals.get(opportunity.strategy_id, 0) + 1
             db.execute("UPDATE runs SET status=?,payload=?,summary=? WHERE run_id=?", [run.status,
                 run.model_dump_json(), summarize_run(run, signals=signals).model_dump_json(), run.run_id])
+            rotate_results(db)
 
     def run_summary(self, identity: str) -> Run | None:
         with self.connection() as db:
@@ -102,7 +138,7 @@ class Store:
                 return Run.model_validate_json(row[0])
             # Backfill old runs without transferring/deserializing their potentially
             # huge metadata arrays in Python. Existing results need no recalculation.
-            compact = db.execute("SELECT json_remove(payload,'$.diagnostics.quality.metadata') FROM runs WHERE run_id=?", [identity]).fetchone()[0]
+            compact = db.execute("SELECT json_remove(payload,'$.diagnostics.quality.metadata','$.diagnostics.price_gaps.items') FROM runs WHERE run_id=?", [identity]).fetchone()[0]
             counts = empty_metadata_summary()
             for group in db.execute("""SELECT coalesce(json_extract(m.value,'$.dataset'),'unknown') dataset,
                 coalesce(json_extract(m.value,'$.status'),'unknown') status,count(*) records,
@@ -138,13 +174,13 @@ class Store:
 
     def listing(self, market: str | None, *, strategy: str | None = None, min_profit: int = 0,
                 min_roi: str = "0", confidence: str | None = None, sort: str = "rating",
-                limit: int = 50, offset: int = 0) -> dict:
+                limit: int = 50, offset: int = 0, profession: str | None = None) -> dict:
         orders = {"rating": "rating DESC", "profit": "profit DESC", "roi": "roi DESC", "freshness": "age ASC"}
         if sort not in orders:
             raise ValueError("Invalid sort")
         run = self.latest(market, published=True, summary=True)
         if run is None:
-            return {"items": [], "total": 0, "run_id": None, "market": market, "limit": limit, "offset": offset}
+            return {"items": [], "total": 0, "run_id": None, "market": market, "limit": limit, "offset": offset, "professions": []}
         clauses = ["run_id=?", "market=?", "profit>=?", "roi>=CAST(? AS REAL)"]
         params: list = [run.run_id, market, min_profit, min_roi]
         if strategy:
@@ -154,11 +190,23 @@ class Store:
             clauses.append("confidence=?")
             params.append(confidence)
         where = " AND ".join(clauses)
+        craft_strategies = ("simple_craft", "craft_graph", "craft_disenchant")
+        craft_clause = "strategy IN (?,?,?)"
+        recipe_profession = "trim(COALESCE(json_extract(payload,'$.details.recipe.profession'),''))"
         with self.connection() as db:
+            # Facets cover the full published result, before pagination and profession selection.
+            professions = [row[0] for row in db.execute(
+                f"SELECT DISTINCT {recipe_profession} COLLATE NOCASE AS profession FROM opportunities WHERE "
+                + where + f" AND {craft_clause} AND {recipe_profession}<>'' ORDER BY profession COLLATE NOCASE",
+                [*params, *craft_strategies])]
+            if profession and profession.strip():
+                where += f" AND {craft_clause} AND {recipe_profession}=? COLLATE NOCASE"
+                params.extend([*craft_strategies, profession.strip()])
             total = db.execute("SELECT count(*) FROM opportunities WHERE " + where, params).fetchone()[0]
             rows = db.execute("SELECT payload FROM opportunities WHERE " + where + " ORDER BY " + orders[sort] + ",id LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
         return {"items": [Opportunity.model_validate_json(row[0]).model_dump(mode="json") for row in rows],
-                "total": total, "run_id": run.run_id, "market": market, "limit": limit, "offset": offset}
+                "total": total, "run_id": run.run_id, "market": market, "limit": limit, "offset": offset,
+                "professions": professions}
 
     def detail(self, market: str | None, identity: str) -> Opportunity | None:
         with self.connection() as db:

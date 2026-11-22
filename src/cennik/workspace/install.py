@@ -6,6 +6,24 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from ahledger.util import atomic_write as atomic_bytes
 
 
+def addon_files(source: Path) -> list[str]:
+    """TOC load units and declared media; assets are not executed as Lua."""
+    source = source.resolve()
+    lines = (source / "CennikAddon.toc").read_text("utf-8").splitlines()
+    files = ["CennikAddon.toc"]
+    for line in lines:
+        line = line.strip()
+        if line.startswith("## X-Cennik-Assets:"):
+            files.extend(name.strip().replace("\\", "/") for name in line.split(":", 1)[1].split(",") if name.strip())
+        elif line and not line.startswith("#"):
+            files.append(line.replace("\\", "/"))
+    for name in files:
+        path = source / name
+        if not path.resolve().is_relative_to(source) or path.is_symlink() or not path.is_file():
+            raise ValueError("Неверный или отсутствующий файл аддона: " + name)
+    return list(dict.fromkeys(files))
+
+
 def install_addon(game_root: str, backup_root: Path, *, source: Path | None = None) -> dict:
     game = Path(game_root).resolve(strict=True)
     source = source or Path(__file__).resolve().parents[3] / "CennikAddon"
@@ -20,8 +38,7 @@ def install_addon(game_root: str, backup_root: Path, *, source: Path | None = No
     toc = destination / "CennikAddon.toc"
     if destination.exists() and (not toc.is_file() or "## Title: Cennik" not in toc.read_text("utf-8")):
         raise ValueError("Папка CennikAddon не содержит распознанный аддон; автоматическая замена запрещена")
-    files = ["CennikAddon.toc"] + [line.strip().replace("\\", "/") for line in
-        (source / "CennikAddon.toc").read_text("utf-8").splitlines() if line.strip() and not line.startswith("#")]
+    files = addon_files(source)
     backup_root.mkdir(parents=True, exist_ok=True)
     backup = backup_root / (datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ") + ".zip")
     with ZipFile(backup, "w", ZIP_DEFLATED) as archive:

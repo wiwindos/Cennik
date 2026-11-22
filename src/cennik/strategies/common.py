@@ -27,6 +27,11 @@ def opportunity(
         reason += " Рецепт из стартовой беты; состав и изученность проверяются в игре."
     if context.config.own_data_only:
         risks = sorted(set(risks + ["own_data_only", "liquidity_unknown"]))
+    evidence = [(details or {}).get("liquidity", {})]
+    evidence.extend(row.get("liquidity", {}) for row in (details or {}).get("disenchant", {}).get("yields", []))
+    if any(row.get("status") == "unknown" for row in evidence):
+        risks = sorted(set(risks + ["liquidity_unknown"]))
+        reason += " Спрос неизвестен: размер партии выбирайте с учётом бюджета; скорость продажи не подтверждена."
     return Opportunity(
         id=uuid5(NAMESPACE_URL, f"{context.run_id}/{strategy.id}/{price.item_id}/{identity}").hex,
         run_id=context.run_id, strategy_id=strategy.id, strategy_version=strategy.version,

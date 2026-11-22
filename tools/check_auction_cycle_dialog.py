@@ -14,7 +14,7 @@ from cennik.worker.agent import WorkerAgent
 
 
 def main():
-    output = Path("outputs/auction-cycle-dialog")
+    output = Path("outputs/worker-0.6.4-dialog")
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cennik-cycle-dialog-") as directory:
         agent = WorkerAgent(Path(directory))
@@ -32,7 +32,7 @@ def main():
             ]
         }
         agent.cycle.backend = SimpleNamespace(
-            windows=lambda root: [{"hwnd": 1, "pid": 2, "title": "Тестовое окно WoW"}]
+            windows=lambda root: [{"hwnd": 1, "pid": 2, 'started': 3, 'path': 'fixture/Wow.exe', "title": "Тестовое окно WoW", 'monitor': 'DISPLAY2', 'x': -1920, 'y': 0}]
         )
         app = CollectorWindow(agent, worker=True)
         try:
@@ -64,6 +64,10 @@ def main():
             app.cycle_dialog()
             app.root.update()
             dialog = next(w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel))
+            from cennik.worker.idle import WindowsGame
+            native = WindowsGame()
+            native.user.GetAncestor.argtypes = [native.w.HWND, native.w.UINT]
+            native.user.GetAncestor.restype = native.w.HWND
 
             def widgets(parent):
                 for child in parent.winfo_children():
@@ -78,6 +82,10 @@ def main():
                 "Сохранить",
                 "Выключить",
                 "Продолжить цикл",
+                'Выбрать окно мышью через 3 секунды',
+                'Обновить список',
+                'Проверить окно',
+                'Обновить персонажей',
             }
             for widget in all_widgets:
                 assert (
@@ -85,16 +93,26 @@ def main():
                     <= dialog.winfo_rooty() + dialog.winfo_height()
                 ), widget
             image = ImageGrab.grab(
-                bbox=(
-                    dialog.winfo_rootx(),
-                    dialog.winfo_rooty(),
-                    dialog.winfo_rootx() + dialog.winfo_width(),
-                    dialog.winfo_rooty() + dialog.winfo_height(),
-                )
+                window=native.user.GetAncestor(dialog.winfo_id(),2), all_screens=True,
             )
             image.save(output / "settings.png")
             # Exercise the async checkbox/save/disable path without writing a live import.
             agent.write_import = lambda: None
+            agent.fetch_manifest = lambda: {'clients': [{**agent.manifest['clients'][0], 'character': 'Holy'}]}
+            next(w for w in buttons if w.cget('text') == 'Обновить персонажей').invoke()
+            deadline = time.monotonic()+4
+            while agent.manifest['clients'][0]['character'] != 'Holy' and time.monotonic() < deadline:
+                app.root.update()
+                time.sleep(.05)
+            while any(str(w.cget('state')) == 'disabled' for w in buttons) and time.monotonic() < deadline:
+                app.root.update()
+                time.sleep(.05)
+            assert agent.manifest['clients'][0]['character'] == 'Holy'
+            from cennik.worker.window_picker import WindowPicker
+            picker = next(w for w in all_widgets if isinstance(w, WindowPicker))
+            assert picker.choice.current() == -1
+            picker.choice.current(0)
+            picker.choose()
             app.root.setvar(toggles[0].cget("variable"), True)
             next(w for w in buttons if w.cget("text") == "Сохранить").invoke()
             deadline = time.monotonic() + 4

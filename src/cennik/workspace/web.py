@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import ipaddress
 import json
+from decimal import Decimal
+from functools import wraps
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import zstandard as zstd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from cennik.addon.api import addon_router
 from cennik.api.routes import analytics_router
@@ -30,6 +34,9 @@ from .production import ClientRoster, OrderCreate
 from .runtime import revision
 from .service import Workspace
 from .sniper import SnipeBudget, SnipeImport, SnipeMaterials, SnipeRule
+from .vendor_bargains import VendorBargains
+from .read_views import ReadViews
+from .extended import ExtendedRequest
 
 
 def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
@@ -46,6 +53,17 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
 
     app = FastAPI(title="Cennik Local", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.workspace = workspace
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
+    vendor_bargains = VendorBargains(workspace)
+    views=workspace.read_views=getattr(workspace,'read_views',None) or ReadViews(workspace.root)
+
+    def cached_read(function):
+        @wraps(function)
+        def wrapped(*args,**kwargs):
+            use_view=kwargs.pop('view',False)
+            if not use_view:return function(*args,**kwargs)
+            return views.get([function.__name__,kwargs],lambda:function(*args,**kwargs,view=True))
+        return wrapped
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
@@ -88,13 +106,87 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
                 "runtime_revision": loaded_revision, "restart_required": loaded_revision != revision()}
 
     @app.get("/api/v2/overview")
-    def overview():
-        return workspace.overview()
+    def overview(view: bool = False):
+        if not view:return workspace.overview()
+        def fallback():
+            return {'workspace_id':workspace.identity,'market':workspace.market_key,'market_info':workspace.market.market_info,
+                'server_mode':workspace.server_mode,'sources':[],'coverage':[],'archive':{'scans':None,'rows':None},
+                'bootstrap':workspace.bootstrap.metadata(),'npc_catalog':{'loading':True},'source_updates':{},'source_changes':{},
+                'npc_reference_prices':None,'npc_database_prices':None,'observed_recipes':None,'analytics':{},
+                'disenchant_rules':workspace.analytics.disenchant.snapshot().metadata(),'disenchant_check':{},
+                'bulk_checks':{'max_candidates':200,'max_unique_items':200}}
+        result=views.get('overview',workspace.overview,fallback=fallback)
+        result['analytics']=workspace.analytics.ui_status(result.get('analytics'))
+        result['analytics']['automatic_recalculation']=workspace.settings().auto_recalculate
+        result['generation']=result['analytics']['generation']
+        result['jobs']=workspace.jobs()
+        result['settings']=workspace.settings().model_dump(mode='json')
+        result['upstreams']=workspace.sources.public()
+        result['source_updates']=workspace.source_updates.status()
+        return result
+
+    @app.get("/api/v2/neutral")
+    @cached_read
+    def neutral_auctions_v2(mode: Literal["deals", "all"] = "deals", q: str = Query("", max_length=100),
+                         min_profit_copper: int = Query(0, ge=0, le=2**53-1),
+                         min_roi: float = Query(0, ge=0, le=1000000),
+                         budget_copper: int | None = Query(None, ge=0, le=2**53-1),
+                         max_age_seconds: int = Query(0, ge=0, le=31536000),
+                         sort: Literal["profit", "roi", "unit", "sales", "buy_price", "sale_price"] = "profit",
+                         order: Literal["asc", "desc"] = "desc",
+                         min_sales: float | None = Query(None, ge=0, le=1000000000000),
+                         max_sales: float | None = Query(None, ge=0, le=1000000000000),
+                         price_basis: Literal["buy", "sale"] = "buy",
+                         min_price_copper: int | None = Query(None, ge=0, le=2**53-1),
+                         max_price_copper: int | None = Query(None, ge=0, le=2**53-1),
+                         max_roi: float | None = Query(None, ge=0, le=1000000),
+                         offset: int = Query(0, ge=0, le=100000), limit: int = Query(50, ge=1, le=100),
+                         selected: str | None = Query(None, pattern=r"^[a-f0-9]{64}$"), view: bool = False):
+        config = workspace.effective_config()
+        result = workspace.market.neutral.report(cut=config.auction_cut_percent,
+            own_only=workspace.settings().own_data_only, mode=mode, q=q,
+            min_profit=min_profit_copper, min_roi=min_roi, budget=budget_copper,
+            max_age=max_age_seconds, sort=sort, order=order, offset=offset, limit=limit, selected=selected,
+            min_sales=min_sales, max_sales=max_sales, price_basis=price_basis,
+            min_price=min_price_copper, max_price=max_price_copper, max_roi=max_roi,prepared=view)
+        result["stale_after_seconds"] = config.max_price_age_seconds
+        return result
+
+    @app.get('/api/v2/vendor-bargains')
+    @cached_read
+    def vendor_comparison(q: str = Query('', max_length=100),
+                     sort: Literal['closeness','markup','price','vendor','quantity','name'] = 'closeness',
+                     order: Literal['asc','desc'] = 'asc',
+                     min_markup: Decimal | None = Query(None,ge=-100,le=1000000,decimal_places=4),
+                     max_markup: Decimal | None = Query(None,ge=-100,le=1000000,decimal_places=4),
+                     stackable_only: bool = False,
+                     max_age_seconds: int = Query(0,ge=0,le=31536000),
+                     offset: int = Query(0,ge=0,le=1000000),limit: int = Query(50,ge=1,le=100),view: bool = False):
+        return vendor_bargains.report(q=q,sort=sort,order=order,min_markup=min_markup,max_markup=max_markup,
+            max_age_seconds=max_age_seconds,offset=offset,limit=limit,stackable_only=stackable_only)
+
+    @app.get('/api/v2/extended-analysis')
+    def extended_status():return workspace.extended.status()
+
+    @app.post('/api/v2/extended-analysis',status_code=202)
+    def extended_start(value:ExtendedRequest):return workspace.extended.start(value)
 
     @app.get("/api/v2/game-names")
     def game_names(revision: str | None = Query(None, max_length=30)):
         workspace.market.names.seed(workspace.bootstrap.snapshot())
         return workspace.market.names.document(revision)
+
+    @app.get("/api/v2/price-gaps")
+    def price_gaps(q: str = Query("", max_length=100), limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0, le=5000)):
+        run = workspace.store.latest(workspace.market_key, published=True)
+        report = run.diagnostics.get("price_gaps", {}) if run else {}
+        rows = report.get("items", [])
+        if q:
+            translated = set(workspace.market.names.search(q, 5000))
+            rows = [r for r in rows if r["item_id"] in translated or str(r["item_id"]) == q or q.casefold() in (r.get("name") or "").casefold()]
+        return {"items": rows[offset:offset + limit], "total": len(rows), "limit": limit, "offset": offset,
+                "run_id": run.run_id if run else None, "as_of": run.as_of if run else None,
+                "truncated": report.get("truncated", False)}
 
     @app.get("/api/v2/production")
     def production():
@@ -215,12 +307,17 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
         return workspace.submit("bulk_publish", execute)
 
     @app.get("/api/v2/settings")
-    def settings():
+    def settings(view: bool = False):
         return {"workspace": workspace.settings(), "analytics": workspace.store.settings(),
             "upstreams": workspace.sources.public(), "source_updates": workspace.source_updates.status(),
-            "development": workspace.development_report(),
+            "development": None if view else workspace.development_report(),
             "schemas": {"workspace": WorkspaceSettings.model_json_schema(), "analytics": AnalyticsConfig.model_json_schema(),
                         "craft_graph": CraftGraphSettings.model_json_schema()}}
+
+    @app.get('/api/v2/development-report')
+    @cached_read
+    def development_report(view: bool = False):
+        return workspace.development_report()
 
     @app.put("/api/v2/settings")
     def save(value: WorkspaceSettings):
@@ -247,6 +344,10 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
     @app.post("/api/v2/analytics/recalculate", status_code=202)
     def recalculate():
         return workspace.submit("analytics", workspace.calculate)
+
+    @app.post('/api/v2/bootstrap/prices/remove', status_code=202)
+    def remove_beta_prices():
+        return workspace.submit('remove_beta_prices', workspace.remove_beta_prices, coalesce=True, defer=True)
 
     @app.get("/api/v2/disenchant/rules")
     def disenchant_rules():
@@ -371,7 +472,7 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
         if baseline and item_id in baseline.items:
             if not facts:
                 facts = [{**baseline.item_facts.get(item_id, {}), **baseline.items[item_id].model_dump(), "origin_dataset": "beta"}]
-            if not observations and item_id in baseline.prices:
+            if not observations and workspace.settings().use_beta_prices and item_id in baseline.prices:
                 observations = [{**baseline.prices[item_id].model_dump(mode="json"), "source": "Бета · " + baseline.source_market, "beta_baseline": True}]
         return {"item_id": item_id, "item": facts, "observations": observations,
                 "offers": workspace.market.rows("SELECT * FROM working_offers WHERE item_id=? ORDER BY buyout::DECIMAL(38,6)/quantity LIMIT 500", [item_id]),
@@ -457,6 +558,6 @@ def create_app(root: Path, *, workspace=None, remote=False) -> FastAPI:
             return workspace.sniper.reference(identity)
         return workspace.submit("sniper_reference", refresh_reference)
 
-    app.include_router(analytics_router(workspace.analytics), prefix="/api/v2")
+    app.include_router(analytics_router(workspace.analytics,recalculate_callback=lambda:workspace.submit('analytics',workspace.calculate)), prefix="/api/v2")
     app.include_router(addon_router(workspace.exchange, workspace.market.lock, lambda: False), prefix="/api/v2")
     return app

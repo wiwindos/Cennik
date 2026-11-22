@@ -10,7 +10,7 @@ from cennik.services.analytics import AnalyticsService, DataNotReady
 
 
 def analytics_router(service: AnalyticsService, *, updating: Callable[[], bool] | None = None,
-                     operation_lock: AbstractContextManager | None = None) -> APIRouter:
+                     operation_lock: AbstractContextManager | None = None,recalculate_callback=None) -> APIRouter:
     router = APIRouter(prefix="/analytics")
 
     @router.get("/markets")
@@ -36,6 +36,8 @@ def analytics_router(service: AnalyticsService, *, updating: Callable[[], bool] 
 
     @router.post("/recalculate", status_code=202)
     def recalculate():
+        if recalculate_callback is not None:
+            return recalculate_callback()
         with operation_lock if operation_lock is not None else nullcontext():
             if updating is not None and updating():
                 raise HTTPException(409, "Дождитесь завершения обновления базы перед пересчётом аналитики.")
@@ -51,12 +53,14 @@ def analytics_router(service: AnalyticsService, *, updating: Callable[[], bool] 
     @router.get("/opportunities")
     def opportunities(
         strategy: str | None = Query(None, max_length=100),
+        profession: str | None = Query(None, max_length=100),
         min_profit: int = Query(0, ge=0), min_roi: Decimal = Query(Decimal(0), ge=0),
         confidence: Literal["limited", "moderate", "strong"] | None = None,
         sort: Literal["rating", "profit", "roi", "freshness"] = "rating",
         limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0, le=1000000),
     ):
         return service.store.listing(service.store.settings().active_market, strategy=strategy,
+            profession=profession,
             min_profit=min_profit, min_roi=str(min_roi), confidence=confidence, sort=sort,
             limit=limit, offset=offset)
 

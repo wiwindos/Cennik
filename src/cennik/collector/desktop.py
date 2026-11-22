@@ -19,6 +19,19 @@ from .agent import VERSION, CollectorAgent, default_root, discover_games
 from .startup import set_startup, startup_enabled
 
 
+def key_status(connection, entered="", address="", *, worker=False):
+    if entered.strip():
+        return "Новый ключ введён, но ещё не сохранён. Нажмите «Сохранить и установить аддон»."
+    if not connection.get("token_set"):
+        return "Ключ не сохранён. " + ("Можно подключиться по коду через веб." if worker else "Введите личный ключ сборщика от владельца.")
+    if address.strip().rstrip('/') != connection.get('url', '').rstrip('/'):
+        return "Адрес изменён. Сохранённый ключ относится к прежнему серверу; для нового адреса укажите его ключ."
+    if connection.get('token_rejected'):
+        return "Ключ сохранён, но сервер его отклонил. Проверьте ключ у владельца."
+    confirmation = " Сервер подтвердил ключ." if connection.get('token_verified') else " Ожидаем проверки сервером." if not worker else ""
+    return "Ключ сохранён на этом ПК. Поле очищается после сохранения; повторно вводить ключ не нужно." + confirmation
+
+
 def icon_image(color="#2a9d8f"):
     from PIL import Image, ImageDraw
 
@@ -113,8 +126,18 @@ class CollectorWindow:
         style.configure("State.TLabel", font=("Segoe UI", 13, "bold"), foreground="#227c70")
         style.configure("TButton", font=("Segoe UI", 10), padding=(9, 6))
         style.configure("TCheckbutton", background="#f2f6f7", font=("Segoe UI", 10))
-        frame = ttk.Frame(self.root, padding=22)
-        frame.pack(fill="both", expand=True)
+        outer = ttk.Frame(self.root)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, background="#f2f6f7", highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = ttk.Frame(canvas, padding=22)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self.root.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"))
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text=self.product, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
@@ -162,13 +185,14 @@ class CollectorWindow:
         ).grid(row=8, column=0, sticky="w")
         self.token_entry = bind_entry_editing(ttk.Entry(frame, textvariable=self.token, show="•"))
         self.token_entry.grid(row=9, column=0, sticky="ew", pady=(4, 4))
+        self.key_status = tk.StringVar(value=key_status(agent.client.public_connection(), address=self.url.get(), worker=worker))
         ttk.Label(
             frame,
-            text="Без ключа: получите код подключения и подтвердите его в вебе.\nЕсли прежний ключ отозван, оставьте поле пустым и сохраните настройки."
-            if worker
-            else "Пустое поле сохраняет прежний ключ для того же сервера.",
+            textvariable=self.key_status,
             wraplength=570,
         ).grid(row=10, column=0, sticky="w", pady=(0, 10))
+        for value in (self.token, self.url):
+            value.trace_add("write", lambda *_: self.key_status.set(key_status(self.agent.client.public_connection(), self.token.get(), self.url.get(), worker=self.worker)))
         ttk.Checkbutton(
             frame, text="Запускать с Windows и работать в трее", variable=self.autostart
         ).grid(row=11, column=0, sticky="w", pady=(0, 8))
@@ -177,7 +201,7 @@ class CollectorWindow:
         ttk.Separator(frame).grid(row=13, column=0, sticky="ew", pady=7)
         ttk.Label(
             frame,
-            text="После установки полностью перезапустите игру.\nДанные отправляются после /reload или штатного выхода.\nНеизвестного аукциониста сначала подтверждает владелец.",
+            text="После установки полностью перезапустите игру.\nДанные всех аккаунтов отправляются после /reload или выхода.\nАвтоскан: меню Cennik под миникартой → Автоскан.\nДля передачи данных выбирать окно не нужно.",
             wraplength=570,
             justify="left",
         ).grid(row=14, column=0, sticky="w", pady=(4, 12))
@@ -185,13 +209,13 @@ class CollectorWindow:
         buttons.grid(row=15, column=0, sticky="ew")
         self.pause_button = ttk.Button(buttons, text="Пауза", command=self.toggle_pause)
         self.pause_button.pack(side="left")
-        ttk.Button(buttons, text="Повторить отправку", command=self.retry).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Повторить отправку" if worker else "Обновить подключение", command=self.retry).pack(side="left", padx=6)
         ttk.Button(buttons, text="Скопировать отчёт", command=self.copy_report).pack(side="left")
         ttk.Button(frame, text="Свернуть в трей", command=self.hide).grid(
             row=16, column=0, sticky="w", pady=(14, 0)
         )
         if worker:
-            ttk.Button(frame, text="Автоцикл аукционера…", command=self.cycle_dialog).grid(
+            ttk.Button(frame, text="Авто-/reload и NPC…", command=self.cycle_dialog).grid(
                 row=17, column=0, sticky="e", pady=(8, 0)
             )
             ttk.Button(frame, text="Прыжок / Space…", command=self.idle_dialog).grid(
@@ -236,182 +260,111 @@ class CollectorWindow:
 
     def cycle_dialog(self):
         from cennik.worker.automation import KEYS
+        from cennik.worker.window_picker import WindowPicker
 
         helper = self.agent.cycle
+        game_root = self.agent.settings.get('game_root') or self.game.get()
         try:
-            windows = helper.engine().windows(
-                self.agent.settings.get("game_root") or self.game.get()
-            )
-            routes = [
-                r
-                for r in (self.agent.manifest or {}).get("clients", [])
-                if r["role"] == "auctioneer"
-            ]
+            backend = helper.engine()
+            backend.windows(game_root)
         except Exception as error:
-            messagebox.showerror("Автоцикл аукционера", str(error), parent=self.root)
+            messagebox.showerror('Сбор и снайпер', str(error), parent=self.root)
             return
         dialog = tk.Toplevel(self.root)
-        dialog.title("Cennik: автоцикл аукционера")
-        dialog.geometry("700x645")
+        dialog.title('Cennik: автоматический /reload и NPC')
+        dialog.geometry('740x690')
         frame = ttk.Frame(dialog, padding=18)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(
-            frame,
-            text="Отдельный режим; по умолчанию выключен. Настройки относятся только к выбранному персонажу и окну.\n"
-            "Назначьте в игре две разные клавиши: макрос /reload и штатное «Взаимодействие с целью».\n"
-            "Окно может быть неактивным, но должно оставаться видимым. Верхний левый угол нельзя перекрывать.",
-            wraplength=650,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-        ttk.Label(frame, text="Окно игры").pack(anchor="w")
-        window = ttk.Combobox(
-            frame,
-            state="readonly",
-            values=[f"{w['title']} · PID {w['pid']} · {w['hwnd']}" for w in windows],
-        )
-        window.pack(fill="x")
-        if windows:
-            window.current(
-                next((i for i, w in enumerate(windows) if w == helper.settings.get("target")), 0)
-            )
-        ttk.Label(
-            frame, text="Персонаж-аукционер (обнаруживается после выбора роли и /reload)"
-        ).pack(anchor="w", pady=(10, 0))
-        character = ttk.Combobox(
-            frame, state="readonly", values=[r["character"] + " · " + r["realm"] for r in routes]
-        )
-        character.pack(fill="x")
-        if routes:
-            character.current(
-                next(
-                    (
-                        i
-                        for i, r in enumerate(routes)
-                        if r["id"] == helper.settings.get("client_id")
-                    ),
-                    0,
-                )
-            )
-        fields = ttk.Frame(frame)
-        fields.pack(fill="x", pady=12)
-        reload_key = tk.StringVar(value=helper.settings.get("reload_key", "F8"))
-        interact_key = tk.StringVar(value=helper.settings.get("interact_key", "F9"))
-        minutes = tk.StringVar(value=str(helper.settings.get("minutes", 15)))
-        delay = tk.StringVar(value=str(helper.settings.get("delay", 5)))
-        for i, (label, value, choices) in enumerate(
-            [
-                ("Клавиша /reload", reload_key, KEYS),
-                ("Клавиша взаимодействия", interact_key, KEYS),
-                ("Сохранение без нового полного скана, минут", minutes, None),
-                ("Задержка перед взаимодействием, секунд", delay, None),
-            ]
-        ):
-            ttk.Label(fields, text=label).grid(row=i, column=0, sticky="w", pady=3)
-            widget = (
-                ttk.Combobox(fields, state="readonly", values=choices, textvariable=value, width=10)
-                if choices
-                else ttk.Entry(fields, textvariable=value, width=12)
-            )
-            widget.grid(row=i, column=1, sticky="w", padx=14)
-        enabled = tk.BooleanVar(value=helper.settings.get("enabled", False))
-        ttk.Checkbutton(
-            frame,
-            text="Включить автоматическое сохранение и восстановление аукциона",
-            variable=enabled,
-        ).pack(anchor="w")
-        ttk.Label(
-            frame,
-            text="После сохранения настроек один раз сделайте /reload вручную. Затем откройте подтверждённого\n"
-            "аукциониста и оставьте его выбранной целью. Включите нужные цели снайпера и сбор.\n"
-            "Полный скан сохраняется после окончания обработки. После /reload ждём подтверждения сервера,\n"
-            "затем открываем NPC и восстанавливаем прежние цели. После трёх неудачных открытий — остановка.",
-            wraplength=650,
-            justify="left",
-        ).pack(anchor="w", pady=10)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Дополнительно: автоматические /reload и открытие NPC в выбранном окне.\n'
+            'Обычная передача данных всех аккаунтов работает без этого режима. Покупки подтверждает игрок.',
+            wraplength=650, justify='left').pack(anchor='w', pady=(0,10))
+        window = WindowPicker(frame, backend, game_root, helper.settings.get('target'))
+        window.pack(fill='x')
+        auto_sniper = tk.BooleanVar(value=helper.settings.get('auto_sniper',False))
+        ttk.Label(frame,text='При запуске режима автоскан включится у текущего персонажа.').pack(anchor='w',pady=(12,4))
+        ttk.Checkbutton(frame,text='Также искать по общему списку целей снайпера',variable=auto_sniper).pack(anchor='w')
+        reload_key = tk.StringVar(value=helper.settings.get('reload_key','F8'))
+        interact_key = tk.StringVar(value=helper.settings.get('interact_key','F9'))
+        minutes = tk.StringVar(value=str(helper.settings.get('minutes',15)))
+        delay = tk.StringVar(value=str(helper.settings.get('delay',5)))
+        advanced = ttk.LabelFrame(frame,text='Однократная настройка клавиш и интервалов',padding=8)
+        def toggle_settings():
+            if advanced.winfo_manager():
+                advanced.pack_forget()
+            else:
+                advanced.pack(fill='x',after=settings_button,pady=5)
+        settings_button=ttk.Button(frame,text='Настройки клавиш и интервалов…',command=toggle_settings)
+        settings_button.pack(anchor='w',pady=8)
+        for i,(label,value,choices) in enumerate([
+            ('Клавиша макроса /reload',reload_key,KEYS),('Клавиша взаимодействия с NPC',interact_key,KEYS),
+            ('Сохранение без нового скана, минут',minutes,None),('Ожидание открытия NPC, секунд',delay,None)]):
+            ttk.Label(advanced,text=label).grid(row=i,column=0,sticky='w',pady=2)
+            widget=ttk.Combobox(advanced,state='readonly',values=choices,textvariable=value,width=10) if choices else ttk.Entry(advanced,textvariable=value,width=12)
+            widget.grid(row=i,column=1,padx=10)
         result = tk.StringVar(value=helper.message)
-        ttk.Label(frame, textvariable=result, wraplength=650).pack(anchor="w", pady=5)
-        buttons = ttk.Frame(frame)
-        buttons.pack(anchor="w", pady=8)
-
+        ttk.Label(frame,textvariable=result,wraplength=650,justify='left').pack(anchor='w',pady=10)
+        ttk.Label(frame,text='Стойте рядом с подтверждённым аукционистом. Окно может быть неактивным,\n'
+            'но должно оставаться видимым; верхний левый угол не перекрывайте.\n'
+            'После первого запуска настроек выполните /reload один раз для загрузки режима.',
+            wraplength=650,justify='left').pack(anchor='w',pady=5)
+        buttons=ttk.Frame(frame)
+        buttons.pack(anchor='w',pady=10)
         def apply():
             try:
-                active = enabled.get()
-                parameters = {}
-                if active:
-                    if window.current() < 0 or character.current() < 0:
-                        raise ValueError(
-                            "Запустите окно игры и назначьте аукционера через /cennik role"
-                        )
-                    parameters = dict(
-                        target=windows[window.current()],
-                        route=routes[character.current()],
-                        game_root=self.agent.settings["game_root"],
-                        enabled=True,
-                        reload_key=reload_key.get(),
-                        interact_key=interact_key.get(),
-                        minutes=int(minutes.get()),
-                        delay=int(delay.get()),
-                    )
-                else:
-                    helper.disable()
-
+                if not (self.agent.manifest or {}).get('any_character'):
+                    raise ValueError('Сервер ещё не поддерживает сбор с любого персонажа. Обновите сервер.')
+                parameters=dict(target=window.selected(),game_root=game_root,enabled=True,any_character=True,
+                    auto_sniper=auto_sniper.get(),reload_key=reload_key.get(),interact_key=interact_key.get(),
+                    minutes=int(minutes.get()),delay=int(delay.get()))
                 def commit():
                     with self.agent.lock:
-                        if active:
-                            helper.configure(**parameters)
+                        helper.configure(**parameters)
+                        self.agent.pause(False)
                         self.agent.write_import()
                         self.agent.wake.set()
-                    return helper.message
-
-                pending = self.pool.submit(commit)
-                result.set(
-                    "Сохраняем настройки и адресный импорт. Дождитесь подтверждения перед /reload"
-                )
-                for b in buttons.winfo_children():
-                    if isinstance(b, ttk.Button):
-                        b.configure(state="disabled")
-
+                    return 'Режим запущен. Один /reload загрузит настройки в игру; затем всё автоматически.'
+                pending=self.pool.submit(commit)
+                start_button.configure(state='disabled')
+                result.set('Сохраняем настройки…')
                 def finish():
                     if not dialog.winfo_exists():
                         return
                     if not pending.done():
-                        dialog.after(100, finish)
+                        dialog.after(100,finish)
                         return
                     try:
                         result.set(pending.result())
                     except Exception as error:
                         result.set(str(error))
-                    for b in buttons.winfo_children():
-                        if isinstance(b, ttk.Button):
-                            b.configure(state="normal")
-
-                dialog.after(100, finish)
+                    start_button.configure(state='normal')
+                dialog.after(100,finish)
             except Exception as error:
                 result.set(str(error))
-
-        def disable():
-            enabled.set(False)
-            apply()
-
+        def stop():
+            helper.disable()
+            self.pool.submit(self.agent.write_import)
+            result.set('Остановлено. Автоматические клавиши больше не отправляются.')
         def resume():
             helper.reset()
-            self.agent.wake.set()
-            result.set("Остановка сброшена. Продолжим только при живом подтверждённом индикаторе")
-
-        ttk.Button(buttons, text="Сохранить", command=apply).pack(side="left")
-        ttk.Button(buttons, text="Выключить", command=disable).pack(side="left", padx=8)
-        ttk.Button(buttons, text="Продолжить цикл", command=resume).pack(side="left")
+            result.set('Проверка текущего окна возобновлена')
+        start_button=ttk.Button(buttons,text='Запустить',command=apply)
+        start_button.pack(side='left')
+        ttk.Button(buttons,text='Остановить',command=stop).pack(side='left',padx=8)
+        ttk.Button(buttons,text='Продолжить после ошибки',command=resume).pack(side='left')
 
     def idle_dialog(self):
+        from cennik.worker.window_picker import WindowPicker
         helper = self.agent.idle
         try:
-            windows = helper.windows(self.agent.settings.get("game_root") or self.game.get())
+            game_root = self.agent.settings.get('game_root') or self.game.get()
+            backend = helper.engine()
+            backend.windows(game_root)
         except Exception as error:
             messagebox.showerror("Прыжок / Space", str(error), parent=self.root)
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("Cennik: прыжок в фоновом окне")
-        dialog.geometry("610x320")
+        dialog.geometry("740x445")
         frame = ttk.Frame(dialog, padding=18)
         frame.pack(fill="both", expand=True)
         ttk.Label(
@@ -419,15 +372,8 @@ class CollectorWindow:
             text="Выберите окно WoW. Worker отправляет нажатие и отпускание Space\nтолько в это окно, пока оно неактивно, без переключения фокуса.\nРазрешение в аддоне не требуется. В игре Space должен быть назначен на прыжок.",
             wraplength=565,
         ).pack(anchor="w", pady=(0, 12))
-        choice = ttk.Combobox(
-            frame,
-            state="readonly",
-            values=[f"{w['title']} · PID {w['pid']} · окно {w['hwnd']}" for w in windows],
-            width=70,
-        )
+        choice = WindowPicker(frame, backend, game_root, helper.settings.get('target'))
         choice.pack(fill="x")
-        if windows:
-            choice.current(0)
         enabled = tk.BooleanVar(value=helper.settings.get("enabled", False))
         ttk.Checkbutton(
             frame, text="Отправлять Space примерно со случайным интервалом 150–400 секунд", variable=enabled
@@ -439,10 +385,8 @@ class CollectorWindow:
 
         def apply(test=False):
             try:
-                if choice.current() < 0:
-                    raise ValueError("Окно WoW не найдено. Запустите игру из выбранной папки")
                 helper.configure(
-                    windows[choice.current()], enabled.get(), self.agent.settings["game_root"]
+                    choice.selected(), enabled.get(), self.agent.settings["game_root"]
                 )
                 if test:
                     helper.tick(paused=self.agent.settings["paused"], test=True)
@@ -554,6 +498,7 @@ class CollectorWindow:
             self.future = None
             self.save_button.configure(state="normal")
         d = self.agent.overview()
+        self.key_status.set(key_status(d["connection"], self.token.get(), self.url.get(), worker=self.worker))
         if not self.future:
             self.status.set(d["status"])
         message = (
@@ -566,23 +511,25 @@ class CollectorWindow:
                 else "Укажите игру, адрес сервера и личный ключ. Auctionator должен быть установлен"
             )
         )
-        last = d["delivery"].get("at")
+        last = d["delivery"].get("scan_at" if self.worker else "at")
         stamp = time.strftime("%d.%m %H:%M", time.localtime(last)) if last else "ещё нет"
-        self.detail.set(f"{message}\nВ очереди: {d['pending']} · подтверждение сервера: {stamp}")
+        queue_label = "Снимков в отправке" if self.worker else "В очереди"
+        self.detail.set(f"{message}\n{queue_label}: {d['pending']} · подтверждение сервера: {stamp}")
         if d["game_code"]:
             when = time.strftime("%d.%m %H:%M", time.localtime(d["game_at"]))
             self.detail.set(
                 self.detail.get()
                 + f"\nИз сохранения игры {when}: {d['game_status']} [{d['game_code']}]"
             )
-        self.pause_button.configure(text="Продолжить" if d["paused"] else "Пауза")
+        self.pause_button.configure(text=("Продолжить передачу" if d["paused"] else "Пауза передачи") if self.worker else ("Продолжить" if d["paused"] else "Пауза"))
         color = (
             "#c64343"
-            if d["error"]
+            if d["error"] or d.get("game_error")
             else "#d19a28"
             if d["paused"] or not d["game_root"]
             else "#2a9d8f"
         )
+        ttk.Style(self.root).configure("State.TLabel", foreground=color)
         if self.last_status != color + d["status"]:
             self.tray.icon = icon_image(color)
             self.last_status = color + d["status"]
@@ -622,6 +569,7 @@ class CollectorWindow:
                         name in sys.modules for name in ("duckdb", "sqlite3", "pyarrow")
                     ),
                     "status": self.agent.overview()["status"],
+                    "key_status": self.key_status.get(),
                 },
             )
         finally:

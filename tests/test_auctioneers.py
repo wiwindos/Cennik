@@ -64,7 +64,8 @@ def test_conflicting_proposals_do_not_override_approval_and_rejection_is_separat
     r.review(incoming.identity(), Review(action="reject", expected_revision=1))
     assert r.wire()["entries"][0]["approved"]
     pending = next(p for p in r.overview()["items"] if p["record_id"] == incoming.identity())
-    assert pending["contributors"] == ["alice", "bob"] and pending["review"]["action"] == "reject"
+    assert pending["contributors"] == ["alice", "bob", "fixture"] and pending["review"]["action"] == "reject"
+    assert len(r.overview()['items']) == 1
 
 
 @pytest.mark.parametrize("change", ["missing", "revision", "coords", "realm", "market", "expired", "unapproved", "session"])
@@ -151,13 +152,14 @@ def test_addon_proposal_cannot_approve_and_owner_registry_restores_operations(wo
     assert not lua.eval("Cennik.AuctionContext:Check('collect')")[0]
 
 
-def test_player_can_propose_correction_without_changing_owner_decision(workspace):
+def test_confirmed_npc_does_not_generate_another_player_proposal(workspace):
     lua = accounting_lua(workspace)
     assert lua.eval("Cennik.AuctionContext:Propose('neutral')")
     ok, current = lua.eval("Cennik.AuctionContext:Check('buy')")
     assert ok and current["auction_type"] == "ordinary"
     saved = lua_value(lua.eval("Cennik.db.auctioneer_proposals"))
-    assert next(iter(saved.values()))["proposed_type"] == "neutral"
+    assert not saved
+    assert lua.eval('Cennik.CollectorStatus.db.current.code') == 'AUCTION_ALREADY_REVIEWED'
 
 
 @pytest.mark.parametrize("broken", ["UnitGUID=function() return nil end", "C_Map.GetPlayerMapPosition=function() return nil end"])

@@ -9,15 +9,18 @@ from cennik.core.models import PriceObservation
 class CraftLiquidity:
     def __init__(self, context: EvaluationContext):
         self.context = context
+        self.method = context.config.craft_liquidity_source if context.config.craft_sales_window_days else "latest_source"
         self.history = (context.prices.sales_history(context.config.craft_sales_window_days)
-                        if context.config.craft_liquidity_enabled and context.config.craft_liquidity_source == "history" else {})
+                        if context.config.craft_liquidity_enabled and self.method == "history" else {})
 
     def check(self, price: PriceObservation, quantity: int | Decimal) -> tuple[dict[str, Any], str | None]:
         config, as_of = self.context.config, self.context.provider.as_of
         points = self.history.get(price.item_id, [])
         estimates = [p.sales_estimated_per_day for p in points if p.sales_estimated_per_day is not None]
         conservative = min(estimates) if estimates else None
-        if config.craft_liquidity_source == "latest_source":
+        if self.method == "latest_source":
+            conservative = price.sales_estimated_per_day
+        elif not config.craft_min_sales_days and conservative is None:
             conservative = price.sales_estimated_per_day
         sales_at = price.sales_observed_at
         age = max(0, int((as_of - sales_at).total_seconds())) if sales_at else None
@@ -25,7 +28,7 @@ class CraftLiquidity:
         batch_percent = Decimal(quantity) * 100 / conservative if conservative and conservative > 0 else None
         evidence = {
             "enabled": config.craft_liquidity_enabled, "sales_estimated_per_day": str(price.sales_estimated_per_day) if price.sales_estimated_per_day is not None else None,
-            "method": config.craft_liquidity_source,
+            "method": self.method,
             "sales_observed_at": sales_at.isoformat() if sales_at else None,
             "sales_source": price.sales_source or price.source,
             "conservative_sales_per_day": str(conservative) if conservative is not None else None,
@@ -45,10 +48,12 @@ class CraftLiquidity:
         reason = None
         if config.craft_liquidity_enabled and not price.beta_baseline:
             if price.sales_estimated_per_day is None or age is None:
-                reason = None if config.own_data_only else "liquidity_unknown_sales"
+                reason = "liquidity_unknown_sales"
             elif age > config.craft_sales_max_age_seconds:
                 reason = "liquidity_stale_sales"
-            elif config.craft_liquidity_source == "history" and len(points) < config.craft_min_sales_days:
+            elif price.sales_estimated_per_day < config.craft_min_sales_per_day:
+                reason = "liquidity_low_sales"
+            elif self.method == "history" and len(points) < config.craft_min_sales_days:
                 reason = "liquidity_insufficient_sales_history"
             elif conservative is None or conservative < config.craft_min_sales_per_day or price.sales_estimated_per_day < config.craft_min_sales_per_day:
                 reason = "liquidity_low_sales"
@@ -58,9 +63,26 @@ class CraftLiquidity:
                 reason = "liquidity_high_supply"
             elif batch_percent is not None and batch_percent > config.craft_max_batch_sales_percent:
                 reason = "liquidity_large_batch"
-        evidence["passed"] = None if not config.craft_liquidity_enabled else reason is None
+        unknown = reason in {"liquidity_unknown_sales", "liquidity_stale_sales", "liquidity_insufficient_sales_history"}
+        evidence["status"] = "known" if reason is None else "rejected"
+        if unknown:
+            evidence.update(status="unknown", unknown_reason=reason,
+                note="Спрос неизвестен: статистики продаж нет, она устарела или истории недостаточно. Размер партии выбирает пользователь; продажа не гарантирована.")
+            if config.craft_allow_unknown_sales or config.own_data_only:
+                reason = None
+        evidence["passed"] = None if not config.craft_liquidity_enabled or (unknown and reason is None) else reason is None
+        if not config.craft_liquidity_enabled and (price.sales_estimated_per_day is None or age is None):
+            evidence.update(status="unknown", passed=None, note="Спрос неизвестен; фильтр ликвидности выключен")
         if price.beta_baseline:
             evidence.update(passed=None, status="beta", note="Бета: ликвидность и объём требуют проверки на релизе")
         if config.own_data_only and (price.sales_estimated_per_day is None or age is None):
             evidence.update(passed=None, status="unknown", note="Ликвидность неизвестна: расчёт по собственному сбору, продажа не подтверждена")
         return evidence, reason
+
+
+def batch_sales_limit(evidence: dict) -> Decimal | None:
+    """Unknown estimates never become a fictitious zero-sized executable batch."""
+    if not evidence.get("enabled") or evidence.get("status") in {"unknown", "beta"} or ("passed" in evidence and evidence["passed"] is None):
+        return None
+    value = evidence.get("conservative_sales_per_day")
+    return Decimal(str(value)) if value is not None else None

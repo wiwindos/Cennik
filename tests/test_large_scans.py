@@ -25,7 +25,7 @@ def test_partial_snapshot_never_becomes_ready_during_cooldown(exchange):
 
 def test_timeout_after_previous_success_is_not_reported_as_ready(exchange):
     lua = collector(exchange)
-    lua.execute("Cennik.db.collector.last_scan={full=true,count=10};Cennik.MarketCollector:Tick(1);Game.advance(121);Cennik.MarketCollector:Tick(1);Game.advance(30);Cennik.MarketCollector:Tick(1)")
+    lua.execute("Cennik.db.collector.last_scan={full=true,count=10};Cennik.MarketCollector:Tick(1);Game.advance(Cennik.MarketCollector.responseTimeout+1);Cennik.MarketCollector:Tick(1);Game.advance(30);Cennik.MarketCollector:Tick(1)")
     assert lua.eval("Cennik.CollectorStatus.db.current.code") == "SCAN_TIMEOUT"
     assert not lua.eval("Cennik.db.collector.last_scan.full")
 

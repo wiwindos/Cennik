@@ -9,6 +9,50 @@ LEGACY_MARKET = "forever.pvp.alliance.us"
 MARKET_PATTERN = r"^forever\.[a-z0-9_-]{1,64}\.(alliance|horde|neutral)\.(eu|us|kr|tw|cn)$"
 
 
+def forever_realm_identity(realm):
+    if not isinstance(realm, str):
+        return None
+    # Explicit in-game confirmation of an owner-selected market when Forever
+    # hides realm APIs. This is a logical market identity, never an NPC type.
+    alias = re.fullmatch(r"forever-(eu|us|kr|tw|cn)-(pvp|normal|rp|rppvp)", realm)
+    if alias:
+        return alias[1], alias[2]
+    match = re.fullmatch(r"CAMWOW (EU|US|KR|TW|CN)[0-9]{1,3} Realm [0-9]{1,3} (PvP|PvE|RP|RP-PvP)", realm, re.IGNORECASE)
+    if not match:
+        return None
+    return match[1].lower(), {"pvp": "pvp", "pve": "normal", "rp": "rp", "rp-pvp": "rppvp"}[match[2].lower()]
+
+
+def binding_ruleset(binding):
+    data = binding if isinstance(binding, dict) else binding.model_dump()
+    if data.get("ruleset"):
+        return data["ruleset"]
+    identities = {identity for realm in data.get("realm_names", []) if (identity := forever_realm_identity(realm))}
+    return next(iter(identities))[1] if len(identities) == 1 and next(iter(identities))[0] == data.get("region") else None
+
+
+def realm_matches(binding, realm):
+    if binding is None or not isinstance(realm, str):
+        return False
+    data = binding if isinstance(binding, dict) else binding.model_dump()
+    identity = forever_realm_identity(realm)
+    ruleset = binding_ruleset(data)
+    if data.get("client_family") == "forever" and identity and ruleset:
+        return identity == (data.get("region"), ruleset)
+    return realm in data.get("realm_names", [])
+
+
+def equivalent_realms(left, right, binding):
+    if isinstance(left, str) and left and left == right:
+        return True
+    if binding is None:
+        return False
+    data = binding if isinstance(binding, dict) else binding.model_dump()
+    return bool(data.get("client_family") == "forever" and forever_realm_identity(left)
+                and forever_realm_identity(left) == forever_realm_identity(right)
+                and realm_matches(data, left) and realm_matches(data, right))
+
+
 class MarketBinding(Model):
     id: str = Field(pattern=r"^[a-f0-9]{32}$")
     market: str = Field(pattern=MARKET_PATTERN)

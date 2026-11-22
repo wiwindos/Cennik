@@ -7,21 +7,22 @@ S.codes={
   AUCTION_PROPOSAL_PENDING={"wait","Тип предложен игроком: ожидается одобрение владельца","Сохраните через /reload или выход; выбор сам по себе не разрешает операции"},
   AUCTION_ARCHIVE_ONLY={"pause","Межфракционный аукцион: сохраняем только отдельный архив","Стратегии и закупки Cennik здесь отключены"},
   DISABLED={"pause","Сбор данных выключен","Включите автосбор в окне сборщика"},
-  PASSIVE={"wait","Пассивный сбор включён; автоскан AH выключен","Сохраняем данные открытых NPC и профессий, фактический крафт и распыление"},
+  PASSIVE={"wait","Пассивный сбор включён; автоскан выключен","Подхватываем сканы Auctionator, NPC и профессии. После скана выполните /reload для отправки"},
   WAIT_AUCTION={"wait","Ждём открытия аукциона","Откройте аукцион и оставайтесь в нём несколько секунд"},
   OPEN_DELAY={"wait","Аукцион открыт: ждём 3 секунды","Запрос начнётся, когда аукцион освободится"},
-  UNBOUND={"error","Не подтверждён рынок персонажа","Подтвердите рынок в Cennik → Рынок"},
+  UNBOUND={"error","Не подтверждён рынок персонажа","Откройте Cennik → Подключение / рынок или /cennik market"},
   BUSY={"wait","Аукцион занят поиском или покупкой","Сбор продолжится после завершения операции"},
   COOLDOWN={"pause","Ожидаем разрешённого интервала сканирования","Повторный полный запрос сейчас не нужен"},
   QUEUE_FULL={"error","Очередь снимков заполнена","Выполните /reload или выйдите из персонажа, дождитесь локального импорта и загрузите подтверждение через /reload"},
   UNSUPPORTED={"error","Совместимый API полного скана недоступен","Проверьте версию Auctionator и откройте диагностику"},
   SHARED_SCAN={"collect","Подхватываем общий полный скан","Дополнительный запрос не отправляется"},
   REQUESTED={"collect","Получаем полный снимок рынка","Оставьте аукцион открытым до окончания обработки"},
+  AUCTIONATOR_PROCESSING={"collect","Сервер ответил: Auctionator обрабатывает лоты","Дождитесь упаковки Cennik и сообщения «Полный снимок готов»"},
   PACKING={"collect","Обрабатываем строки снимка","Оставьте аукцион открытым"},
   READY={"ready","Снимок собран: ожидаем сохранения игрой","Данные попадут в приложение после /reload или штатного выхода"},
   SCAN_SAVED={"ready","Снимок передан приложению","Подтверждение загрузки на сервер показано отдельно ниже; следующий скан — после разрешённого интервала"},
   SCAN_INTERRUPTED={"error","Аукцион закрыт до завершения скана","Частичный результат не заменяет полный рынок; повторим после разрешённого интервала"},
-  SCAN_TIMEOUT={"error","Сервер не прислал полный ответ за 120 секунд","Проверьте связь; повторим после разрешённого интервала"},
+  SCAN_TIMEOUT={"error","Истекло время ожидания полного ответа сервера","Подробности и время ожидания — ниже; повторим после разрешённого интервала"},
   SCAN_REJECTED={"error","Сервер отклонил запрос аукциона","Ждём разрешённого интервала, частые повторы не отправляем"},
   SCAN_FAILED={"error","Не удалось завершить полный скан","Проверьте Auctionator и передайте отчёт поддержки"},
   SCAN_PARTIAL={"error","Сохранён неполный снимок; рабочие цены не обновлены","Передайте сохранённое через /reload; повторим полный скан после разрешённого интервала"},
@@ -35,6 +36,12 @@ function S:Initialize()
   self.db=C.db.collector_status
   self.db.addon_version=C.VERSION
   self.db.build=GetBuildInfo and select(2,GetBuildInfo()) or nil
+  self.db.realm=C:RealmName()
+  self.db.faction=string.lower(UnitFactionGroup("player") or "")
+  self.db.binding_reason=C.collectorOnly and C:CollectorBindingInfo().reason or nil
+  local current=self.db.current
+  local spec=current and self.codes[current.code]
+  if spec then current.level=spec[1];current.message=spec[2];current.action=spec[3] end
   if not self.db.collector_id then
     self.db.collector_id=C.db.client_id or C.db.device_id
   end
@@ -50,7 +57,9 @@ function S:Initialize()
   if C.CollectorUI then C.CollectorUI:Initialize() end
 end
 function S:IsEnabled()
-  return self.db and not self.db.paused and ((C.db.collector and C.db.collector.enabled) or (self.db.delivery and self.db.delivery.enabled))
+  local state=C.db.collector
+  local bound=state and C:MarketBindingMatches(state.market or C.db.current_market)
+  return self.db and not self.db.paused and (bound or (self.db.delivery and self.db.delivery.enabled))
 end
 function S:Set(code,detail)
   if not self.db then return end
@@ -70,19 +79,20 @@ function S:Set(code,detail)
   end
   if C.CollectorUI then C.CollectorUI:Refresh() end
 end
-function S:Finished(scan)
+function S:Finished(scan,code)
   if not self.db then return end
   self.db.scans=self.db.scans+1;self.db.rows=self.db.rows+(scan.count or 0)
   if scan.full then self.db.last_success={at=scan.observed_at,rows=scan.count};self:Set("READY")
   elseif self.db.current and self.db.current.code=="SCAN_INTERRUPTED" then return
-  elseif (scan.error or ""):find("120",1,true) then self:Set("SCAN_TIMEOUT")
+  elseif code=="SCAN_TIMEOUT" then self:Set("SCAN_TIMEOUT",scan.error)
   else self:Set("SCAN_PARTIAL",tostring(scan.count or 0) .. " / " .. tostring(scan.reported_count or 0) .. " строк. " .. (scan.error or "Неполное покрытие")) end
 end
 function S:Summary()
   local d=self.db or {};local current=d.current or {};local success=d.last_success
   local delivery=d.delivery or {}
   local latest=C.db.collector.last_scan
-  local out={"Cennik · сбор данных " .. (self:IsEnabled() and "включён" or "выключен"),
+  local out={"Cennik · пассивный сбор данных " .. (self:IsEnabled() and "включён" or "выключен"),
+    "Автоскан: " .. (C.db.collector.enabled and "включён · раз в 15 минут при открытом аукционе" or "выключен · сканы Auctionator всё равно подхватываются"),
     C.AuctionContext and C.AuctionContext:Summary() or "",
     current.message or "Ожидание",current.detail or "",current.action or "",
     "Последний полный снимок: " .. (success and date("%d.%m %H:%M:%S",success.at) .. " · " .. success.rows .. " строк" or "ещё нет"),
@@ -93,6 +103,7 @@ function S:Summary()
     "Локальный импорт: " .. (delivery.local_at and date("%d.%m %H:%M:%S",delivery.local_at) or "подтверждения ещё нет"),
     "Сервер: " .. (delivery.message or "подключение не настроено") .. (delivery.at and " · подтверждение от " .. date("%d.%m %H:%M:%S",delivery.at) or ""),
     "Статус сервера загружается через /reload и не является прямой связью из игры."}
+  if C.collectorOnly then table.insert(out,2,C:CollectorBindingText()) end
   if d.last_error then out[#out+1]="Последняя ошибка: " .. d.last_error.code .. " · " .. d.last_error.message end
   if C.Automation then out[#out+1]=C.Automation:Summary() end
   return table.concat(out,"\n")

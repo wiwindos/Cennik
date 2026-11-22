@@ -20,6 +20,7 @@ class GameNames:
     def __init__(self, root):
         self.path = root / "state.sqlite"
         self.lock = threading.RLock()
+        self._document = None
         reference = Path(__file__).resolve().parents[1] / "reference/game_names.json"
         self.reference = json.loads(reference.read_text("utf-8")) if reference.exists() else {}
         with self.connect() as db:
@@ -150,13 +151,17 @@ class GameNames:
         return sorted(result)
 
     def document(self, revision=None):
-        with self.connect() as db:
+        with self.lock, self.connect() as db:
             row = db.execute("SELECT value FROM game_names_meta WHERE key='revision'").fetchone()
             current = row[0] if row else "0"
             result = {"revision": current, "unchanged": revision == current}
             if revision != current:
+                if self._document and self._document[0] == current:
+                    result['names'] = self._document[1]
+                    return result
                 names = {"item": {}, "recipe": {}, "npc": {}}
                 for kind, identity, locale, name in db.execute("SELECT kind,identity,locale,name FROM game_names"):
                     names[kind].setdefault(str(identity), {})[locale] = name
                 result["names"] = names
+                self._document = current, names
         return result

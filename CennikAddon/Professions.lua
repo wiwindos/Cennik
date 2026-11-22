@@ -44,7 +44,7 @@ function P:Levels(snapshot)
 end
 function P:Capture(silent)
   if not C.db or C.collectorOnly then return end
-  local character,realm=UnitName("player"),GetRealmName()
+  local character,realm=C:CharacterName(),C:RealmName()
   local identity=realm .. ":" .. character
   C.db.profession_profiles=C.db.profession_profiles or {}
   local snapshot=C.db.profession_profiles[identity] or {format_version=1,character=character,realm=realm,professions={}}

@@ -59,6 +59,10 @@ class CollectorClient:
             raise ValueError("Для отправки нужны адрес и личный ключ сборщика")
         with self.lock:
             atomic_json(self.root / "connection.json", value.model_dump(mode="json"))
+            if value.token != old.token or not same_url:
+                previous = self.read("delivery.json", {})
+                if previous.get("error") == "KEY_REJECTED":
+                    atomic_json(self.root / "delivery.json", {**previous, "error": ""})
             if not same_url:
                 atomic_json(self.root / "auctioneer_registry.json", {"format_version": 1, "entries": [], "version": "", "fetched_at": 0})
             self.next_attempt = 0
@@ -66,7 +70,12 @@ class CollectorClient:
 
     def public_connection(self):
         c = self.connection()
-        return {"enabled": c.enabled, "url": c.url, "token_set": bool(c.token), "admin_token_set": bool(c.admin_token)}
+        authentication = self.read("authentication.json", {})
+        fingerprint = hashlib.sha256((c.url + "\n" + c.token).encode()).hexdigest()
+        rejected = self.read("delivery.json", {}).get("error") == "KEY_REJECTED"
+        verified = bool(c.token and authentication.get("fingerprint") == fingerprint and not rejected)
+        return {"enabled": c.enabled, "url": c.url, "token_set": bool(c.token), "admin_token_set": bool(c.admin_token),
+                "token_verified": verified, "token_rejected": rejected, "token_checked_at": authentication.get("at") if verified else None}
 
     def queue(self, kind, data):
         value = Observation(kind=kind, data={k: v for k, v in data.items() if k in ALLOWED[kind]})
@@ -111,6 +120,12 @@ class CollectorClient:
             for name in ("addon_version", "build"):
                 if status.get(name) is not None:
                     diagnostics[name] = str(status[name])[:120]
+            if isinstance(status.get("realm"), str):
+                diagnostics["realm"] = status["realm"][:160]
+            if status.get("faction") in {"alliance", "horde"}:
+                diagnostics["faction"] = status["faction"]
+            if status.get("binding_reason") in {"bound", "catalog_missing", "realm_mismatch", "faction_mismatch", "client_mismatch", "ambiguous"}:
+                diagnostics["binding_reason"] = status["binding_reason"]
             atomic_json(self.root / "local" / (key+".json"), {"id": key, "label": label, "diagnostic": diagnostics,
                 "saved_at": int(time.time()), "last_success": status.get("last_success") or {}})
             if not self.connection().enabled:
@@ -177,6 +192,11 @@ class CollectorClient:
                     registry_response = http.get("/v1/auctioneers/registry")
                     registry_response.raise_for_status()
                     registry = validate_snapshot(registry_response.json())
+                    atomic_json(self.root / "authentication.json", {"at": int(time.time()),
+                        "fingerprint": hashlib.sha256((c.url + "\n" + c.token).encode()).hexdigest()})
+                    previous = self.read("delivery.json", {})
+                    if previous.get("error") in {"KEY_REJECTED", "NETWORK_UNREACHABLE", "UPLOAD_TIMEOUT", "SERVER_UNAVAILABLE", "DELIVERY_FAILED", "INVALID_ACK", "RATE_LIMITED"}:
+                        atomic_json(self.root / "delivery.json", {**previous, "error": ""})
                     changed = registry != self.registry()
                     atomic_json(self.root / "auctioneer_registry.json", registry)
                     for path in sorted((self.root / "outbox").glob("*.json"))[:limit]:

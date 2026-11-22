@@ -13,8 +13,9 @@ from cennik.strategies.common import opportunity
 
 
 class DisenchantValuation:
-    def __init__(self, context: EvaluationContext):
+    def __init__(self, context: EvaluationContext, strategy="disenchant"):
         self.context = context
+        self.strategy = strategy
         self.rules = context.disenchant or DisenchantRules.model_validate_json(BUNDLED.read_bytes())
         self.metadata = self.rules.metadata()
         self.liquidity = CraftLiquidity(context)
@@ -25,6 +26,9 @@ class DisenchantValuation:
         pool = self.rules.yields(item_id)
         if not pool:
             return None, "missing_disenchant_rule"
+        for output in pool:
+            self.context.prices.usable(self.context.prices.current.get(output.material_item_id),
+                item_id=output.material_item_id, strategy=self.strategy, purpose="disenchant_sale")
         rows, timestamps, flags = [], [], ["disenchant_expected_value", "disenchant_eligibility_unconfirmed",
                                            "disenchant_rules_pending_release_verification", "material_sale_unconfirmed"]
         for output in pool:
@@ -92,10 +96,10 @@ def result(context, strategy, valuation, item_id, quantity, capital, price, *, m
 
 class BuyDisenchant:
     id = "buy_disenchant"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
-        valuation = DisenchantValuation(context)
+        valuation = DisenchantValuation(context, self.id)
         results = []
         for item_id, price in context.prices.current.items():
             if item_id not in valuation.rules.items:
@@ -113,10 +117,10 @@ class BuyDisenchant:
 
 class CraftDisenchant:
     id = "craft_disenchant"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
-        valuation = DisenchantValuation(context)
+        valuation = DisenchantValuation(context, self.id)
         recipes = context.provider.recipes()
         offers = {}
         for ingredient_id in {r.item_id for recipe in recipes for r in recipe.inputs}:
@@ -125,9 +129,13 @@ class CraftDisenchant:
             quote = cheapest_material(auction, item.vendor_buy_copper if item else None)
             if quote:
                 offers[ingredient_id] = MaterialOffer(ingredient_id, *quote)
+            else:
+                context.prices.price_gap(ingredient_id, self.id, "material", context.prices.usable(price))
         graph = CraftGraph(recipes, offers)
         results = []
         for recipe in recipes:
+            if context.selection.get('profession') and (recipe.profession or '').casefold()!=context.selection['profession'].casefold():continue
+            if context.selection.get('item_ids') and recipe.result_item_id not in context.selection['item_ids']:continue
             item_id = recipe.result_item_id
             if item_id not in valuation.rules.items:
                 continue

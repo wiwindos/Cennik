@@ -182,7 +182,7 @@ function L:ResolveSoldItem(mail)
   local gross=mail.buyout and mail.buyout>0 and mail.buyout or mail.bid
   if not C:Integer(gross,true) then return end
   for id,row in pairs(self.db.listings or {}) do
-    if not row.resolved and row.name==mail.name and row.character==UnitName("player") and row.realm==GetRealmName()
+    if not row.resolved and row.name==mail.name and row.character==C:CharacterName() and row.realm==C:RealmName()
       and C:Integer(row.total) then
       local quantity=gross*row.line.quantity/row.total
       if C:Integer(quantity) and quantity<=(row.remaining or row.line.quantity) then
@@ -222,7 +222,7 @@ function L:CollectedMail(mail,mode)
     if not C:Integer(cost,true) then self:Issue("Неизвестна стоимость покупки из почты",{mail=mail}); return end
     local remaining,total=line.quantity,cost
     for _,receipt in ipairs(self.db.receivable) do
-      if receipt.item_id==line.item_id and receipt.character==UnitName("player") and receipt.realm==GetRealmName()
+      if receipt.item_id==line.item_id and receipt.character==C:CharacterName() and receipt.realm==C:RealmName()
         and receipt.quantity>0 and receipt.cost*line.quantity==cost*receipt.quantity then
         local take=math.min(remaining,receipt.quantity); local amount=receipt.cost*take/receipt.quantity
         remaining=remaining-take; total=total-amount; receipt.quantity=receipt.quantity-take; receipt.cost=receipt.cost-amount
@@ -239,7 +239,7 @@ function L:CollectedMail(mail,mode)
       local cancelled=AUCTION_REMOVED_MAIL_SUBJECT and string.format(AUCTION_REMOVED_MAIL_SUBJECT,line.item_name)
       local matches={}
       for id,row in pairs(self.db.listings or {}) do
-        if not row.resolved and row.character==UnitName("player") and row.realm==GetRealmName()
+        if not row.resolved and row.character==C:CharacterName() and row.realm==C:RealmName()
           and row.line.item_id==line.item_id and (row.remaining or row.line.quantity)>=line.quantity
           and row.returned then matches[#matches+1]=id end
       end
@@ -257,7 +257,7 @@ function L:CollectedMail(mail,mode)
         local remaining=line.quantity
         local credits=self.db.transfer_receivable or {}
         for _,credit in ipairs(credits) do
-          if credit.target==UnitName("player") and credit.realm==GetRealmName() and credit.sender==mail.sender
+          if credit.target==C:CharacterName() and credit.realm==C:RealmName() and credit.sender==mail.sender
             and self:Key(credit.line)==self:Key(line) then
             local count=math.min(remaining,credit.line.quantity); remaining=remaining-count;credit.line.quantity=credit.line.quantity-count
           end
@@ -321,7 +321,7 @@ function L:Posted(auctionID)
   local paid=p.before.money-after.money
   local deposit=paid==p.deposit and paid or nil
   self.db.listings[id]={line=p.line,name=p.line.item_name,deposit=deposit,total=p.total,remaining=p.line.quantity,created=math.floor(C:Now()),
-    character=UnitName("player"),realm=GetRealmName()}
+    character=C:CharacterName(),realm=C:RealmName()}
   self:Emit("listing",{source="auction",outputs={p.line},listing_id=id,deposit_copper=deposit})
   self.bags=after; self.posting=nil
 end
@@ -347,7 +347,7 @@ function L:SendIntent(recipient)
   for key in pairs(C.db.accounting_characters or {}) do
     local server,name=key:match("^(.-):(.+)$")
     local full=name and name .. "-" .. server:gsub("%s","")
-    if server==GetRealmName() and name~=UnitName("player")
+    if server==C:RealmName() and name~=C:CharacterName()
       and (recipient:lower()==name:lower() or recipient:lower()==full:lower()) then target=name end
   end
   self.sending={draft=C:Clone(self.draft),target=target,before=C:Clone(self.bags or self:Snapshot())}
@@ -370,7 +370,7 @@ function L:SentMail()
     if saved then
       self.db.transfer_receivable=self.db.transfer_receivable or {}
       for _,line in ipairs(p.draft.items) do
-        self.db.transfer_receivable[#self.db.transfer_receivable+1]={target=p.target,sender=UnitName("player"),realm=GetRealmName(),line=C:Clone(line)}
+        self.db.transfer_receivable[#self.db.transfer_receivable+1]={target=p.target,sender=C:CharacterName(),realm=C:RealmName(),line=C:Clone(line)}
       end
     end
   else self:Emit("receipt",{source="own_mail",cash_delta_copper=0,reason="Денежный перевод между собственными персонажами не является прибылью"}) end

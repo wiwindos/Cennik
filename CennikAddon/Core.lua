@@ -1,7 +1,68 @@
 local _, C = ...
 _G.Cennik = C
-C.VERSION = "0.22.0"
+C.VERSION = "0.37.0"
 C.MAX_INTEGER = 9007199254740991
+local function identityText(value)
+  return type(value)=="string" and value:match("%S") and value or nil
+end
+function C:CharacterName()
+  local name,surname=UnitName("player")
+  if not identityText(name) then return "" end
+  local version=GetBuildInfo and GetBuildInfo() or ""
+  -- Forever now exposes the surname separately. Other clients use the second
+  -- return value for a realm; never append that realm to a character's name.
+  if version:match("^1%.60%.") and not name:find("%s") and identityText(surname)
+    and surname~=(GetRealmName and GetRealmName()) and surname~=(GetNormalizedRealmName and GetNormalizedRealmName())
+    and not (self.ForeverRealmIdentity and self:ForeverRealmIdentity(surname)) then return name .. " " .. surname end
+  return name
+end
+function C:IdentityBinding()
+  local imported=CennikImport
+  if imported and imported.format_version==2 then imported=imported.discovery end
+  return imported and imported.market_binding
+end
+function C:RealmName()
+  local realm=identityText(GetRealmName and GetRealmName()) or identityText(GetNormalizedRealmName and GetNormalizedRealmName())
+  if realm then return realm end
+  local guid=UnitGUID and UnitGUID("player")
+  local db=self.db or CennikAddonDB
+  local record=db and db.realm_confirmations and db.realm_confirmations[guid or ""]
+  local binding=self:IdentityBinding()
+  if not binding and record then
+    for _,entry in ipairs(CennikImport and CennikImport.market_catalog or {}) do
+      if entry.market==record.market then binding=entry end
+    end
+  end
+  local faction=string.lower(UnitFactionGroup("player") or "")
+  local version=GetBuildInfo and GetBuildInfo() or ""
+  if record and binding and binding.client_family=="forever" and version:match("^1%.60%.")
+    and record.market==binding.market and record.character==self:CharacterName() and record.faction==faction
+    and record.realm==self:RealmAlias(binding) then return record.realm end
+  return ""
+end
+function C:ConfirmRealmIdentity(binding)
+  local guid=UnitGUID and UnitGUID("player")
+  local name=self:CharacterName()
+  local faction=string.lower(UnitFactionGroup("player") or "")
+  local version=GetBuildInfo and GetBuildInfo() or ""
+  local realm=self:RealmAlias(binding)
+  if not self.db or not identityText(guid) or name=="" or not realm or binding.faction~=faction
+    or binding.client_family~="forever" or not version:match("^1%.60%.") then
+    return false,"Не удалось подтвердить рынок: нужны GUID персонажа и полученный от приложения рынок Forever"
+  end
+  self.db.realm_confirmations=self.db.realm_confirmations or {}
+  self.db.realm_confirmations[guid]={market=binding.market,realm=realm,character=name,faction=faction,confirmed_at=self:Now()}
+  print("Cennik: выбранный рынок подтверждён для этого персонажа по GUID. Выполните /reload и дождитесь Worker/Collector.")
+  return true
+end
+function C:PlayerIdentity()
+  local realm=self:RealmName()
+  local name=self:CharacterName()
+  local faction=string.lower(UnitFactionGroup and UnitFactionGroup("player") or "")
+  if type(name)~="string" or not name:match("%S")
+    or (faction~="alliance" and faction~="horde") then return end
+  return realm,name,faction
+end
 function C:Now() return GetServerTime() end
 function C:Integer(v, zero)
   return type(v) == "number" and v == math.floor(v) and v >= (zero and 0 or 1) and v <= self.MAX_INTEGER
@@ -58,7 +119,14 @@ function C:BindMarket(market)
   if type(market) ~= "string" or not market:match("^forever%.") or not market:find("%." .. faction .. "%.") then
     return false,"Рынок должен соответствовать фракции персонажа"
   end
-  self.db.binding = {market=market, realm=GetRealmName(), faction=faction, character=UnitName("player")}
+  if self:RealmName()=="" then
+    local binding=self:IdentityBinding()
+    if not binding or binding.market~=market then return false,"Сначала получите выбранный рынок из приложения" end
+    local ok,reason=self:ConfirmRealmIdentity(binding)
+    if not ok then return false,reason end
+  end
+  self.db.binding = {market=market, realm=C:RealmName(), faction=faction, character=C:CharacterName()}
+  if self.CharacterRole then self.CharacterRole:Capture() end
   if not self.collectorOnly and self.Accounting and self.Accounting.db then self.Accounting:Opening() end
   self:Refresh()
   return true
@@ -69,8 +137,8 @@ function C:MarketBindingMatches(market)
   if server and server.client_family=="forever" and not version:match("^1%.60%.") then return false end
   local binding=self.db and self.db.binding
   return not not (type(market)=="string" and binding and binding.market==market
-    and binding.realm==GetRealmName() and binding.faction==string.lower(UnitFactionGroup("player") or "")
-    and binding.character==UnitName("player"))
+    and binding.realm==C:RealmName() and binding.faction==string.lower(UnitFactionGroup("player") or "")
+    and binding.character==C:CharacterName())
 end
 function C:CheckTask(task, ownPending)
   if self.collectorOnly then return false,"Включён режим сборщика: стратегии и закупки недоступны" end
@@ -106,6 +174,10 @@ function C:CheckTask(task, ownPending)
   return true
 end
 function C:Initialize()
+  -- Wait for the player, but not indefinitely for a realm hidden by Forever.
+  -- Without a realm, initialize the diagnostic UI unbound; explicit GUID-based
+  -- market confirmation is required before scans or purchases become available.
+  if not self:PlayerIdentity() then return false end
   CennikAddonDB = CennikAddonDB or {}
   self.db = CennikAddonDB
   self.db.tasks = self.db.tasks or {}
@@ -124,19 +196,23 @@ function C:Initialize()
   self:Import()
   self.collectorOnly=CennikImport and CennikImport.collector_only==true
   local binding=CennikImport and CennikImport.market_binding
+  local oldMarket=self.collectorOnly and self.db.collector_observation_market or self.db.server_binding and self.db.server_binding.market or self.db.binding and self.db.binding.market
   if CennikImport and CennikImport.market_catalog then
     binding=nil
     local matches=0
     for _,b in ipairs(CennikImport.market_catalog) do
       if b.faction==string.lower(UnitFactionGroup("player") or "") then
-        for _,realm in ipairs(b.realm_names or {}) do if realm==GetRealmName() then binding=b;matches=matches+1 end end
+        for _,realm in ipairs(b.realm_names or {}) do if realm==C:RealmName() then binding=b;matches=matches+1 end end
       end
     end
     if matches~=1 then binding=nil end
+    if self.collectorOnly then
+      local key=C:RealmName() .. ":" .. string.lower(UnitFactionGroup("player") or "")
+      binding=self:ResolveCollectorBinding(CennikImport.market_catalog,(self.db.collector_market_choices or {})[self:CollectorChoiceKey()] or (self.db.collector_market_choices or {})[key])
+    end
     CennikImport.market_collector.market=binding and binding.market or "unassigned"
     self.db.binding=nil;self.db.current_market=binding and binding.market or nil
   end
-  local oldMarket=self.db.server_binding and self.db.server_binding.market or self.db.binding and self.db.binding.market
   if binding and oldMarket and oldMarket~=binding.market then
     self.db.observation_profiles=self.db.observation_profiles or {}
     local old={}
@@ -147,9 +223,9 @@ function C:Initialize()
     -- Full raw scans keep their normal bounded rotation; Worker isolates foreign ones.
   end
   self.db.server_binding=binding and C:Clone(binding) or nil
+  if self.collectorOnly and binding then self.db.collector_observation_market=binding.market end
   if binding then
-    local allowed=false
-    for _,realm in ipairs(binding.realm_names or {}) do if realm==GetRealmName() then allowed=true end end
+    local allowed=self:RealmMatchesBinding(binding,C:RealmName())
     if allowed and binding.faction==string.lower(UnitFactionGroup("player") or "") then
       local version=GetBuildInfo and GetBuildInfo() or ""
       if binding.client_family=="forever" and not version:match("^1%.60%.") then
@@ -161,14 +237,11 @@ function C:Initialize()
   if self.collectorOnly then
     if not self.db.collector_device_id then
       local hash=5381
-      for byte in (GetRealmName() .. ":" .. UnitName("player")):gmatch(".") do hash=(hash*33+byte:byte())%4294967296 end
+      for byte in (C:RealmName() .. ":" .. C:CharacterName()):gmatch(".") do hash=(hash*33+byte:byte())%4294967296 end
       self.db.collector_device_id="collector-" .. tostring(CennikImport.collector_agent_id) .. "-" .. string.format("%08x",hash)
     end
     self.db.device_id=self.db.collector_device_id
     self.db.queue={};self.db.current_run=nil
-    if not (CennikImport.market_catalog or binding) and string.lower(UnitFactionGroup("player") or "")=="alliance" then
-      self.db.current_market="forever.pvp.alliance.us";self:BindMarket(self.db.current_market)
-    end
   end
   if self.db.quantity_model~="forever_units_v1" then
     for _,task in pairs(self.db.tasks) do task.scans={}; task.validation=nil; task.allow_overbuy=false end
@@ -184,14 +257,29 @@ function C:Initialize()
   if self.Production and not self.collectorOnly then self.Production:Initialize() end
   if self.CharacterRole then self.CharacterRole:Initialize() end
   if self.Automation then self.Automation:Initialize() end
+  self.initialized=true
+  return true
+end
+function C:TryInitialize()
+  if self.initialized then return end
+  if self:Initialize() then return end
+  if not self.identityRetry then
+    self.identityRetry=true
+    C_Timer.After(1,function()
+      C.identityRetry=nil
+      C:TryInitialize()
+    end)
+  end
 end
 local frame = CreateFrame("Frame")
 C.eventFrame = frame
 frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_LOGIN")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("AUCTION_HOUSE_SHOW")
 frame:RegisterEvent("AUCTION_HOUSE_CLOSED")
 frame:SetScript("OnEvent", function(_, event, ...)
-  if event == "ADDON_LOADED" and ... == "CennikAddon" then C:Initialize()
+  if (event == "ADDON_LOADED" and ... == "CennikAddon") or event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then C:TryInitialize()
   elseif C.db and event == "AUCTION_HOUSE_SHOW" then
     if not C.collectorOnly then C.UI:Attach() end
   elseif C.db and event == "AUCTION_HOUSE_CLOSED" then
@@ -205,7 +293,12 @@ SLASH_CENNIK1 = "/cennik"
 SlashCmdList.CENNIK = function(message)
   message=(message or ""):match("^%s*(.-)%s*$"):lower()
   local market = message:match("^market%s+(.+)$")
-  if C.collectorOnly then C.CollectorUI:Show(message=="diagnostics" or message=="диагностика");return end
+  if C.collectorOnly then
+    if message=="market" or message=="рынок" or message=="подключение" then C.CollectorUI:ShowMarket()
+    elseif market then local ok,reason=C:ChooseCollectorMarket(market);print("Cennik: " .. reason);C.CollectorUI:ShowMarket()
+    else C.CollectorUI:Show(message=="diagnostics" or message=="диагностика") end
+    return
+  end
   if message=="role" or message=="роль" then C.CharacterRole:Show();return end
   if message=="collector" or message=="сбор" then C.CollectorUI:Show();return end
   if message=="diagnostics" or message=="диагностика" then C.CollectorUI:Show(true);return end

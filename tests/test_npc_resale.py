@@ -104,7 +104,7 @@ def test_unprofitable_after_fee_and_min_profit_threshold():
 
 
 def test_liquidity_and_batch_limit_use_auction_demand():
-    ctx = context(craft_liquidity_enabled=True, craft_liquidity_source="latest_source")
+    ctx = context(craft_liquidity_enabled=True, craft_liquidity_source="latest_source", craft_allow_unknown_sales=False)
     result = NpcToAuction().evaluate(ctx)[0]
     assert result.details["max_batch_by_liquidity"] == 20
     assert result.details["liquidity"]["passed"]
@@ -118,7 +118,15 @@ def test_high_supply_and_stale_sales_are_rejected():
     assert NpcToAuction().evaluate(context(provider, craft_liquidity_enabled=True, craft_liquidity_source="latest_source")) == []
     provider.price.quantity = 100
     provider.price.sales_observed_at -= timedelta(days=4)
-    assert NpcToAuction().evaluate(context(provider, craft_liquidity_enabled=True, craft_liquidity_source="latest_source")) == []
+    assert NpcToAuction().evaluate(context(provider, craft_liquidity_enabled=True, craft_liquidity_source="latest_source", craft_allow_unknown_sales=False)) == []
+
+
+def test_unknown_npc_resale_demand_has_no_fictitious_zero_batch():
+    provider = Provider()
+    provider.price.sales_estimated_per_day = None
+    signal = NpcToAuction().evaluate(context(provider, craft_liquidity_enabled=True))[0]
+    assert "liquidity_unknown" in signal.risk_flags
+    assert signal.details["max_batch_by_liquidity"] is None
 
 
 def package():

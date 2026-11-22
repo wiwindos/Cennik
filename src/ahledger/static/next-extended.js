@@ -1,0 +1,19 @@
+"use strict";
+window.CennikExtended={
+  data:{},lastPoll:0,polling:false,
+  async load(force=false){if(force||!this.lastPoll||Date.now()-this.lastPoll>4000){this.data=await this.context.api('/extended-analysis');this.lastPoll=Date.now();}return this.data;},
+  statusHtml(){const d=this.data,c=this.context,h=c.h;
+    const stages={craft_graph:'Цепочки крафта',craft_disenchant:'Крафт → распыление'};
+    if(d.active)return `<p role="status"><strong>${h(d.message)}</strong><br>${h(stages[d.progress?.strategy]||'Подготовка данных')} · ${d.elapsed_seconds||0} с. Сбор и обмен Worker продолжаются.</p>`;
+    const evidence=d.published,selection=evidence?.selection||{},scope=[selection.profession||'все профессии',selection.item_ids?.length?'Предметов: '+selection.item_ids.length:'все предметы'].join(' · ');
+    return `${d.message?`<p role="status" class="${['failed','interrupted'].includes(d.state)?'notice':''}">${h(d.message)}</p>`:''}${evidence?`<p>Рассчитано: ${c.date(evidence.computed_at)} · ${h(scope)}${d.stale?'<br><span class="badge pending">Данные изменились — требуется расширенный пересчёт</span>':''}</p>`:'<p class="note">Цепочки и крафт под распыление рассчитываются по запросу.</p>'}`;
+  },
+  html(){const h=this.context.h,chosen=this.data.selection||{},professions=this.data.professions||['Alchemy','Blacksmithing','Enchanting','Engineering','Leatherworking','Tailoring','Cooking'];
+    return `<section class="box stack" id="extended-panel"><h2>Расширенная аналитика</h2><p class="note">Лёгкие стратегии обновляются автоматически. Здесь запускаются цепочки и крафт под распыление по сохранённому срезу цен.</p><div id="extended-status">${this.statusHtml()}</div><form id="extended-form" class="fields"><label>Профессия<select name="profession"><option value="">Все профессии</option>${professions.map(p=>`<option value="${h(p)}" ${chosen.profession===p?'selected':''}>${h(window.CennikNames.profession(p))}</option>`).join('')}</select></label><label>ID готовых предметов, необязательно<input name="item_ids" maxlength="1200" value="${h((chosen.item_ids||[]).join(', '))}" placeholder="12345, 67890"></label><div class="actions"><button type="submit" data-extended-start ${this.data.active?'disabled':''}>Рассчитать цепочки и распыление</button></div></form></section>`;
+  },
+  async poll(){if(this.polling)return;this.polling=true;try{const was=this.data.active,old=this.data.id;await this.load(true);const node=document.getElementById('extended-status');if(node)node.innerHTML=this.statusHtml();for(const b of document.querySelectorAll('[data-extended-start]'))b.disabled=Boolean(this.data.active);const global=document.getElementById('extended-global');global.hidden=!this.data.active;global.innerHTML=this.data.active?`<div class="notice">${this.statusHtml()}</div>`:'';if(was&&!this.data.active&&old===this.data.id){this.context.notify(this.data.message,['failed','interrupted'].includes(this.data.state));if(this.data.state==='completed')await this.context.changed();}}finally{this.polling=false;}},
+  bind(context){this.context=context;const global=document.createElement('div');global.id='extended-global';global.hidden=true;document.getElementById('job-status').after(global);
+    document.addEventListener('submit',async e=>{if(e.target.id!=='extended-form')return;e.preventDefault();const f=new FormData(e.target),text=String(f.get('item_ids')).trim(),ids=text?[...new Set(text.split(/[\s,;]+/).map(Number))]:[];if(ids.length>100||ids.some(i=>!Number.isSafeInteger(i)||i<=0||i>=2147483648)){context.notify('Укажите до 100 корректных ID предметов через запятую.',true);return;}const b=e.target.querySelector('button');b.disabled=true;try{this.data=await context.api('/extended-analysis',{method:'POST',body:JSON.stringify({profession:String(f.get('profession')),item_ids:ids})});await this.poll();}catch(error){context.notify(error.message,true);b.disabled=Boolean(this.data.active);}});
+  }
+};
+// EOF

@@ -7,7 +7,7 @@ function U:Widget(kind,parent,template,role)
   local pool=self.pool[key] or {}; self.pool[key]=pool
   local widget=table.remove(pool)
   if not widget then
-    widget=kind=="FontString" and parent:CreateFontString(nil,"OVERLAY",template) or CreateFrame(kind,nil,parent,template)
+    widget=kind=="FontString" and C.Fonts:CreateFontString(parent,nil,"OVERLAY",template) or C.Fonts:CreateFrame(kind,nil,parent,template)
   else widget:SetParent(parent); widget:ClearAllPoints() end
   widget:Show()
   table.insert(self.used,{key=key,widget=widget})
@@ -84,8 +84,9 @@ function U:SelectSection(section)
   self:Refresh(); self:QueueRefresh()
 end
 function U:BindingStatus()
+  if C:RealmName()=="" then return "Игра скрыла сервер. Проверьте рынок выше и нажмите «Подтвердить рынок» для этого персонажа." end
   local faction=string.lower(UnitFactionGroup("player") or "")
-  local character=UnitName("player") .. " · " .. GetRealmName() .. " · " .. (faction=="alliance" and "Альянс" or faction=="horde" and "Орда" or faction)
+  local character=C:CharacterName() .. " · " .. C:RealmName() .. " · " .. (faction=="alliance" and "Альянс" or faction=="horde" and "Орда" or faction)
   return (C:MarketBindingMatches(C.db.current_market) and "Рынок подтверждён: " or "Подтвердите рынок для: ") .. character
 end
 function U:Attach()
@@ -93,18 +94,18 @@ function U:Attach()
   if self.frame then self:Refresh(); return end
   local lib=LibStub and LibStub("LibAHTab-1-0",true)
   if C.Adapter.error or not lib then print("Cennik: " .. (C.Adapter.error or "Auctionator не загрузил LibAHTab")); return end
-  local frame=CreateFrame("Frame",nil,AuctionHouseFrame)
+  local frame=C.Fonts:CreateFrame("Frame",nil,AuctionHouseFrame)
   self.frame=frame; frame:SetPoint("TOPLEFT",AuctionHouseFrame,"TOPLEFT",16,-62); frame:SetSize(690,500)
-  self.note=frame:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); self.note:SetPoint("TOPLEFT",0,-2); self.note:SetWidth(660)
-  self.bindingNote=frame:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); self.bindingNote:SetPoint("TOPLEFT",0,-20); self.bindingNote:SetWidth(660)
-  self.noticeNote=frame:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall"); self.noticeNote:SetPoint("TOPLEFT",0,-38); self.noticeNote:SetWidth(660)
+  self.note=C.Fonts:CreateFontString(frame,nil,"OVERLAY","GameFontHighlightSmall"); self.note:SetPoint("TOPLEFT",0,-2); self.note:SetWidth(660)
+  self.bindingNote=C.Fonts:CreateFontString(frame,nil,"OVERLAY","GameFontHighlightSmall"); self.bindingNote:SetPoint("TOPLEFT",0,-20); self.bindingNote:SetWidth(660)
+  self.noticeNote=C.Fonts:CreateFontString(frame,nil,"OVERLAY","GameFontHighlightSmall"); self.noticeNote:SetPoint("TOPLEFT",0,-38); self.noticeNote:SetWidth(660)
   self.tabs={}
   for i,name in ipairs({"Opportunities","Buy Queue","History"}) do
-    local b=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); b:SetSize(i==3 and 90 or 125,24); b:SetPoint("TOPLEFT",(i-1)*130,-62); b:SetText(({Opportunities="Возможности",["Buy Queue"]="Очередь покупок",History="История"})[name])
+    local b=C.Fonts:CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); b:SetSize(i==3 and 90 or 125,24); b:SetPoint("TOPLEFT",(i-1)*130,-62); b:SetText(({Opportunities="Возможности",["Buy Queue"]="Очередь покупок",History="История"})[name])
     self.tabs[name]=b
     b:SetScript("OnClick",function() U:SelectSection(name) end)
   end
-  local bind=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); bind:SetSize(150,24); bind:SetPoint("TOPLEFT",355,-62); bind:SetText("Подтвердить рынок")
+  local bind=C.Fonts:CreateFrame("Button",nil,frame,"UIPanelButtonTemplate"); bind:SetSize(150,24); bind:SetPoint("TOPLEFT",355,-62); bind:SetText("Подтвердить рынок")
   self.bindButton=bind
   bind:SetScript("OnClick",function()
     local ok,reason=C:BindMarket(C.db.current_market)
@@ -112,13 +113,13 @@ function U:Attach()
     U:Refresh()
     if not ok then print("Cennik: " .. reason) end
   end)
-  local market=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+  local market=C.Fonts:CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
   market:SetSize(75,24); market:SetPoint("TOPLEFT",510,-62); market:SetText("Рынок")
   market:SetScript("OnClick",function() U:SelectSection("Market") end)
-  local sniper=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+  local sniper=C.Fonts:CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
   sniper:SetSize(90,24); sniper:SetPoint("TOPLEFT",590,-62); sniper:SetText("Снайпер")
   sniper:SetScript("OnClick",function() U:SelectSection("Sniper") end)
-  self.body=CreateFrame("Frame",nil,frame); self.body:SetPoint("TOPLEFT",0,-100); self.body:SetSize(670,375)
+  self.body=C.Fonts:CreateFrame("Frame",nil,frame); self.body:SetPoint("TOPLEFT",0,-100); self.body:SetSize(670,375)
   self.body:SetClipsChildren(true)
   frame:SetScript("OnShow",function() U.resetScroll=true; U:Refresh(); U:QueueRefresh() end)
   lib:CreateTab("Cennik",frame,"Cennik","Cennik / Auctionator")
@@ -217,13 +218,13 @@ function U:LayoutTaskBlocks(p,blocks)
     local widget=p.blocks[block.id]
     if #block.lines>0 then
       if not widget then
-        widget={frame=CreateFrame("Frame",nil,p.body),rows={}}; p.blocks[block.id]=widget
+        widget={frame=C.Fonts:CreateFrame("Frame",nil,p.body),rows={}}; p.blocks[block.id]=widget
         local background=widget.frame:CreateTexture(nil,"BACKGROUND")
         background:SetAllPoints(widget.frame); background:SetColorTexture(0.06,0.11,0.15,1)
         widget.title=C.Sniper.MakeText(widget.frame,block.title,12,-10,p.contentWidth-24)
-        widget.title:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",14,p.compact and "OUTLINE" or ""); widget.title:SetTextColor(1,0.82,0.3)
+        C.Fonts:Set(widget.title,14,p.compact and "OUTLINE" or ""); widget.title:SetTextColor(1,0.82,0.3)
         widget.content=C.Sniper.MakeText(widget.frame,"",12,-36,p.contentWidth-24)
-        widget.content:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,""); widget.content:SetSpacing(3); widget.content:SetWordWrap(true); widget.content:SetNonSpaceWrap(true)
+        C.Fonts:Set(widget.content,13,""); widget.content:SetSpacing(3); widget.content:SetWordWrap(true); widget.content:SetNonSpaceWrap(true)
       end
       local value=table.concat(block.lines,"\n")
       if widget.value~=value then
@@ -240,7 +241,7 @@ function U:LayoutTaskBlocks(p,blocks)
             end
             local important=block.id=="status" and index==1 or block.id=="economics" and
               (line:find("Все затраты:",1,true) or line:find("Потенциальная прибыль:",1,true) or line:find("экономика неизвестна",1,true))
-            font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,important and "OUTLINE" or "")
+            C.Fonts:Set(font,13,important and "OUTLINE" or "")
             if important then font:SetTextColor(1,0.88,0.5) else font:SetTextColor(0.9,0.94,0.97) end
             font:SetText(line); font:SetHeight(0); font:Show()
             local height=font:GetStringHeight(); font:SetHeight(height)
@@ -256,7 +257,7 @@ function U:LayoutTaskBlocks(p,blocks)
             widget.headers={}; local x=12
             for i,caption in ipairs({"Предмет","Нужно","Предел / шт.","Наличие и стоимость"}) do
               local font=C.Sniper.MakeText(widget.frame,caption,x,-36,widths[i])
-              font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",12,""); font:SetTextColor(0.65,0.8,0.9)
+              C.Fonts:Set(font,12,""); font:SetTextColor(0.65,0.8,0.9)
               widget.headers[i]=font; x=x+widths[i]+8
             end
           end
@@ -268,7 +269,7 @@ function U:LayoutTaskBlocks(p,blocks)
               cells={}; widget.rows[index]=cells; local x=12
               for i=1,4 do
                 local font=C.Sniper.MakeText(widget.frame,"",x,0,widths[i])
-                font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",13,p.compact and (i==2 or i==3) and "OUTLINE" or ""); font:SetSpacing(3); font:SetWordWrap(true); font:SetNonSpaceWrap(true)
+                C.Fonts:Set(font,13,p.compact and (i==2 or i==3) and "OUTLINE" or ""); font:SetSpacing(3); font:SetWordWrap(true); font:SetNonSpaceWrap(true)
                 cells[i]=font; x=x+widths[i]+8
               end
             end
@@ -320,7 +321,7 @@ function U:ShowTaskDetails(task)
     local width,height=S:PanelSize(940,700)
     p=S.MakePanel(width,height); self.taskDetails=p
     p.title=S.MakeText(p,"",18,-18,width-70)
-    p.title:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",15,"")
+    C.Fonts:Set(p.title,15,"")
     p.check=S.MakeButton(p,"Проверить цены",18,-52,165,function()
       local current=C.db.tasks[p.taskID]
       if current then C.Scanner:Start(current) end
@@ -335,15 +336,15 @@ function U:ShowTaskDetails(task)
     p.limits=S.MakeButton(p,"Цены / лимиты",378,-52,165,function()
       U.limitTask=p.taskID; U.limitUseCurrent=false; U.limitDraft=nil; U:SelectSection("Limits")
     end)
-    p.scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
+    p.scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
     p.scroll:SetPoint("TOPLEFT",18,-94); p.scroll:SetSize(width-58,height-150); p.scroll:SetClipsChildren(true)
-    p.body=CreateFrame("Frame",nil,p.scroll); p.body:SetSize(width-74,height-150); p.scroll:SetScrollChild(p.body)
+    p.body=C.Fonts:CreateFrame("Frame",nil,p.scroll); p.body:SetSize(width-74,height-150); p.scroll:SetScrollChild(p.body)
     p.contentWidth=width-74
     p.feedback=S.MakeText(p,"Показана текущая проверка. Неполные и устаревшие данные не дают подтверждённую прибыль.",18,-height+42,width-40)
-    p.feedback:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",12,"")
+    C.Fonts:Set(p.feedback,12,"")
     for _,frame in ipairs({p.check,p.queue,p.limits}) do
       local font=frame:GetFontString()
-      if font then local path,size,flags=font:GetFont(); if path and size then font:SetFont(path,math.max(9,size-1),flags) end end
+      if font then local path,size,flags=font:GetFont(); if path and size then C.Fonts:Set(font,math.max(9,size-1),flags) end end
     end
   end
   if p.taskID~=task.task_id then p.taskID=task.task_id; p.detailText=nil; p.scroll:SetVerticalScroll(0) end
@@ -482,6 +483,7 @@ function U:Opportunities()
     self.opportunityRows[#self.opportunityRows+1]=row
     row:SetScript("OnEnter",function(self)
       local info=C.Items:Get(task.item_id)
+      local GameTooltip=C.Fonts:Tooltip()
       if GameTooltip then
         GameTooltip:SetOwner(self,"ANCHOR_RIGHT")
         if info and info.link then GameTooltip:SetHyperlink(info.link) else GameTooltip:SetText(C.Items:Name(task.item_id)) end
@@ -490,7 +492,7 @@ function U:Opportunities()
         GameTooltip:Show()
       end
     end)
-    row:SetScript("OnLeave",function() if GameTooltip then GameTooltip:Hide() end end)
+    row:SetScript("OnLeave",function() local tip=C.Fonts:Tooltip();if tip then tip:Hide() end end)
     y=y-rowHeight-6
   end
   list:SetHeight(math.max(listHeight,-y))
@@ -668,10 +670,10 @@ function U:Render()
     end
     local collector=C.MarketCollector
     label(self.body,"Массовый скан через Auctionator; снимки хранятся постоянно в локальном Cennik",0,0,625)
-    button(self.body,"Сканировать сейчас",0,-34,180,function() collector:Start(); U:Refresh() end)
+    button(self.body,"Сканировать сейчас",0,-34,180,function() collector:StartManual(); U:Refresh() end)
     button(self.body,"Сбор: статус / диагностика",0,-64,250,function() C.CollectorUI:Show() end)
-    button(self.body,C.db.collector.enabled and "Автосбор: включён" or "Автосбор: выключен",190,-34,200,function()
-      C.db.collector.enabled=not C.db.collector.enabled; U:Refresh()
+    button(self.body,C.db.collector.enabled and "Автоскан: включён" or "Автоскан: выключен",190,-34,200,function()
+      collector:SetAutoScan(not C.db.collector.enabled); U:Refresh()
     end)
     button(self.body,"Записать / reload",400,-34,180,function()
       if collector.packing or collector.requested_at then
@@ -680,7 +682,8 @@ function U:Render()
       else ReloadUI() end
     end)
     self:Text((collector.message or "Ожидание") .. "\n\nВ очереди: " .. #(C.db.market_scans or {}) .. "/" .. collector.maxQueue ..
-      "\nСледующий запрос не ранее: " .. date("%H:%M:%S",C.db.collector.next_at or 0) ..
+      "\nСледующий полный скан не ранее: " .. date("%H:%M:%S",C.db.collector.next_at or 0) ..
+      "\nИнтервал — 15 минут. Готовые лоты Auctionator упаковываются в Cennik без повторного чтения API." ..
       "\n\nПосле /reload дождитесь импорта в вебе. Ещё один /reload загрузит подтверждение архива и освободит очередь." ..
       "\nХранятся последние снимки; старейшие заменяются. Заменено до выгрузки: " .. (C.db.collector.rotated or 0),0,-128,625,self.body:GetHeight()-133)
   elseif self.section=="History" then

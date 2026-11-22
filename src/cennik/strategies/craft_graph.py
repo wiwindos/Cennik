@@ -26,7 +26,7 @@ class CraftGraphSettings(Model):
 
 class CraftGraphArbitrage:
     id = "craft_graph"
-    version = "0.4.0"
+    version = "0.5.0"
     settings_model = CraftGraphSettings
 
     def evaluate(self, context: EvaluationContext) -> list[Opportunity]:
@@ -40,6 +40,8 @@ class CraftGraphArbitrage:
             quote = cheapest_material(auction, item.vendor_buy_copper if item else None)
             if quote:
                 offers[item_id] = MaterialOffer(item_id, *quote)
+            else:
+                context.prices.price_gap(item_id, self.id, "material", context.prices.usable(price))
             if auction:
                 alternatives.append(MaterialOffer(item_id, auction, "auction"))
             if item and item.vendor_buy_copper:
@@ -48,11 +50,13 @@ class CraftGraphArbitrage:
         results = []
         liquidity = CraftLiquidity(context)
         for recipe in recipes:
+            if context.selection.get('profession') and (recipe.profession or '').casefold()!=context.selection['profession'].casefold():continue
+            if context.selection.get('item_ids') and recipe.result_item_id not in context.selection['item_ids']:continue
             if not complete(recipe):
                 context.reject(self.id, "incomplete_recipe")
                 continue
             output = context.prices.current.get(recipe.result_item_id) if recipe.result_item_id is not None else None
-            problem = context.prices.usable(output)
+            problem = context.prices.usable(output, item_id=recipe.result_item_id, strategy=self.id, purpose="sale")
             if problem:
                 context.reject(self.id, "result_" + problem)
                 continue

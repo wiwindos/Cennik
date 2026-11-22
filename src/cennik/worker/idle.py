@@ -12,6 +12,17 @@ from pathlib import Path
 from ahledger.util import atomic_json
 
 
+def same_window(left, right):
+    return bool(left and right and all(left.get(key) is not None and left.get(key) == right.get(key)
+                                      for key in ('hwnd', 'pid', 'started'))
+                and isinstance(left.get('path'), str) and isinstance(right.get('path'), str)
+                and os.path.normcase(left['path']) == os.path.normcase(right['path']))
+
+
+def selected_window(target, windows):
+    return next((window for window in windows if same_window(target, window)), None)
+
+
 class WindowsGame:
     def __init__(self):
         import ctypes
@@ -41,6 +52,34 @@ class WindowsGame:
         self.user.GetAsyncKeyState.restype = self.c.c_short
         self.user.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
         self.user.PostMessageW.restype = w.BOOL
+        self.user.GetClientRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+        self.user.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
+        self.user.IsIconic.argtypes = [w.HWND]
+        self.user.IsIconic.restype = w.BOOL
+        self.user.MonitorFromWindow.argtypes = [w.HWND, w.DWORD]
+        self.user.MonitorFromWindow.restype = w.HANDLE
+        self.user.GetMonitorInfoW.argtypes = [w.HANDLE, ctypes.c_void_p]
+        self.user.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        self.user.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+
+    def geometry(self, hwnd):
+        c, w = self.c, self.w
+        class Monitor(c.Structure):
+            _fields_ = [('cbSize', w.DWORD), ('monitor', w.RECT), ('work', w.RECT),
+                        ('flags', w.DWORD), ('device', w.WCHAR * 32)]
+        previous = self.user.SetThreadDpiAwarenessContext(c.c_void_p(-4))
+        try:
+            origin, rect = w.POINT(), w.RECT()
+            if not self.user.ClientToScreen(hwnd, c.byref(origin)) or not self.user.GetClientRect(hwnd, c.byref(rect)):
+                raise OSError('Не удалось определить положение окна')
+            monitor = Monitor()
+            monitor.cbSize = c.sizeof(monitor)
+            self.user.GetMonitorInfoW(self.user.MonitorFromWindow(hwnd, 2), c.byref(monitor))
+            return {'x': origin.x, 'y': origin.y, 'width': rect.right, 'height': rect.bottom,
+                    'monitor': monitor.device.replace('\\\\.\\', '')}
+        finally:
+            if previous:
+                self.user.SetThreadDpiAwarenessContext(previous)
 
     def identity(self, hwnd):
         if (
@@ -88,16 +127,40 @@ class WindowsGame:
                     "wowforever.exe",
                     "wow-64.exe",
                 }:
-                    found.append(item)
+                    try:
+                        item.update(self.geometry(hwnd))
+                        if item['width'] >= 100 and item['height'] >= 100:
+                            found.append(item)
+                    except OSError:
+                        pass
             return True
 
         callback = callback_type(inspect)
         self.user.EnumWindows(callback, 0)
-        return found
+        return sorted(found, key=lambda item: (item['pid'], item['hwnd']))
+
+    def foreground(self, game_root):
+        hwnd = self.user.GetForegroundWindow()
+        return next((item for item in self.windows(game_root) if item['hwnd'] == hwnd), None)
+
+    def preview(self, target):
+        from PIL import ImageGrab
+        current = self.identity(target['hwnd'])
+        if not same_window(target, current) or self.user.IsIconic(target['hwnd']):
+            raise ValueError('Выбранное окно закрыто или свёрнуто. Выберите его заново.')
+        previous = self.user.SetThreadDpiAwarenessContext(self.c.c_void_p(-4))
+        try:
+            image = ImageGrab.grab(window=target['hwnd'], all_screens=True)
+            if not image.getbbox():
+                raise ValueError('Игра не отдаёт изображение этого окна. Используйте выбор окна мышью.')
+            return image
+        finally:
+            if previous:
+                self.user.SetThreadDpiAwarenessContext(previous)
 
     def ready(self, target):
         current = self.identity(target["hwnd"])
-        if not current or any(current[k] != target[k] for k in ("pid", "started", "path")):
+        if not same_window(target, current):
             return False
         if self.user.GetForegroundWindow() == target["hwnd"]:
             return False
@@ -156,7 +219,8 @@ class IdleProbe:
     def configure(self, target, enabled, game_root):
         with self.lock:
             allowed = self.windows(game_root)
-            if target not in allowed:
+            target = selected_window(target, allowed)
+            if target is None:
                 raise ValueError("Выберите открытое окно WoW из выбранной папки игры")
             self.settings = {"target": target, "enabled": bool(enabled)}
             atomic_json(self.path, self.settings)

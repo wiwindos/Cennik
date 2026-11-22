@@ -92,12 +92,12 @@ function P:ChoosePlan(selection)
   local targets={};for _,client in ipairs(self.config.clients or {}) do if client.role=="crafter" then targets[#targets+1]=client end end
   if #targets==0 then C.UI.notice="Крафтер не назначен: /cennik role в его окне, затем /reload";C:Refresh();return end
   if not self.planWindow then
-    local w=CreateFrame("Frame",nil,UIParent,"BasicFrameTemplateWithInset");self.planWindow=w
+    local w=C.Fonts:CreateFrame("Frame",nil,UIParent,"BasicFrameTemplateWithInset");self.planWindow=w
     w:SetSize(500,205);w:SetPoint("CENTER");w:SetFrameStrata("DIALOG")
-    self.planText=w:CreateFontString(nil,"OVERLAY","GameFontHighlight");self.planText:SetPoint("TOPLEFT",18,-38);self.planText:SetSize(460,92);self.planText:SetJustifyH("LEFT")
-    local nextButton=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");nextButton:SetSize(205,28);nextButton:SetPoint("TOPLEFT",18,-155);nextButton:SetText("Другой крафтер")
+    self.planText=C.Fonts:CreateFontString(w,nil,"OVERLAY","GameFontHighlight");self.planText:SetPoint("TOPLEFT",18,-38);self.planText:SetSize(460,92);self.planText:SetJustifyH("LEFT")
+    local nextButton=C.Fonts:CreateFrame("Button",nil,w,"UIPanelButtonTemplate");nextButton:SetSize(205,28);nextButton:SetPoint("TOPLEFT",18,-155);nextButton:SetText("Другой крафтер")
     nextButton:SetScript("OnClick",function() P.planTarget=(P.planTarget or 1)%#P.planTargets+1;P:RenderPlan() end)
-    local send=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");send:SetSize(235,28);send:SetPoint("TOPLEFT",235,-155);send:SetText("Передать план крафтеру")
+    local send=C.Fonts:CreateFrame("Button",nil,w,"UIPanelButtonTemplate");send:SetSize(235,28);send:SetPoint("TOPLEFT",235,-155);send:SetText("Передать план крафтеру")
     send:SetScript("OnClick",function()
       local ok,reason=P:SendPlan(P.planTargets[P.planTarget or 1].id,P.planSelection)
       C.UI.notice=ok and P.message or reason;C:Refresh();if ok then P.planWindow:Hide() end
@@ -124,7 +124,8 @@ function P:Initialize()
   self.db,self.config=nil,nil
   local config=CennikImport and CennikImport.production
   if not config or config.format_version~=1 then return end
-  if config.client.character~=UnitName("player") or config.client.realm~=GetRealmName()
+  if config.client.role=="observer" then return end
+  if config.client.character~=C:CharacterName() or config.client.realm~=C:RealmName()
     or config.workspace_id~=C.db.workspace_id or config.client.id~=C.db.client_id then return end
   self.config=config
   C.db.production=C.db.production or {events={},sequence=0,part_sequence=0,parcels={},sent={},received={},done={}}
@@ -174,7 +175,8 @@ function P:Initialize()
   if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then pcall(C_ChatInfo.RegisterAddonMessagePrefix,self.prefix)
   elseif RegisterAddonMessagePrefix then pcall(RegisterAddonMessagePrefix,self.prefix) end
   self:CaptureRecipes()
-  if config.client.role=="crafter" and C.Sniper then C.Sniper:HoldForManualSearch("Рабочее окно крафтера") end
+  local automation=CennikImport and CennikImport.automation
+  if config.client.role=="crafter" and C.Sniper and not (automation and automation.enabled and automation.any_character) then C.Sniper:HoldForManualSearch("Рабочее окно крафтера") end
 end
 function P:Send(text,recipient)
   if #text>240 then return end
@@ -519,11 +521,11 @@ end
 function P:Show()
   if not self.db then print("Cennik: настройте два аккаунта и создайте заказ в вебе");return end
   if not self.window then
-    local w=CreateFrame("Frame","CennikProductionWindow",UIParent,"BasicFrameTemplateWithInset");self.window=w
+    local w=C.Fonts:CreateFrame("Frame","CennikProductionWindow",UIParent,"BasicFrameTemplateWithInset");self.window=w
     w:SetSize(670,490);w:SetPoint("CENTER");w:SetFrameStrata("DIALOG")
-    self.text=w:CreateFontString(nil,"OVERLAY","GameFontHighlight");self.text:SetPoint("TOPLEFT",18,-40);self.text:SetSize(630,300);self.text:SetJustifyH("LEFT");self.text:SetJustifyV("TOP")
+    self.text=C.Fonts:CreateFontString(w,nil,"OVERLAY","GameFontHighlight");self.text:SetPoint("TOPLEFT",18,-40);self.text:SetSize(630,300);self.text:SetJustifyH("LEFT");self.text:SetJustifyV("TOP")
     local function button(label,x,y,width,fn)
-      local b=CreateFrame("Button",nil,w,"UIPanelButtonTemplate");b:SetPoint("TOPLEFT",x,y);b:SetSize(width,28);b:SetText(label);b:SetScript("OnClick",fn)
+      local b=C.Fonts:CreateFrame("Button",nil,w,"UIPanelButtonTemplate");b:SetPoint("TOPLEFT",x,y);b:SetSize(width,28);b:SetText(label);b:SetScript("OnClick",fn)
     end
     button("Следующий заказ",18,-350,190,function() P.orderIndex=(P.orderIndex or 1)%math.max(1,#P.config.orders)+1;P.stepIndex=1;P:Render() end)
     button("Следующий этап",220,-350,170,function() local o=P:Selected();P.stepIndex=(P.stepIndex or 1)%math.max(1,o and #o.steps or 1)+1;P:Render() end)
@@ -557,7 +559,7 @@ function P:Render()
   lines[#lines+1]=self.message or ""
   self.text:SetText(table.concat(lines,"\n"))
 end
-local frame=CreateFrame("Frame")
+local frame=C.Fonts:CreateFrame("Frame")
 for _,event in ipairs({"CHAT_MSG_ADDON","TRADE_SKILL_SHOW","TRADE_SKILL_LIST_UPDATE","TRADE_SHOW","TRADE_ACCEPT_UPDATE","TRADE_CLOSED","TRADE_COMPLETE","UI_INFO_MESSAGE"}) do pcall(frame.RegisterEvent,frame,event) end
 frame:SetScript("OnEvent",function(_,event,a,b,c,d)
   if not P.db then return end

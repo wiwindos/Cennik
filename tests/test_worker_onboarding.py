@@ -87,6 +87,51 @@ def test_server_accepts_empty_lua_professions_from_old_workers(server):
     assert http.post("/bridge/v1/characters", json={"characters": [character]}, headers=headers).status_code == 422
 
 
+def test_incomplete_legacy_profiles_do_not_block_other_accounts_and_retry_after_ready(server, tmp_path):
+    app, http, profile = server
+    from cennik.server.bridge import RegisterDevice
+
+    device = app.state.bridge.register(profile.id, RegisterDevice(label="PC"))
+    game = tmp_path / 'game'
+    (game / 'Interface/AddOns/Auctionator').mkdir(parents=True)
+    agent = WorkerAgent(tmp_path / 'worker', transport(http))
+    agent.configure(str(game), ORIGIN, device['token'])
+    first = game / 'WTF/Account/first/SavedVariables/CennikAddon.lua'
+    second = game / 'WTF/Account/second/SavedVariables/CennikAddon.lua'
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    base = dict(role='unassigned', character='Ready', realm='FixtureRealm', faction='alliance',
+                professions={}, market=profile.market, game_version='1.60.1')
+    first.write_text('CennikAddonDB=' + lua_literal({'character_profiles': {
+        'valid': base, 'empty': {**base, 'realm': ''},
+        'missing': {k:v for k,v in base.items() if k!='character'},
+        'no_faction': {**base, 'faction': ''},
+        'whitespace': {**base, 'realm': '  '},
+    }}), 'utf-8')
+    second.write_text('CennikAddonDB=' + lua_literal({'character_profiles': {
+        'loading': {**base, 'character': 'Loading', 'realm': ''},
+    }}), 'utf-8')
+    original = first.read_bytes()
+
+    def exchange():
+        agent.tick(force=True)
+        for key, (stamp, _) in list(agent.quiet.items()):
+            agent.quiet[key] = stamp, time.monotonic() - 2
+        agent.tick(force=True)
+
+    exchange()
+    assert not agent.worker_error, agent.report()
+    assert {r['character'] for r in agent.manifest['clients']} == {'Ready'}
+    assert first.read_bytes() == original
+    second.write_text('CennikAddonDB=' + lua_literal({'character_profiles': {
+        'loading': {**base, 'character': 'Loading', 'realm': ''},
+        'valid': {**base, 'character': 'Loading'},
+    }}), 'utf-8')
+    exchange()
+    assert not agent.worker_error, agent.report()
+    assert {r['character'] for r in agent.manifest['clients']} == {'Ready', 'Loading'}
+
+
 def test_revoked_saved_key_restarts_pairing_only_on_explicit_save(server, tmp_path):
     app, http, profile = server
     from cennik.server.bridge import RegisterDevice

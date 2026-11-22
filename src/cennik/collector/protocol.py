@@ -21,7 +21,7 @@ ALLOWED = {
     "recipe": {"spell_id", "item_id", "name", "inputs", "observed_at", "coverage", "build", "qty_min", "qty_max", "profession"},
     "disenchant": {"observed_at", "spell_id", "inputs", "outputs", "build"},
     "craft": {"observed_at", "spell_id", "inputs", "outputs", "build"},
-    "diagnostic": {"at", "code", "level", "scans", "rows", "queue", "error_counts", "addon_version", "build"},
+    "diagnostic": {"at", "code", "level", "scans", "rows", "queue", "error_counts", "addon_version", "build", "faction", "binding_reason"},
 }
 for _kind in ("npc", "recipe", "disenchant", "craft", "diagnostic"):
     ALLOWED[_kind] |= {"server_id", "market", "realm"}
@@ -113,6 +113,13 @@ class Observation(Model):
                     if not isinstance(line.get("variant", ""), str) or len(line.get("variant", ""))>300:
                         raise ValueError("Неверный вариант материала")
         if self.kind == "diagnostic":
+            if "realm" in self.data and (not isinstance(self.data["realm"], str) or len(self.data["realm"]) > 160):
+                raise ValueError("Неверное имя сервера диагностики")
+            if self.data.get("faction") is not None and self.data["faction"] not in {"alliance", "horde", ""}:
+                raise ValueError("Неверная фракция диагностики")
+            if self.data.get("binding_reason") is not None and self.data["binding_reason"] not in {
+                "bound", "catalog_missing", "realm_mismatch", "faction_mismatch", "client_mismatch", "ambiguous"}:
+                raise ValueError("Неверная причина привязки")
             if not re.fullmatch(r"[A-Z_]{1,80}", str(self.data.get("code", ""))):
                 raise ValueError("Неверный код диагностики")
             for name in ("scans", "rows", "queue"):

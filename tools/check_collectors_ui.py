@@ -77,6 +77,24 @@ def main():
             saved.write_text('CennikAddonDB='+lua_literal(lua_value(lua.globals().CennikAddonDB)), encoding='utf-8')
             return {'proposed': True, 'collection_blocked': True}
 
+        @app.post('/fixture/repeated-proposal')
+        def repeated_proposal():
+            from cennik.collector.protocol import Observation
+            registry = hub.state.hub.auctioneers
+            data = {**registry.wire()['entries'][0]['data'], 'observed_at': int(time.time())}
+            observation = Observation(kind='auctioneer_proposal', data=data)
+            registry.suggest(observation.identity(), observation.data, 'another-account')
+            return {'proposed': True}
+
+        @app.post('/fixture/unbound')
+        def unbound():
+            saved = w.game_paths()[1]
+            data = {'device_id': 'fixture-unbound', 'collector_status': {'realm': 'Actual Realm', 'faction': 'horde',
+                'binding_reason': 'faction_mismatch', 'addon_version': '0.24.0',
+                'current': {'at': int(time.time()), 'code': 'UNBOUND', 'level': 'error'}}}
+            saved.write_text('CennikAddonDB='+lua_literal(data), encoding='utf-8')
+            return {'unbound': True}
+
         servers = [uvicorn.Server(uvicorn.Config(a, host='127.0.0.1', port=p, proxy_headers=False, log_level='warning'))
                    for a, p in ((hub, 8768), (app, 8767))]
         threads = [threading.Thread(target=s.run) for s in servers]
@@ -90,9 +108,8 @@ def main():
             subprocess.run([args.node, str(Path(__file__).with_suffix('.cjs')), args.playwright, args.browser,
                             str(args.output)], check=True, timeout=180)
         finally:
-            for server in servers:
+            for server, thread in reversed(list(zip(servers, threads, strict=True))):
                 server.should_exit = True
-            for thread in threads:
                 thread.join(timeout=30)
             if not w.stop.is_set():
                 w.close()

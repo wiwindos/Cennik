@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from pydantic import AwareDatetime, Field, model_validator
 
+from ahledger.util import atomic_write
 from cennik.core.models import Item, Model, PriceObservation, Recipe
 
 
@@ -26,8 +27,10 @@ class BootstrapDocument(Model):
 
     @model_validator(mode="after")
     def valid_evidence(self):
-        if not self.items or not self.recipes or not self.prices:
-            raise ValueError("Стартовый пакет должен содержать предметы, рецепты и цены")
+        if not self.items or not self.recipes:
+            raise ValueError("Стартовый пакет должен содержать предметы и рецепты")
+        if self.references and not self.prices:
+            raise ValueError("Рыночные ориентиры требуют исходных цен")
         if len({r.spell_id for r in self.recipes}) != len(self.recipes):
             raise ValueError("Повтор рецепта в стартовом пакете")
         for identity, item in self.items.items():
@@ -73,13 +76,30 @@ class BootstrapCatalog:
             "phase": "beta", "source_market": doc.source_market if doc else None,
             "items": len(doc.items) if doc else 0, "recipes": len(doc.recipes) if doc else 0,
             "prices": len(doc.prices) if doc else 0,
-            "observed_at": max(p.observed_at for p in doc.prices.values()) if doc else None,
-            "note": "Бета — стартовый ориентир, не подтверждение наличия лотов. Даты наблюдений сохранены."}
+            "references": len(doc.references) if doc else 0,
+            "observed_at": max((p.observed_at for p in doc.prices.values()), default=None) if doc else None,
+            "note": "Бета — стартовый ориентир, не подтверждение наличия лотов. Даты наблюдений сохранены."
+                if doc and doc.prices else "Справочники сохранены; бета-аукционные цены и медианы отсутствуют."}
+
+    def remove_market_prices(self):
+        document = self.snapshot()
+        report = {'removed_prices': len(document.prices) if document else 0,
+                  'removed_references': len(document.references) if document else 0}
+        if document and (document.prices or document.references):
+            cleaned = document.model_dump(mode='json')
+            cleaned.update(prices={}, references={}, version='catalog-'+self.sha256[:16])
+            cleaned['provenance'] = {**cleaned['provenance'], 'market_prices_removed': {
+                **report, 'at': datetime.now(UTC).isoformat(), 'previous_version': document.version}}
+            checked = BootstrapDocument.model_validate(cleaned)
+            atomic_write(self.path, checked.model_dump_json().encode('utf-8'))
+            self.snapshot()
+        return {**report, 'catalog': self.metadata()}
 
 
 class BootstrapProvider:
-    def __init__(self, provider, document, *, max_age=3600):
+    def __init__(self, provider, document, *, max_age=3600, use_prices=True):
         self.provider, self.document, self.max_age = provider, document, max_age
+        self.use_prices = bool(use_prices and document.prices)
         self._prices = None
 
     def __getattr__(self, key):
@@ -95,7 +115,7 @@ class BootstrapProvider:
     def markets(self):
         result = self.provider.markets()
         for row in result:
-            if (not self.market or row["market"] == self.market) and not row.get("observed_at"):
+            if self.use_prices and (not self.market or row["market"] == self.market) and not row.get("observed_at"):
                 row.update(observed_at=max(p.observed_at for p in self.document.prices.values()), market_status="BETA_BASELINE")
         return result
 
@@ -103,6 +123,9 @@ class BootstrapProvider:
         if self._prices is not None:
             return self._prices
         live = self.provider.current_prices()
+        if not self.use_prices:
+            self._prices = live
+            return live
         fresh = any((self.as_of-p.observed_at).total_seconds() <= self.max_age for p in live.values())
         head = self.provider.rows("SELECT max(observed_at) t FROM source_heads WHERE observed_at<=?", [self.as_of])[0]["t"]
         # A complete fresh market never resurrects absent beta auctions.
@@ -135,6 +158,8 @@ class BootstrapProvider:
 
     def source_reference(self, item_id):
         previous = self.provider.source_reference(item_id)
+        if not self.use_prices:
+            return previous
         if previous and (self.as_of-previous["observed_at"]).total_seconds() <= self.max_age:
             return previous
         value, price = self.document.references.get(item_id), self.document.prices.get(item_id)
@@ -143,5 +168,5 @@ class BootstrapProvider:
 
     def quality(self):
         return {**self.provider.quality(), "beta_baseline": {"version": self.document.version,
-            "market": self.document.source_market, "enabled": True,
+            "market": self.document.source_market, "enabled": True, 'prices_enabled': self.use_prices,
             "price_items": sum(p.beta_baseline for p in self.current_prices().values())}}

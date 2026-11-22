@@ -72,10 +72,13 @@ def prepare(root, package, *, reset=False, confirmation=""):
             w.analytics.disenchant.install(rules)
             w.save_settings(w.settings().model_copy(update={"auto_refresh": True, "auto_recalculate": True,
                 "auto_fyi": True, "auto_references": True, "auto_history": True,
-                "auto_disenchant_check": True, "use_beta_prices": True}))
-            result = w.calculate()
+                "auto_disenchant_check": True, "use_beta_prices": False}))
+            with w.provider(None, w.market_key, w.evaluation_now()) as provider:
+                ready = any(p.min_copper is not None and p.min_copper > 0 for p in provider.current_prices().values())
+            result = w.calculate() if ready else {"status": "waiting_for_live_prices"}
             report = {"reset_test_data": reset, "backup_created": False, "profile": profile.public(),
                 "seed": manifest, "opportunities": result.get("run", {}).get("signal_count"),
+                "calculation_status": result.get("status", "completed"),
                 "preserved": ["upstreams/credentials.json", "external owner key / server environment", "hub users and Goldscope data"]}
             atomic_json(root / "release-ready.json", report)
             return report

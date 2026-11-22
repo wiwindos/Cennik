@@ -56,6 +56,7 @@ function S:MarkBought(identity,quantity)
   local rule=C.db.sniper.rules[identity]
   if not rule or rule.removed or not C:Integer(quantity) or quantity>self:Remaining(rule) then return false,"Укажите количество от 1 до оставшейся потребности" end
   if C.db.pending or #C.db.sniper.events>=1900 then return false,"Сначала завершите операцию и синхронизируйте журнал" end
+  rule.own_bought=(rule.own_bought or rule.bought)+quantity
   rule.bought=rule.bought+quantity
   if self:Remaining(rule)==0 then rule.enabled=false end
   self.alerts[identity]=nil

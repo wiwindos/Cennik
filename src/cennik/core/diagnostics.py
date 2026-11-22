@@ -36,6 +36,7 @@ def summarize_run(run: Run, *, metadata: dict | None = None, signals: dict | Non
         "summary_only": True,
         "performance": diagnostics.get("performance", {}),
         "observed_items": diagnostics.get("observed_items", 0),
+        "price_gap_count": diagnostics.get("price_gap_count", 0),
         "disenchant_rules": diagnostics.get("disenchant_rules"),
         "rejections": diagnostics.get("rejections", {}),
         "strategy_signals": signals if signals is not None else diagnostics.get("strategy_signals", {}),
@@ -44,4 +45,6 @@ def summarize_run(run: Run, *, metadata: dict | None = None, signals: dict | Non
         ) if name in quality},
     }
     summary["quality"]["metadata_summary"] = counts
+    for key in ('calculation_scope','executed_strategies','extended_analysis','extended_seconds'):
+        if key in diagnostics:summary[key]=diagnostics[key]
     return run.model_copy(update={"diagnostics": summary})

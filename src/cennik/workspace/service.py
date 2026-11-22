@@ -33,6 +33,7 @@ from cennik.collector.client import CollectorClient
 from cennik.core.models import AnalyticsConfig, AnalyticsSettings, utc
 from cennik.engines.disenchant import DisenchantYield, expected_gross
 from cennik.engines.economics import auction_net
+from cennik.engines.liquidity import batch_sales_limit
 from cennik.engines.npc_catalog import NpcPriceCatalog
 from cennik.services.analytics import AnalyticsService
 from cennik.sources import Sources
@@ -96,6 +97,7 @@ class Workspace:
                 CREATE TABLE IF NOT EXISTS source_cache(id TEXT PRIMARY KEY,body BLOB,headers TEXT,expires REAL,
                     checked_at TEXT,source_time TEXT,url TEXT);
                 CREATE TABLE IF NOT EXISTS workspace_plans(id TEXT PRIMARY KEY,created_at TEXT,payload TEXT);
+                CREATE INDEX IF NOT EXISTS workspace_jobs_recent ON workspace_jobs(created_at DESC);
             """)
             db.execute("UPDATE workspace_jobs SET state='interrupted',error='Прервано перезапуском',finished_at=? WHERE state IN ('queued','running')", [now()])
         if self.store.settings().active_market is None:
@@ -126,6 +128,8 @@ class Workspace:
         self.recalculate_pending = threading.Event()
         self.analytics.settings_changed = self.request_calculation
         self.analytics.config_reader = self.effective_config
+        from .extended import ExtendedAnalytics
+        self.extended = ExtendedAnalytics(self)
         self.last_request = 0.0
         self.embargo = 0.0
         self.last_file: tuple[int, int] | None = None
@@ -154,14 +158,15 @@ class Workspace:
     def generation(self) -> str:
         clock = self.development_clock()
         self.bootstrap.snapshot()
-        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + ":recipes:"+self.local_recipes.generation() + ":own:"+str(self.settings().own_data_only) + ":beta:" + (self.bootstrap.sha256 if self.settings().use_beta_prices else "off") + (":development:" + clock.isoformat() if clock else "")
+        return self.identity + ":" + self.market.generation() + ":npc:" + self.npc_references.generation() + ":npc-catalog:" + self.npc_catalog.snapshot().sha256 + ":recipes:"+self.local_recipes.generation() + ":own:"+str(self.settings().own_data_only) + ':catalog:' + self.bootstrap.sha256 + ":beta:" + str(self.settings().use_beta_prices) + (":development:" + clock.isoformat() if clock else "")
 
     def provider(self, path, market, as_of, *, data_as_of=None):
         own = self.settings().own_data_only
         provider = DevelopmentProvider(self.market, market, as_of, data_as_of) if data_as_of is not None and not own else WorkspaceProvider(self.market, market, as_of, own_data_only=own)
         baseline = self.bootstrap.snapshot()
-        if baseline and self.settings().use_beta_prices and data_as_of is None:
-            provider = BootstrapProvider(provider, baseline, max_age=self.effective_config().max_price_age_seconds)
+        if baseline and data_as_of is None:
+            provider = BootstrapProvider(provider, baseline, max_age=self.effective_config().max_price_age_seconds,
+                                         use_prices=self.settings().use_beta_prices)
         return NpcReferenceProvider(provider, self.npc_references.snapshot(), data_as_of or as_of,
                                     self.npc_catalog.snapshot(), recipes=self.local_recipes)
 
@@ -404,17 +409,13 @@ class Workspace:
                              item_id=item, params=params)]
         results = [self.request(spec) for spec in specs]
         if self.settings().auto_recalculate and any(r["changed"] for r in results):
-            self.calculate()
+            self.request_calculation()
         return {"responses": results, "full_market_history_downloaded": False}
 
     def import_scans(self, scans: list[dict]):
         result = [self.market.import_scan(scan) for scan in scans]
         if self.settings().auto_recalculate and any(not row["reused"] and row.get("complete") for row in result):
-            try:
-                self.calculate()
-            except ValueError:
-                # A durable scan ACK does not depend on successful analytics.
-                self.log.exception("Scan stored; calculation failed independently")
+            self.request_calculation()
         return result
 
     def effective_config(self):
@@ -423,16 +424,36 @@ class Workspace:
             config = config.model_copy(update={"own_data_only": True, "history_reference_mode": "local_history"})
         else:
             config = config.model_copy(update={"own_data_only": False})
-        return config
+        return self.analytics.registry.normalize_config(config)
 
     def calculate(self):
         self.recalculate_pending.clear()
         config = self.effective_config()
-        result = self.analytics.start(background=False, config_override=config)
+        from cennik.core.calculation import HEAVY
+        result = self.analytics.start(background=False,config_override=config,
+            strategy_ids=[s for s in config.enabled_strategies if s not in HEAVY],calculation_scope='light')
         latest = self.store.latest(self.market_key, summary=True)
         if latest and latest.status == "failed":
             raise ValueError(latest.error or "Расчёт завершился ошибкой")
         return result
+
+    def remove_beta_prices(self):
+        with self.analytics.lock:
+            report = self.bootstrap.remove_market_prices()
+            settings = self.settings().model_copy(update={'use_beta_prices': False})
+            published = self.store.latest(self.market_key, published=True, summary=True)
+            beta_publication = bool(published and published.diagnostics.get('quality', {}).get('beta_baseline', {}).get('price_items'))
+            with self.store.connection() as db:
+                db.execute('INSERT OR REPLACE INTO workspace_settings VALUES(1,?)', [settings.model_dump_json()])
+                if beta_publication:
+                    # Retire only the beta-derived pointer, preserving all historical rows.
+                    db.execute('DELETE FROM published WHERE market=? AND run_id=?', [self.market_key, published.run_id])
+        report['price_sources'] = self.market.rows('SELECT source,count(*) items,min(observed_at) first_at,max(observed_at) last_at FROM price_snapshots GROUP BY source')
+        with self.provider(None, self.market_key, self.evaluation_now()) as provider:
+            ready = any(p.min_copper is not None and p.min_copper > 0 for p in provider.current_prices().values())
+        report['calculation'] = self.calculate() if ready else {
+            'status': 'waiting_for_live_prices', 'message': 'Ожидаем цены AHL или полный собственный скан'}
+        return report
 
     def update_facts(self, item_id: int, value: ItemFacts):
         payload = {"item_id": item_id, **value.model_dump(), "observed_at": now(), "source": "manual"}
@@ -565,7 +586,8 @@ class Workspace:
         results = self.import_scans(scans) if include_scans else []
         if (npc_prices["updated"] or local_recipes["updated"]) and self.settings().auto_recalculate and not any(not r["reused"] for r in results):
             self.request_calculation()
-        sniper_ack = self.sniper.accept_game(data.get("sniper") or {})
+        sniper_owner = 'account:'+hashlib.sha256(client.account.casefold().encode()).hexdigest() if client else 'local'
+        sniper_ack = self.sniper.accept_game(data.get("sniper") or {}, owner=sniper_owner)
         recipe_requests = self.sniper.pending_recipe_requests()
         recipe_error = None
         if recipe_requests and not self.settings().development_mode and not self.settings().own_data_only:
@@ -586,7 +608,7 @@ class Workspace:
                         state_path, exchange=self.exchange)
         bridge.extra_import = {"market_collector": {"market": self.market_key, "auto_scan": self.settings().auto_scan,
             "workspace_id": self.identity}, "acknowledged_scan_ids": acknowledgements,
-            "sniper_book": self.sniper.wire(), "sniper_catalog": self.sniper.catalog(), "acknowledged_sniper_event_ids": sniper_ack,
+            "sniper_book": self.sniper.wire(sniper_owner), "sniper_catalog": self.sniper.catalog(), "acknowledged_sniper_event_ids": sniper_ack,
             "bulk_checks": self.bulk.wire(), "accounting": self.accounting.wire(),
             "collector_delivery": self.collectors.delivery(), "auctioneer_registry": self.collectors.registry()}
         if self.market_binding:
@@ -623,9 +645,6 @@ class Workspace:
                 # Future events are account-specific; old queued IDs and bridge
                 # acknowledgements are retained unchanged during migration.
                 payload["device_id"] = client.id
-            if client and client.role != "auctioneer":
-                payload.pop("sniper_book", None)
-                payload.pop("sniper_catalog", None)
         finally:
             bridge.close()
         if before:
@@ -726,6 +745,8 @@ class Workspace:
         opportunity = self.store.detail(self.market_key, request.opportunity_id)
         if opportunity is None:
             raise ValueError("Возможность не найдена")
+        from cennik.core.calculation import require_current
+        require_current(opportunity,self.analytics.generation(),self.effective_config())
         vendor = opportunity.strategy_id == "vendor_arbitrage"
         npc_resale = opportunity.strategy_id == "npc_to_auction"
         disenchant = opportunity.details.get("disenchant")
@@ -810,15 +831,20 @@ class Workspace:
             gross = sum(row["vendor_sell"] * row["purchased_quantity"] for line in lines for row in line.get("offers", []) if row["vendor_sell"] is not None)
         config = self.effective_config()
         if config.craft_liquidity_enabled and not config.own_data_only and opportunity.strategy_id in {"simple_craft", "craft_graph", "npc_to_auction"}:
-            estimate = opportunity.details.get("liquidity", {}).get("conservative_sales_per_day")
-            if estimate is None or Decimal(str(estimate)) <= 0:
+            estimate = batch_sales_limit(opportunity.details.get("liquidity", {}))
+            if estimate is None and config.craft_allow_unknown_sales:
+                warnings.append("Спрос неизвестен: партия ограничена бюджетом и доступным объёмом, а не оценкой продаж")
+            elif estimate is None or Decimal(str(estimate)) <= 0:
                 problems.append("Нет оценки ликвидности для выбранной партии")
             elif Decimal(opportunity.quantity * request.batches) * 100 / Decimal(str(estimate)) > config.craft_max_batch_sales_percent:
                 problems.append("Партия превышает допустимую долю оценённых суточных продаж")
         if config.craft_liquidity_enabled and not config.own_data_only and disenchant:
             for output in disenchant["yields"]:
-                estimate = output["liquidity"]["conservative_sales_per_day"]
+                estimate = batch_sales_limit(output["liquidity"])
                 expected = Decimal(output["expected_count"]) * opportunity.quantity * request.batches
+                if estimate is None and config.craft_allow_unknown_sales:
+                    warnings.append("Спрос на материал распыления неизвестен: " + str(output["material_item_id"]))
+                    continue
                 if estimate is None or Decimal(estimate) <= 0 or expected * 100 / Decimal(estimate) > config.craft_max_batch_sales_percent:
                     problems.append("Недостаточная ликвидность материала распыления: " + str(output["material_item_id"]))
         net = gross if vendor else auction_net(gross, config.auction_cut_percent)
@@ -1026,10 +1052,12 @@ class Workspace:
 
     def close(self):
         self.stop.set()
+        self.extended.close()
         if self.thread.is_alive():
             self.thread.join(timeout=10)
         self.pool.shutdown(wait=True, cancel_futures=True)
         self.analytics.shutdown()
+        if getattr(self,'read_views',None):self.read_views.close()
         self.market.close()
         for handler in list(self.log.handlers):
             handler.close()

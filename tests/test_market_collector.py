@@ -66,7 +66,7 @@ def test_empty_update_waits_for_real_response_then_ignores_duplicates(exchange):
 def test_empty_timeout_is_partial_and_never_claims_full_market(exchange):
     lua = collector(exchange)
     lua.execute(
-        "Cennik.MarketCollector:Tick(1); C_AuctionHouse.GetNumReplicateItems=function() return 0 end; Game.event('REPLICATE_ITEM_LIST_UPDATE'); Game.now=Game.now+121; Cennik.MarketCollector:Tick(1)"
+        "Cennik.MarketCollector:Tick(1); C_AuctionHouse.GetNumReplicateItems=function() return 0 end; Game.event('REPLICATE_ITEM_LIST_UPDATE'); Game.now=Game.now+Cennik.MarketCollector.responseTimeout+1; Cennik.MarketCollector:Tick(1)"
     )
     assert lua.eval("#Cennik.db.market_scans") == 1
     assert not lua.eval("Cennik.db.market_scans[1].full")
@@ -74,6 +74,72 @@ def test_empty_timeout_is_partial_and_never_claims_full_market(exchange):
     assert lua.eval("#Cennik.db.market_scans") == 1
     lua.execute("Cennik.MarketCollector:Tick(1)")
     assert lua.eval("Game.replicates") == 1
+
+
+def test_slow_server_response_is_accepted_without_duplicate_request(exchange):
+    lua = collector(exchange)
+    lua.execute("""
+      Cennik.MarketCollector:Tick(1)
+      Game.advance(180);Cennik.MarketCollector:Tick(1)
+      assert(Cennik.MarketCollector.requested_at)
+      assert(Cennik.CollectorStatus.db.current.code=='REQUESTED')
+      assert(Cennik.CollectorStatus.db.current.detail:find('180 / 600',1,true))
+      Game.advance(419);Cennik.MarketCollector:Tick(1)
+      assert(Cennik.MarketCollector.requested_at)
+      assert(Game.replicates==1)
+      Game.event('REPLICATE_ITEM_LIST_UPDATE')
+      assert(#Cennik.db.market_scans==1 and Cennik.db.market_scans[1].full)
+      assert(Cennik.db.market_scans[1].received_at-Cennik.db.market_scans[1].requested_at==599)
+      Game.event('REPLICATE_ITEM_LIST_UPDATE')
+      assert(#Cennik.db.market_scans==1)
+    """)
+
+
+def test_empty_events_cannot_extend_wait_forever_or_publish_empty_market(exchange):
+    lua = collector(exchange)
+    lua.execute("""
+      Cennik.MarketCollector:Tick(1)
+      C_AuctionHouse.GetNumReplicateItems=function() return 0 end
+      for i=1,6 do
+        Game.advance(100);Game.event('REPLICATE_ITEM_LIST_UPDATE');Cennik.MarketCollector:Tick(1)
+        assert(Cennik.MarketCollector.requested_at)
+      end
+      Game.advance(1);Cennik.MarketCollector:Tick(1)
+      assert(not Cennik.MarketCollector.requested_at)
+      assert(Game.replicates==1 and #Cennik.db.market_scans==1)
+      assert(not Cennik.db.market_scans[1].full)
+      assert(Cennik.CollectorStatus.db.current.code=='SCAN_TIMEOUT')
+      assert(Cennik.CollectorStatus.db.last_error.detail:find('600',1,true))
+      Game.event('REPLICATE_ITEM_LIST_UPDATE')
+      assert(#Cennik.db.market_scans==1)
+    """)
+
+
+def test_shared_scan_uses_extended_wait_and_keeps_shared_status(exchange):
+    lua = collector(exchange)
+    lua.execute("""
+      C_AuctionHouse.ReplicateItems()
+      Game.advance(180);Cennik.MarketCollector:Tick(1)
+      assert(Cennik.CollectorStatus.db.current.code=='SHARED_SCAN')
+      assert(Game.replicates==1)
+      Game.event('REPLICATE_ITEM_LIST_UPDATE')
+      assert(Cennik.db.market_scans[1].full)
+    """)
+
+
+def test_row_processing_is_not_aborted_by_response_timeout(exchange):
+    lua = collector(exchange)
+    lua.execute("""
+      C_AuctionHouse.GetNumReplicateItems=function() return 2000 end
+      Cennik.MarketCollector:Tick(1);Game.event('REPLICATE_ITEM_LIST_UPDATE')
+      assert(Cennik.MarketCollector.packing)
+      Game.now=Game.now+Cennik.MarketCollector.responseTimeout+1
+      Cennik.MarketCollector:Tick(1)
+      assert(Cennik.MarketCollector.packing)
+      Game.advance(0)
+      assert(Cennik.db.market_scans[1].full)
+      assert(Cennik.db.market_scans[1].count==2000)
+    """)
 
 
 def test_full_queue_rotates_oldest_without_reload(exchange):
@@ -101,7 +167,7 @@ def test_wrong_character_market_never_starts_scan(exchange):
 def test_timeout_with_full_queue_does_not_grow_queue_or_replace_complete_scans(exchange):
     lua = collector(exchange)
     lua.execute(
-        "Cennik.db.market_scans={{scan_id='a',full=true},{scan_id='b',full=true},{scan_id='c',full=true}};Cennik.MarketCollector:Tick(1);Cennik.MarketCollector.emptyResponse=true;Game.advance(121);Cennik.MarketCollector:Tick(1)"
+        "Cennik.db.market_scans={{scan_id='a',full=true},{scan_id='b',full=true},{scan_id='c',full=true}};Cennik.MarketCollector:Tick(1);Cennik.MarketCollector.emptyResponse=true;Game.advance(Cennik.MarketCollector.responseTimeout+1);Cennik.MarketCollector:Tick(1)"
     )
     assert lua.eval("#Cennik.db.market_scans") == 3
     assert lua.eval("Cennik.db.market_scans[1].scan_id") == "a"

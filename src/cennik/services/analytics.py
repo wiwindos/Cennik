@@ -111,7 +111,8 @@ class AnalyticsService:
             self.settings_changed()
         return settings
 
-    def start(self, *, background: bool = True, as_of: datetime | None = None, config_override=None) -> dict:
+    def start(self, *, background: bool = True, as_of: datetime | None = None, config_override=None,
+              strategy_ids=None,calculation_scope=None) -> dict:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("Аналитика уже выполняется.")
         self._performance = Performance()
@@ -134,8 +135,8 @@ class AnalyticsService:
                 markets = self.markets()
             if settings.active_market not in {m["market"] for m in markets}:
                 raise DataNotReady("Выбранный рынок отсутствует в текущем поколении DuckDB.")
-            strategies = self.registry.selected(settings.config.enabled_strategies)
-            versions = {s.id: s.version for s in strategies}
+            strategies = self.registry.selected(strategy_ids if strategy_ids is not None else settings.config.enabled_strategies)
+            versions = {s.id:s.version for s in self.registry.selected(settings.config.enabled_strategies)}
             real_now = datetime.now(UTC)
             development_at = self.development_clock() if self.development_clock else None
             requested_at = as_of or development_at
@@ -144,7 +145,8 @@ class AnalyticsService:
             identity = digest(dumps({"market": settings.active_market, "generation": generation,
                                      "config": settings.config.model_dump(mode="json"),
                                      **cache_context,
-                                     "strategies": versions, "engine_version": "0.2.0"}).encode())
+                                     "strategies": versions, "execution":strategy_ids,"scope":calculation_scope,
+                                     "engine_version": "0.3.0"}).encode())
             cached = self.store.cached(identity, summary=True)
             if cached:
                 self.store.publish_cached(cached)
@@ -158,6 +160,9 @@ class AnalyticsService:
                       data_as_of=real_now if development_at is not None else None,
                       generation=generation, config=settings.config,
                       strategy_versions=versions)
+            if calculation_scope:
+                run.diagnostics['calculation_scope']=calculation_scope
+                run.diagnostics['executed_strategies']=[s.id for s in strategies]
             self.store.begin(run, identity)
         except Exception:
             self._performance.stop()
@@ -208,12 +213,14 @@ class AnalyticsService:
                 context = EvaluationContext(provider, run.config, run.run_id, run.started_at, prices, items, disenchant=rules)
                 run.diagnostics["rejections"] = context.diagnostics
                 unique: dict[tuple, Opportunity] = {}
-                for strategy in self.registry.selected(run.config.enabled_strategies):
+                for strategy in self.registry.selected(run.diagnostics.get('executed_strategies',run.config.enabled_strategies)):
                     with performance.measure("strategy_" + strategy.id):
                         values = strategy.evaluate(context)
                     with performance.measure("ranking"):
                         self._rank_candidates(values, strategy, context, unique, run)
                 opportunities = sorted(unique.values(), key=lambda o: (-o.rating, o.id))
+                run.diagnostics["price_gaps"] = prices.gap_report(items)
+                run.diagnostics["price_gap_count"] = run.diagnostics["price_gaps"]["total"]
             with performance.measure("final_fingerprint"):
                 final_generation = self.generation(refresh=True)
             if final_generation != run.generation:
@@ -270,6 +277,21 @@ class AnalyticsService:
                 error = "Для выбранного рынка нет наблюдаемых цен."
         except (ValueError, OSError, duckdb.Error) as exc:
             error = str(exc)
+        return self._status_document(settings,generation,error,observed,ready)
+
+    def ui_status(self, context=None):
+        """Live publication/progress without waiting for DuckDB or an ingestion lock."""
+        context=context or {}
+        settings=self.store.settings()
+        if self.config_reader:
+            settings.config=self.config_reader()
+        observed=context.get('observed_at')
+        if isinstance(observed,str):observed=datetime.fromisoformat(observed.replace('Z','+00:00'))
+        result=self._status_document(settings,context.get('generation'),None,observed,bool(context.get('ready')))
+        result['freshness_pending']=not context.get('generation')
+        return result
+
+    def _status_document(self,settings,generation,error,observed,ready):
         latest = self.store.latest(settings.active_market, summary=True)
         published = self.store.latest(settings.active_market, published=True, summary=True)
         if latest and latest.error and latest.config == settings.config and latest.generation == generation:

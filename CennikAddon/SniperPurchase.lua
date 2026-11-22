@@ -14,6 +14,7 @@ function S:FinishPurchase(state,manual)
   if not p or not p.sniper then return end
   local rule=C.db.sniper.rules[p.rule_id]
   if state=="bought" then
+    rule.own_bought=(rule.own_bought or rule.bought)+p.quantity;rule.own_spent=(rule.own_spent or rule.spent)+p.cost
     rule.bought=rule.bought+p.quantity; rule.spent=rule.spent+p.cost
     C.db.sniper.spent=C.db.sniper.spent+p.cost
     if self:Remaining(rule)==0 then rule.enabled=false end
@@ -41,6 +42,8 @@ function S:FinishPurchase(state,manual)
   if C.UI and C.UI.section=="Sniper" then C:Refresh() end
 end
 function S:Buy(identity)
+  if self.sharedBlocked then return reject("Есть неуточнённая покупка на другом персонаже. Уточните её и синхронизируйте данные") end
+  if C.Automation and C.Automation.config and C.Automation.config.any_character and not C.Automation.config.client_id then return reject("Дождитесь автоматического подключения персонажа") end
   local lot=self.alerts[identity or self.selected]
   local rule=lot and C.db.sniper.rules[lot.rule_id]
   if C.db.pending then return reject("Предыдущая покупка ещё не завершена; смотрите её результат в окне") end

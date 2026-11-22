@@ -1,8 +1,8 @@
 local _, C = ...
 local L={}
 C.Accounting=L
-local function character() return UnitName("player") end
-local function realm() return GetRealmName() end
+local function character() return C:CharacterName() end
+local function realm() return C:RealmName() end
 function L:Line(link,quantity)
   local item=type(link)=="number" and link or type(link)=="string" and tonumber(link:match("item:(%d+)"))
   if not C:Integer(item) or not C:Integer(quantity) then return nil end

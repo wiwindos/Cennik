@@ -61,7 +61,7 @@ function S:Add(def,quiet)
     local owned=valid.use_bags and type(get)=="function" and get(valid.item_id,false,false) or 0
     if valid.use_bags and valid.item_level~=nil then return false,"Для точного варианта создайте цель без вычитания сумок" end
     if not C:Integer(owned,true) then return false,"Клиент не сообщил запас в сумках" end
-    rule={definition=valid,stock=math.min(owned,valid.quantity),bought=0,spent=0,enabled=false}
+    rule={definition=valid,stock=math.min(owned,valid.quantity),bought=0,spent=0,own_bought=0,own_spent=0,enabled=false}
     db.rules[valid.id]=rule
   else
     if C.db.pending and C.db.pending.sniper and C.db.pending.rule_id==valid.id then return false,"Сначала уточните результат покупки этой цели" end
@@ -88,6 +88,7 @@ function S:Initialize()
   end
   C.db.sniper=C.db.sniper or {workspace_id=workspace,rules={},events={},sequence=0,budget_copper=300000,spent=0}
   local db=C.db.sniper
+  for _,rule in pairs(db.rules) do rule.own_bought=rule.own_bought or rule.bought or 0;rule.own_spent=rule.own_spent or rule.spent or 0 end
   local ack={}; for _,id in ipairs((CennikImport and CennikImport.acknowledged_sniper_event_ids) or {}) do ack[id]=true end
   local events={}; for _,event in ipairs(db.events) do if not ack[event.id] then events[#events+1]=event end end; db.events=events
   if book and not C.db.pending and book.workspace_id==workspace and book.revision~=db.revision and C:Integer(book.budget_copper) then
@@ -104,6 +105,24 @@ function S:Initialize()
     db.budget_copper=book.budget_copper; db.revision=book.revision
   end
   for _,rule in pairs(db.rules) do rule.refreshing=nil end
+  self.sharedBlocked=book and book.purchase_unresolved==true or false
+  if book and book.shared_progress and not C.db.pending then
+    local spent=0
+    for id,total in pairs(book.shared_progress) do
+      local rule=db.rules[id]
+      local cost=total.spent or 0
+      if rule then
+        rule.own_bought=math.max(rule.own_bought or 0,total.own_bought or 0);rule.own_spent=math.max(rule.own_spent or 0,total.own_spent or 0)
+        rule.bought=(total.bought or 0)+math.max(0,rule.own_bought-(total.own_bought or 0))
+        rule.spent=cost+math.max(0,rule.own_spent-(total.own_spent or 0))
+        rule.stock=total.stock or rule.stock;rule.goal=math.max(0,rule.definition.quantity-rule.stock)
+        if self:Remaining(rule)==0 then rule.enabled=false end
+        cost=rule.spent
+      end
+      spent=spent+cost
+    end
+    if next(book.shared_progress) then db.spent=spent end
+  end
   if C.db.pending and C.db.pending.sniper then C.db.pending.stage="unknown"; self:Notice("Покупка прервана reload: проверьте почту и уточните результат") end
   if self.InstallAuctionatorButtons then self:InstallAuctionatorButtons() end
   if not self.hooked then
@@ -111,7 +130,10 @@ function S:Initialize()
     for _,name in ipairs({"SendSearchQuery","SendSellSearchQuery","SendBrowseQuery","SearchForItemKeys","RequestMoreBrowseResults","RequestMoreItemSearchResults","RequestMoreCommoditySearchResults","ReplicateItems","PlaceBid","StartCommoditiesPurchase","ConfirmCommoditiesPurchase","PostItem","PostCommodity","CancelAuction"}) do
       if C_AuctionHouse[name] then hooksecurefunc(C_AuctionHouse,name,function()
         S.window[#S.window+1]=GetTime(); S.lastSend=GetTime()
-        if not C.Adapter.sending then S:HoldForManualSearch("Ручной поиск или другая операция аукциона") end
+        if not C.Adapter.sending then
+          S:HoldForManualSearch(name=="ReplicateItems" and "Полный скан Auctionator" or "Ручной поиск или другая операция аукциона",
+            name=="ReplicateItems" and "scan" or "manual")
+        end
       end) end
     end
   end
@@ -200,10 +222,12 @@ function S:Pause()
   if self.overlay and self.overlay:IsShown() then self.overlayRequested=true end
   self:Notice("Снайпер приостановлен")
 end
-function S:HoldForManualSearch(reason)
+function S:HoldForManualSearch(reason,source)
   -- A timeout cannot tell us that the player has finished reading search results.
+  source=source or "manual"
+  if self.manualHold and self.manualHoldSource~="tab" and self.manualHoldSource~="scan" and (source=="tab" or source=="scan") then return end
   if not self.manualHold then self:CancelSearch(reason) end
-  self.manualHold=reason
+  self.manualHold=reason;self.manualHoldSource=source
 end
 function S:ResumeSearch()
   if C.db.pending then self:Notice("Сначала завершите или уточните покупку"); return false end
@@ -212,7 +236,7 @@ function S:ResumeSearch()
   -- Explicitly leave the manual results before allowing background queries again.
   C.UI:Attach(); C.UI:Show(); C.UI:SelectSection("Sniper")
   if not C.UI.frame or not C.UI.frame:IsShown() then return false end
-  self.manualHold=nil; self.foreignTab=false
+  self.manualHold=nil; self.manualHoldSource=nil;self.foreignTab=false
   self:Notice("Поиск продолжен во вкладке Cennik")
   return true
 end
@@ -359,6 +383,7 @@ function S:Tick(elapsed)
     if p.kind=="batch" then self.batchDisabled=true end
     p.rule=p.rule or {}; p.rule.checked_at=GetTime(); self:CancelSearch("Таймаут поиска; результат неизвестен"); return
   end
+  if not p and C.Automation and (C.Automation:ScanDue() or C.Automation:SaveDue()) then return end
   if not self:CanSend() then return end
   if not p then
     local entry=table.remove(self.details,1)

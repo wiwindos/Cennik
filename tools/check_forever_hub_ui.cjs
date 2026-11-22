@@ -41,8 +41,38 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
    await page.waitForTimeout(100);
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'overflow '+name);
   }
+  await page.locator('nav [data-page="settings"]').click();
+  await page.getByText('Ликвидность крафта, распыления и NPC',{exact:true}).click();
+  const unknown=page.locator('[data-setting="craft_allow_unknown_sales"]');
+  await unknown.waitFor();assert(await unknown.isChecked());
+  for(const key of ['craft_min_sales_per_day','craft_sales_window_days','craft_min_sales_days']){
+   const input=page.locator('[data-setting="'+key+'"]');
+   assert.equal(await input.getAttribute('min'),'0');await input.fill('0');
+  }
+  await page.locator('#settings-form button.primary').click();
+  await page.locator('#message').filter({hasText:'Настройки сохранены'}).waitFor();
+  const saved=await page.evaluate(async id=>(await(await fetch('/cennik/m/'+id+'/api/v2/analytics/settings')).json()),profile);
+  assert(saved.config.craft_allow_unknown_sales);
+  for(const key of ['craft_min_sales_per_day','craft_sales_window_days','craft_min_sales_days'])assert.equal(Number(saved.config[key]),0);
+  await page.waitForFunction(async id=>{const d=await(await fetch('/cennik/m/'+id+'/api/v2/overview')).json();return d.analytics.settings_match&&!d.analytics.running;},profile,{timeout:30000});
   await page.locator('nav [data-page="opportunities"]').click();
   await page.locator('[data-opportunity]').first().waitFor();
+  await page.locator('#price-gap-panel summary').click();
+  await page.locator('#price-gap-results table').waitFor();
+  if(await page.locator('#price-gap-results [data-item-view]').count()){
+   await page.locator('#price-gap-results [data-item-view]').first().click();
+   await page.locator('#market-detail h2').first().waitFor();
+   await page.locator('nav [data-page="opportunities"]').click();
+   await page.locator('#price-gap-results [data-snipe-item]').first().click();
+   await page.locator('#sniper-form').waitFor();
+   assert(Number(await page.locator('#sniper-form [name="item_id"]').inputValue())>0);
+   await page.locator('nav [data-page="opportunities"]').click();
+  }
+  await page.locator('#price-gaps-search input').fill('2589');
+  await page.locator('#price-gaps-search button').click();
+  await page.waitForFunction(()=>!document.querySelector('#price-gap-results')?.textContent.includes('Загрузка'));
+  await page.locator('#price-gaps-search input').fill('');await page.locator('#price-gaps-search button').click();
+  await page.locator('#price-gap-panel summary').click();
   await page.locator('[data-bulk-select]').first().check();
   await page.locator('[data-bulk-action=send]').click();
   await page.getByRole('heading',{name:'Массовая проверка',exact:true}).waitFor();
@@ -65,6 +95,7 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
   await page.waitForFunction(async id=>{const d=await(await fetch('/cennik/m/'+id+'/api/v2/overview')).json();return d.settings.own_data_only&&d.analytics.settings_match&&!d.analytics.running;},profile,{timeout:30000});
   const own=await page.evaluate(async id=>(await(await fetch('/cennik/m/'+id+'/api/v2/overview')).json()),profile);
   assert(own.analytics.opportunity_count>0&&own.analytics.beta_baseline_active);
+  await page.locator('.badge').filter({hasText:'Спрос неизвестен'}).first().waitFor();
   await page.route('**/api/v2/game-names*',route=>route.abort());
   await page.reload();await page.locator('[data-opportunity]').first().waitFor();
   await page.locator('#game-language-status').filter({hasText:'Названия временно недоступны'}).waitFor();
@@ -74,7 +105,7 @@ const assert=require('node:assert/strict'),path=require('node:path'),fs=require(
   await page.getByRole('link',{name:'← WIW Hub',exact:true}).click();await page.locator('.module-card').first().waitFor();
   assert(await page.locator('body').evaluate(e=>e.classList.contains('light')));
   assert.deepEqual(errors,[]);
-  const result={game_names_ru_en:true,language_persisted:true,hub_single_login:true,pages:mainPages,bulk_from_beta:true,own_mode_automatic_calculation:true,theme_shared:true,desktop_mobile:true,js_http_errors:errors};
+  const result={zero_liquidity_settings:true,unknown_demand_badge:true,price_gaps_panel:true,game_names_ru_en:true,language_persisted:true,hub_single_login:true,pages:mainPages,bulk_from_beta:true,own_mode_automatic_calculation:true,theme_shared:true,desktop_mobile:true,js_http_errors:errors};
   fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  }catch(e){await page.screenshot({path:path.join(out,'failure.png'),fullPage:true});console.error(errors);console.error(await page.locator('body').innerText());throw e;}
  finally{await browser.close();}

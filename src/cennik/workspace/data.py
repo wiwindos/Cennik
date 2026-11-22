@@ -25,6 +25,7 @@ from cennik.markets import neutral_market
 
 from .models import MARKET
 from .names import GameNames
+from .scan_rows import unpack_scan
 
 
 def now() -> str:
@@ -78,6 +79,8 @@ class MarketDatabase:
                             [self.market_key, "forever", self.market_info.get("ruleset", "pvp"), market_key.split(".")[-2],
                              market_key.split(".")[-1], self.market_info.get("label", market_key), "NO_SCANS"])
         self.revalidate_empty_scans()
+        from .neutral import NeutralAuctions
+        self.neutral = NeutralAuctions(self)
 
     def revalidate_empty_scans(self) -> int:
         """Repair old unconfirmed empty replicate events without altering their archives."""
@@ -248,10 +251,12 @@ class MarketDatabase:
             marker = self.root / "collectors/scan_receipts" / (identity+".json")
             with self.lock:
                 reused = marker.exists()
+                path = self.archive(category, identity, scan, observed,
+                    market=neutral_market(self.market_key) if scope == "neutral" else "unclassified")
                 if not reused:
-                    path = self.archive(category, identity, scan, observed,
-                        market=neutral_market(self.market_key) if scope == "neutral" else "unclassified")
                     atomic_bytes(marker, dumps({"scan_id": identity, "path": str(path.relative_to(self.root)), "scope": scope}).encode())
+                if scope == "neutral":
+                    self.neutral.ingest(scan, identity, path)
             return {"scan_id": identity, "complete": False, "archived_only": True, "auction_type": scope,
                     "rows": scan.get("count", 0), "warnings": ["Снимок сохранён отдельно и не меняет рабочие цены"], "reused": reused}
         self.names.scan(scan)
@@ -259,40 +264,8 @@ class MarketDatabase:
             if self.db.execute("SELECT 1 FROM scan_registry WHERE scan_id=?", [identity]).fetchone():
                 return {"scan_id": identity, "reused": True}
             path = self.archive("scans", identity, scan, observed)
-            variants = scan.get("variants", [])
-            lines = scan["data"].split(";") if scan["data"] else []
-            offers: list[dict[str, Any]] = []
-            warnings: list[str] = []
-            for index, line in enumerate(lines):
-                try:
-                    values = [int(value) for value in line.split(":")]
-                    if len(values) not in {6, 7}:
-                        raise ValueError("expected six or seven fields")
-                    item, quantity, buyout, bid, remaining, variant_id = values[:6]
-                    ownership = values[6] if len(values) == 7 else 0
-                    if ownership not in {0, 1, 2}:
-                        raise ValueError("invalid ownership flag")
-                    if item <= 0 or quantity <= 0 or any(value < 0 or value > 2**53 - 1 for value in values):
-                        raise ValueError("invalid numbers")
-                    variant = variants[variant_id - 1] if 0 < variant_id <= len(variants) else {}
-                    offers.append({"scan_id": identity, "sequence": index, "item_id": item,
-                        "variant": variant.get("link"), "name": variant.get("name"), "quantity": quantity,
-                        "buyout": buyout, "bid": bid, "time_left": remaining, "divisible": variant.get("divisible"),
-                        "vendor_sell": variant.get("vendor_sell"), "vendor_buy": None, "observed_at": observed,
-                        "owned": None if not ownership else ownership == 1})
-                except (ValueError, TypeError, IndexError) as error:
-                    if len(warnings) < 20:
-                        warnings.append(f"Строка {index + 1}: {error}")
-            complete = (bool(scan.get("full")) and len(offers) == scan.get("count") == len(lines)
-                        and not scan.get("skipped", 0) and not scan.get("error")
-                        and scan.get("reported_count", scan.get("count")) == len(lines)
-                        and (bool(lines) or scan.get("empty_market_confirmed") is True))
-            if not lines and scan.get("empty_market_confirmed") is not True:
-                warnings.append("Пустой ответ API не подтверждает отсутствие товаров на рынке")
-            if scan.get("error"):
-                warnings.append("Сборщик: " + str(scan["error"])[:1000])
-            if not complete:
-                warnings.append("Покрытие неполное: предыдущая рабочая книга не заменена")
+            row_count = scan["data"].count(";")+1 if scan["data"] else 0
+            offers, warnings, complete = unpack_scan(scan, identity, observed)
             snapshots, items = [], []
             if complete:
                 grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -326,7 +299,7 @@ class MarketDatabase:
             self.db.execute("BEGIN")
             try:
                 self.db.execute("INSERT INTO scan_registry(scan_id,market,observed_at,received_at,row_count,valid_rows,complete,source,path,sha256,warnings,quote_path,offers_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [identity, self.market_key, observed, now(), len(lines), len(offers), complete, "Cennik replicate",
+                    [identity, self.market_key, observed, now(), row_count, len(offers), complete, "Cennik replicate",
                      str(path.relative_to(self.root)), identity, dumps(warnings), quote_path, offers_path])
                 latest_row = self.db.execute("SELECT observed_at FROM source_heads WHERE source='Cennik replicate'").fetchone()
                 latest = latest_row[0] if latest_row else None
@@ -350,6 +323,7 @@ class MarketDatabase:
         return {"scan_id": identity, "complete": complete, "rows": len(offers), "warnings": warnings, "reused": False}
 
     def close(self):
+        self.neutral.close()
         self.db.close()
 
     def prune_api(self, cutoff: str) -> int:
@@ -385,6 +359,16 @@ class MarketDatabase:
 
 
 class WorkspaceProvider(DuckDBProvider):
+    def markets(self):
+        # MAX(timestamp) is unaffected by deduplicating historical revisions.
+        # Avoid the expensive window/sort in price_history on every status poll.
+        return self.rows("""SELECT m.market,m.label,m.market_status,
+            (SELECT max(observed_at) FROM (
+                SELECT market,observed_at FROM price_snapshots
+                UNION ALL SELECT market,observed_at FROM price_history_ranges
+            ) p WHERE p.market=m.market AND p.observed_at<=?) observed_at
+            FROM markets m ORDER BY m.market""", [self.as_of])
+
     def __init__(self, database: MarketDatabase, market: str, as_of: datetime, *, own_data_only=False):
         self.database, self.market, self.as_of = database, market, as_of
         self.own_data_only = own_data_only
@@ -404,14 +388,19 @@ class WorkspaceProvider(DuckDBProvider):
         self.used_raw_ids.update(row["raw_id"] for row in rows if row.get("raw_id"))
         return rows
 
-    def current_prices(self) -> dict[int, PriceObservation]:
+    def current_prices(self, item_ids=None) -> dict[int, PriceObservation]:
+        if item_ids is not None:
+            item_ids=sorted(set(item_ids))
+            if not item_ids:return {}
         if self.own_data_only:
             rows = self.rows("SELECT quote_path FROM scan_registry WHERE complete AND market=? AND observed_at<=? ORDER BY observed_at DESC LIMIT 1", [self.market, self.as_of])
             if not rows or not rows[0]["quote_path"]:
                 return {}
-            own_rows = self.rows("SELECT *, 'scan' granularity FROM read_parquet(?)", [str(self.database.root / rows[0]["quote_path"])])
+            own_rows = self.rows("SELECT *, 'scan' granularity FROM read_parquet(?)"+
+                (' WHERE item_id IN (SELECT unnest(?))' if item_ids is not None else ''),
+                [str(self.database.root / rows[0]["quote_path"])]+([item_ids] if item_ids is not None else []))
             return {row["item_id"]: self.observation(row) for row in own_rows}
-        prices = super().current_prices()
+        prices = super().current_prices(item_ids)
         # Missing items in a newer complete source snapshot must not be resurrected.
         heads = self.rows("SELECT source,max(observed_at) observed_at FROM price_snapshots WHERE market=? AND observed_at<=? GROUP BY source", [self.market, self.as_of])
         by_source = {row["source"]: row["observed_at"] for row in heads}

@@ -33,6 +33,7 @@ class EvaluationContext:
     items: dict[int, Item]
     diagnostics: dict[str, dict[str, int]] = field(default_factory=dict)
     disenchant: DisenchantRules | None = None
+    selection: dict = field(default_factory=dict)
 
     def reject(self, strategy: str, reason: str) -> None:
         counts = self.diagnostics.setdefault(strategy, {})

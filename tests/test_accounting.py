@@ -197,6 +197,7 @@ def accounting_lua(workspace, *, collector_only=False):
         "accounting": {"format_version": 1, "workspace_id": workspace.identity, "market": MARKET}}
     if collector_only:
         incoming.update(collector_only=True, collector_agent_id="fixture")
+        incoming["market_catalog"] = [{"market": MARKET, "faction": "alliance", "realm_names": ["FixtureRealm"]}]
     lua.execute("CennikImport=" + lua_literal(incoming))
     lua.execute("Game.now="+str(int(datetime.now(UTC).timestamp()))+"; Cennik:Initialize();Cennik:BindMarket('"+MARKET+"')")
     return lua

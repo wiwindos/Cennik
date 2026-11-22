@@ -6,7 +6,7 @@ local function button(...)
   local font=frame:GetFontString()
   if font then
     local path,size,flags=font:GetFont()
-    if path and size then font:SetFont(path,math.max(9,size-1),flags) end
+    if path and size then C.Fonts:Set(font,math.max(9,size-1),flags) end
   end
   return frame
 end
@@ -24,7 +24,7 @@ local function visible(frame,value)
   if value and not frame:IsShown() then frame:Show() elseif not value and frame:IsShown() then frame:Hide() end
 end
 local function readable(font,size)
-  font:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF",(size or 14)-1,"")
+  C.Fonts:Set(font,(size or 14)-1,"")
   font:SetSpacing(3)
 end
 function S:UpdateFindingBorder()
@@ -48,7 +48,7 @@ function S:RenderFindingSignal()
     local id=notice.finding.rule_id
     local icon=p.foundIcons[id]
     if not icon then
-      icon=CreateFrame("Button",nil,p.iconsBody); p.foundIcons[id]=icon
+      icon=C.Fonts:CreateFrame("Button",nil,p.iconsBody); p.foundIcons[id]=icon
       icon:SetSize(48,48); icon.ruleID=id
       local border=icon:CreateTexture(nil,"BACKGROUND"); border:SetAllPoints(icon)
       border:SetColorTexture(1,0.25,0.12,1)
@@ -61,6 +61,7 @@ function S:RenderFindingSignal()
       end)
       icon:SetScript("OnEnter",function(self)
         local current=S.unreadFindings[self.ruleID]
+        local GameTooltip=C.Fonts:Tooltip()
         if current and GameTooltip then
           GameTooltip:SetOwner(self,"ANCHOR_RIGHT")
           GameTooltip:SetText(C.Items:Name(current.finding.item_id))
@@ -69,7 +70,7 @@ function S:RenderFindingSignal()
           GameTooltip:Show()
         end
       end)
-      icon:SetScript("OnLeave",function() if GameTooltip then GameTooltip:Hide() end end)
+      icon:SetScript("OnLeave",function() local tip=C.Fonts:Tooltip();if tip then tip:Hide() end end)
     end
     local info=C.Items:Get(notice.finding.item_id)
     local texture=info and info.icon or "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -186,19 +187,19 @@ function S:RenderOverlay()
     button(p,"Все цели",458,-48,130,function() U:Attach(); U:Show(); U:SelectSection("Sniper") end)
     p.resume=p.resumeAll
     local listTitle=text(p,"Цели поиска · выберите предмет",18,-91,left); readable(listTitle)
-    p.scroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); p.scroll:SetPoint("TOPLEFT",18,-116); p.scroll:SetSize(left-18,height-190); p.scroll:SetClipsChildren(true)
+    p.scroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate"); p.scroll:SetPoint("TOPLEFT",18,-116); p.scroll:SetSize(left-18,height-190); p.scroll:SetClipsChildren(true)
     p.rowWidth=left-30
-    p.body=CreateFrame("Frame",nil,p.scroll); p.body:SetSize(p.rowWidth,height-190); p.scroll:SetScrollChild(p.body); p.rows={}
+    p.body=C.Fonts:CreateFrame("Frame",nil,p.scroll); p.body:SetSize(p.rowWidth,height-190); p.scroll:SetScrollChild(p.body); p.rows={}
     p.finding=text(p,"",rightX,-94,right); readable(p.finding,14); p.finding:SetHeight(30); p.finding:SetJustifyV("TOP")
-    p.iconsScroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
+    p.iconsScroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
     p.iconsScroll:SetPoint("TOPLEFT",rightX,-130); p.iconsScroll:SetSize(right-24,52); p.iconsScroll:SetClipsChildren(true)
     p.iconsPerRow=math.max(1,math.floor((right-24)/56))
-    p.iconsBody=CreateFrame("Frame",nil,p.iconsScroll); p.iconsBody:SetSize(right-24,48)
+    p.iconsBody=C.Fonts:CreateFrame("Frame",nil,p.iconsScroll); p.iconsBody:SetSize(right-24,48)
     p.iconsScroll:SetScrollChild(p.iconsBody); p.foundIcons={}
     p.latest=button(p,"Показать новое",rightX,-194,right,function() S:ShowLatestFinding() end)
-    p.contentScroll=CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
+    p.contentScroll=C.Fonts:CreateFrame("ScrollFrame",nil,p,"UIPanelScrollFrameTemplate")
     p.contentScroll:SetPoint("TOPLEFT",rightX,-234); p.contentScroll:SetSize(right-18,height-450); p.contentScroll:SetClipsChildren(true)
-    p.contentBody=CreateFrame("Frame",nil,p.contentScroll); p.contentBody:SetSize(right-30,height-450)
+    p.contentBody=C.Fonts:CreateFrame("Frame",nil,p.contentScroll); p.contentBody:SetSize(right-30,height-450)
     p.contentScroll:SetScrollChild(p.contentBody)
     p.content=text(p.contentBody,"",0,0,right-30); readable(p.content,15); p.content:SetJustifyV("TOP"); p.content:SetWordWrap(true)
     p.notice=text(p,"",rightX,-height+210,right); readable(p.notice,14); p.notice:SetHeight(56); p.notice:SetJustifyV("TOP")

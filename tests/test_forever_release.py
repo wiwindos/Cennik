@@ -45,6 +45,7 @@ def seed(tmp_path):
 def test_beta_is_usable_but_keeps_dates_and_cannot_resurrect_missing_live_items(workspace, seed):
     _, document = seed
     atomic_json(workspace.bootstrap.path, document.model_dump(mode="json"))
+    workspace.save_settings(workspace.settings().model_copy(update={'use_beta_prices': True}))
     workspace.calculate()
     assert workspace.analytics.status()['beta_baseline_active']
     assert workspace.exchange.ready()['published_run']
@@ -117,6 +118,8 @@ def test_partial_first_scan_and_own_mode_do_not_break_delivery_or_export(workspa
     partial.update(full=False, error='closed')
     assert not workspace.import_scans([partial])[0]['complete']
     workspace.import_scans([scan(offset=1)])
+    assert workspace.recalculate_pending.is_set()
+    workspace.calculate_pending()
     assert workspace.analytics.status()['settings_match']
     assert workspace.exchange.ready()['published_run']
 

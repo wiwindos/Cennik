@@ -19,8 +19,8 @@ from .client import CollectorClient
 from .protocol import Connection, Observation
 from .status import GAME_STATUS
 
-VERSION = "0.6.0"
-MARKET = "forever.pvp.alliance.us"
+VERSION = "0.6.7"
+MARKET = "unassigned"
 
 
 def default_root():
@@ -173,8 +173,7 @@ class CollectorAgent:
             "acknowledged_scan_ids": sorted({s for f in self.files.values() for s in f["scan_ids"]}),
             "collector_delivery": {**self.client.delivery(), "enabled": not self.settings["paused"]},
             "auctioneer_registry": self.client.registry()}
-        if "market_catalog" in self.client.registry():
-            payload["market_catalog"] = self.client.registry()["market_catalog"]
+        payload["market_catalog"] = self.client.registry().get("market_catalog", [])
         body = ("-- Cennik Collector; data only, loaded by the game on /reload.\nCennikImport="+lua_literal(payload)+"\n").encode()
         if len(body) > 8_000_000:
             raise ValueError("Подтверждения больше 8 МБ; передайте отчёт поддержки")
@@ -225,11 +224,20 @@ class CollectorAgent:
         latest = max(d["local"], key=lambda v: v["diagnostic"].get("at", 0), default=None)
         diagnostic = latest["diagnostic"] if latest else {}
         game_code = diagnostic.get("code", "")
+        game_error = diagnostic.get("level") == "error" or game_code in {"UNBOUND", "AUCTION_CONTEXT_UNKNOWN"}
+        if game_error and status == "Работает":
+            status = "Сбор заблокирован"
+        notice = GAME_STATUS.get(game_code, game_code) if game_error else ""
+        if game_code == "UNBOUND":
+            notice = "В игре нажмите Cennik → Подключение / рынок. В EXE нажмите «Обновить подключение», затем /reload в игре."
+            details = [diagnostic.get("realm"), diagnostic.get("faction")]
+            notice += " · " + " / ".join(str(v) for v in details if v) if any(details) else ""
         return {"status": status, "error": error, "paused": self.settings["paused"], "pending": d["pending"],
             "rejected": d["rejected"], "last_import": self.last_import, "checked_at": self.checked_at,
             "delivery": d["delivery"], "local": d["local"], "connection": d["connection"],
             "game_root": self.settings.get("game_root", ""), "game_code": game_code,
-            "game_status": GAME_STATUS.get(game_code, game_code), "game_at": diagnostic.get("at")}
+            "game_status": GAME_STATUS.get(game_code, game_code), "game_at": diagnostic.get("at"),
+            "game_error": game_error, "notice": notice}
 
     def report(self):
         d = self.overview()

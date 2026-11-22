@@ -116,7 +116,7 @@ do
 local _, C = ...
 local N={maxAge=900}
 C.NPC=N
-function N:Scope() return UnitName("player") .. "/" .. GetRealmName() .. "/" .. (UnitFactionGroup("player") or "") end
+function N:Scope() return C:CharacterName() .. "/" .. C:RealmName() .. "/" .. (UnitFactionGroup("player") or "") end
 function N:Key(key) return key.itemID .. ":" .. (key.itemLevel or 0) .. ":" .. (key.itemSuffix or 0) .. ":" .. (key.battlePetSpeciesID or 0) end
 function N:Vendor(task,row)
   local sell=C.Adapter:VendorPrice(row)

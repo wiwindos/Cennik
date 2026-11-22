@@ -24,7 +24,8 @@ def main():
     addon = build / "payload/CennikAddon"
     addon.mkdir(parents=True, exist_ok=True)
     source = ROOT / "CennikAddon"
-    files = ["CennikAddon.toc"]+[s.strip().replace("\\", "/") for s in (source / "CennikAddon.toc").read_text("utf-8").splitlines() if s and not s.startswith("#")]
+    from cennik.workspace.install import addon_files
+    files = addon_files(source)
     for stale in addon.rglob("*"):
         if stale.is_file() and stale.relative_to(addon).as_posix() not in files:
             if not stale.resolve().is_relative_to(addon.resolve()):

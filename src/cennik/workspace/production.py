@@ -16,12 +16,14 @@ from ahledger.util import atomic_json
 from cennik.addon.lua_data import lua_literal
 from cennik.addon.models import MAX_INTEGER, ExportRequest, Task
 from cennik.core.models import Model, Opportunity
+from cennik.markets import forever_realm_identity
 
 from .accounting import StockLine
 from .data import atomic_bytes
 
 
 class ProductionClient(Model):
+    role_chosen_at: int = Field(default=0, ge=0, le=2**53-1, strict=True)
     remote_device: str = Field(default="", pattern=r"^([a-f0-9]{32})?$")
     id: str = Field(default_factory=lambda: uuid4().hex, pattern=r"^[a-f0-9]{32}$")
     role: str = Field(pattern=r"^(auctioneer|crafter)$")
@@ -52,7 +54,9 @@ class ClientRoster(Model):
         if values and ((len(values) < 2 and not all(c.remote_device for c in values)) or sum(c.role == "auctioneer" for c in values) != 1):
             raise ValueError("Нужны один аукционер и минимум один крафтер")
         if len({c.realm.lower().replace(' ', '') for c in values}) > 1:
-            raise ValueError("Для передачи предметов персонажи должны быть на одном сервере")
+            identities = {forever_realm_identity(c.realm) for c in values}
+            if None in identities or len(identities) != 1:
+                raise ValueError("Для передачи предметов персонажи должны быть на одном сервере")
         for keys in ([c.id for c in values], [(c.realm.lower(), c.character.lower()) for c in values],
                      [str(c.paths()[1]).lower() for c in values]):
             if len(keys) != len(set(keys)):

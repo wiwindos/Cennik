@@ -193,6 +193,8 @@ class AddonExchange:
                             raise ExchangeConflict(
                                 "Эта возможность уже экспортирована. Bridge повторно получает существующее задание; дублирование закупки запрещено."
                             )
+                        from cennik.core.calculation import require_current
+                        require_current(value,run.generation,run.config)
                         tasks.append(self.task(value, run, request, now))
                     allowed = {
                         line.item_id

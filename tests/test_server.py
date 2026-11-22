@@ -97,7 +97,7 @@ def test_private_exchange_preserves_full_payloads_accounting_and_retries(server)
     assert exchange(http, device["token"], first, 2, reordered) == response
     assert w.accounting.overview()["summary"]["purchase_copper"] == 30
     crafted = exchange(http, device["token"], second, 1)
-    assert crafted["payload"]["packages"] == [] and "sniper_book" not in crafted["payload"]
+    assert crafted["payload"]["packages"] == [] and "sniper_book" in crafted["payload"]
     assert crafted["payload"]["production"]["client"]["role"] == "crafter"
     bad = http.post("/bridge/v1/exchange", headers={"X-Bridge-Key": device["token"]},
         json={"client_id": second, "sequence": 2, "saved": saved})
@@ -123,6 +123,79 @@ def test_profiles_are_isolated_and_only_one_ahl_source_is_enabled(server):
     assert app.state.catalog.profile(p.id).market == p.market
     assert app.state.catalog.workspace(p.id).root == w.root
     assert not other_w.market.rows("SELECT * FROM working_offers")
+
+
+def test_account_outbox_survives_character_switch_without_accepting_other_accounts(server):
+    app, http, p = server
+    routes = [dict(role='auctioneer', character='FixturePlayer', realm='FixtureRealm', account='first'),
+              dict(role='crafter', character='Alt', realm='FixtureRealm', account='first'),
+              dict(role='crafter', character='OtherAccount', realm='FixtureRealm', account='second')]
+    r=http.post(f'/server/api/markets/{p.id}/workers',json={'label':'PC','clients':routes},headers=AUTH)
+    assert r.status_code==200,r.text
+    device=r.json()
+    w=app.state.catalog.workspace(p.id)
+    event=dict(event_id='retained:ledger:1',workspace_id=w.identity,market=p.market,
+               realm='FixtureRealm',character='Alt',observed_at=int(time.time()),
+               kind='purchase',outputs=[dict(item_id=2589,quantity=3)],money_copper=30)
+    saved=dict(binding=dict(realm='FixtureRealm',character='FixturePlayer',market=p.market),
+               accounting=dict(outbox=[event]))
+    result=exchange(http,device['token'],device['clients'][0],1,saved)
+    assert event['event_id'] in result['payload']['accounting']['acknowledged_event_ids']
+    assert w.accounting.overview()['summary']['purchase_copper']==30
+    assert exchange(http,device['token'],device['clients'][0],1,saved)==result
+    assert w.accounting.overview()['summary']['purchase_copper']==30
+    for changes in ({'character':'OtherAccount'},{'character':'Unknown'},
+                    {'market':p.market.replace('.alliance.','.horde.')}):
+        rejected=http.post('/bridge/v1/exchange',headers={'X-Bridge-Key':device['token']},json={
+            'client_id':device['clients'][0],'sequence':2,
+            'saved':{**saved,'accounting':{'outbox':[{**event,**changes}]}}})
+        assert rejected.status_code==422,rejected.text
+
+
+def test_confirmed_logical_realm_and_forever_surname_complete_private_exchange(server):
+    app,http,p=server
+    p=p.model_copy(update={'realm_names':['CAMWOW EU5 Realm 6 PvP'],'client_family':'forever'})
+    app.state.catalog.save(p)
+    from cennik.server.bridge import RegisterDevice
+    device=app.state.bridge.register(p.id,RegisterDevice(label='Hidden realm'))
+    r=http.post('/bridge/v1/characters',headers={'X-Bridge-Key':device['token']},json={
+        'automatic_observers':True,'characters':[{
+            'role':'unassigned','realm':'forever-eu-pvp','character':'Wiw Aust',
+            'account':'first','faction':'alliance','market':p.market,'game_version':'1.60.1'}]})
+    assert r.status_code==200,r.text
+    route=r.json()['clients'][0]
+    assert route['character']=='Wiw Aust' and route['realm']=='forever-eu-pvp'
+    result=exchange(http,device['token'],route['id'],1,{
+        'binding':dict(realm=route['realm'],character=route['character'],market=p.market)})
+    assert result['payload']['market_binding']['market']==p.market
+
+
+def test_unresolved_legacy_ledger_is_preserved_without_blocking_current_exchange(server):
+    app,http,p=server
+    device=register(http,p)
+    route=device['clients'][0]
+    w=app.state.catalog.workspace(p.id)
+    old=dict(event_id='legacy:ledger:1',workspace_id=w.identity,market=p.market,
+             realm='',character='OldShortName',observed_at=int(time.time()),
+             kind='opening',outputs=[dict(item_id=2589,quantity=3)])
+    current={**old,'event_id':'current:ledger:2','kind':'purchase','character':'FixturePlayer','realm':'FixtureRealm','money_copper':30}
+    saved=dict(binding=dict(realm='FixtureRealm',character='FixturePlayer',market=p.market),
+               accounting=dict(outbox=[old,current],events=[old,current]))
+    result=exchange(http,device['token'],route,1,saved)
+    report=result['payload']['accounting']
+    assert set(report['acknowledged_event_ids'])=={old['event_id'],current['event_id']}
+    assert report['unresolved_identity_events']==1
+    assert w.accounting.overview()['summary']['purchase_copper']==30
+    assert w.accounting.overview()['inventory'][0]['remaining']==3
+    archive=list((w.root/'accounting/unresolved').glob('*.json'))
+    assert len(archive)==1
+    assert json.loads(archive[0].read_text('utf-8'))['original']==old
+    assert exchange(http,device['token'],route,1,saved)==result
+    assert len(list((w.root/'accounting/unresolved').glob('*.json')))==1
+    # Re-sending from a new exchange archives once, without adding profit/stock.
+    exchange(http,device['token'],route,2,saved)
+    assert w.accounting.overview()['summary']['purchase_copper']==30
+    assert len(list((w.root/'accounting/unresolved').glob('*.json')))==1
 
 
 def test_collector_registry_scopes_and_crowd_scan_reaches_only_its_market(server):
@@ -156,6 +229,10 @@ def test_collector_registry_scopes_and_crowd_scan_reaches_only_its_market(server
     assert len(w.market.rows("SELECT * FROM working_offers")) == 1
     w.future.result(timeout=10)
     latest = w.store.latest(p.market, summary=True)
+    deadline=time.monotonic()+10
+    while (latest is None or latest.status=='running') and time.monotonic()<deadline:
+        time.sleep(.05)
+        latest=w.store.latest(p.market,summary=True)
     assert latest is not None and latest.status == "completed"
     assert list((app.state.hub.root / "raw" / p.id / "scan").glob("*.zst"))
 
