@@ -21,6 +21,7 @@ outputs
 dist
 build
 release
+release-seed
 funpayparsers
 Auctionator
 **/__pycache__

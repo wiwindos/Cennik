@@ -3,7 +3,7 @@ import hashlib
 from datetime import UTC, datetime
 
 import httpx
-from test_forever_release import seed as seed
+from test_forever_release import baseline as baseline
 from test_workspace import scan
 from test_workspace import workspace as workspace
 
@@ -11,12 +11,12 @@ from ahledger.util import atomic_json
 from cennik.workspace.web import create_app
 
 
-def install(workspace, seed):
-    atomic_json(workspace.bootstrap.path, seed[1].model_dump(mode='json'))
+def install(workspace, baseline):
+    atomic_json(workspace.bootstrap.path, baseline.model_dump(mode='json'))
 
 
-def test_price_switch_preserves_reference_catalog_and_hides_card_price(workspace, seed):
-    install(workspace, seed)
+def test_price_switch_preserves_reference_catalog_and_hides_card_price(workspace, baseline):
+    install(workspace, baseline)
     assert not workspace.settings().use_beta_prices
     with workspace.provider(None, workspace.market_key, datetime.now(UTC)) as provider:
         assert provider.items()[2589].vendor_sell_copper == 13
@@ -32,8 +32,8 @@ def test_price_switch_preserves_reference_catalog_and_hides_card_price(workspace
     asyncio.run(card())
 
 
-def test_cleanup_retires_beta_publication_preserves_catalog_and_is_idempotent(workspace, seed):
-    install(workspace, seed)
+def test_cleanup_retires_beta_publication_preserves_catalog_and_is_idempotent(workspace, baseline):
+    install(workspace, baseline)
     workspace.save_settings(workspace.settings().model_copy(update={'use_beta_prices': True}))
     workspace.calculate()
     old = workspace.store.latest(workspace.market_key, published=True)
@@ -60,8 +60,8 @@ def test_cleanup_retires_beta_publication_preserves_catalog_and_is_idempotent(wo
         assert not provider.current_prices()
 
 
-def test_queued_cleanup_preserves_live_scans_and_republishes_actual_prices(workspace, seed):
-    install(workspace, seed)
+def test_queued_cleanup_preserves_live_scans_and_republishes_actual_prices(workspace, baseline):
+    install(workspace, baseline)
     workspace.market.import_scan(scan())
     archives = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in workspace.root.rglob('*.parquet')}
     archives.update({p: hashlib.sha256(p.read_bytes()).hexdigest() for p in workspace.root.rglob('*.json.zst')})

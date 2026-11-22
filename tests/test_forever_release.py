@@ -1,5 +1,3 @@
-import hashlib
-import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,21 +8,18 @@ from test_server import server as server
 from test_workspace import scan
 from test_workspace import workspace as workspace
 
-from ahledger.util import atomic_json, exclusive_lock
+from ahledger.util import atomic_json
 from cennik.core.models import Item, PriceObservation, Recipe
 from cennik.server.bridge import DiscoverCharacters, RegisterDevice
-from cennik.server.prepare import prepare
 from cennik.sources import Sources
 from cennik.worker.agent import scoped_saved
 from cennik.worker.idle import IdleProbe
 from cennik.workspace.bootstrap import BootstrapDocument
 from cennik.workspace.bulk import BulkCreate
 
-ROOT = Path(__file__).resolve().parents[1]
-
 
 @pytest.fixture
-def seed(tmp_path):
+def baseline():
     stamp = datetime.now(UTC) - timedelta(days=7)
     document = BootstrapDocument(version="fixture-beta", created_at=datetime.now(UTC), source_market="forever.pvp.alliance.us",
         items={2589: Item(item_id=2589, name="Cloth", vendor_sell_copper=13, observed_at=stamp)},
@@ -32,18 +27,11 @@ def seed(tmp_path):
             granularity="scan", min_copper=10, median_copper=12, quantity=100, source="AHL1")},
         references={2589: 20}, recipes=[Recipe(spell_id=100, result_item_id=4238, qty_min=1, qty_max=1,
             version_hash="a"*64, profession="Tailoring", inputs=[{"item_id": 2589, "quantity": 3}])])
-    folder = tmp_path / "seed"
-    folder.mkdir()
-    (folder / "baseline.json").write_text(document.model_dump_json(), "utf-8")
-    for name in ("npc_catalog.json", "disenchant.json"):
-        (folder / name).write_bytes((ROOT / "src/cennik/reference" / name).read_bytes())
-    atomic_json(folder / "manifest.json", {"format_version": 1, "version": document.version,
-        "files": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.glob('*.json')}})
-    return folder, document
+    return document
 
 
-def test_beta_is_usable_but_keeps_dates_and_cannot_resurrect_missing_live_items(workspace, seed):
-    _, document = seed
+def test_beta_is_usable_but_keeps_dates_and_cannot_resurrect_missing_live_items(workspace, baseline):
+    document = baseline
     atomic_json(workspace.bootstrap.path, document.model_dump(mode="json"))
     workspace.save_settings(workspace.settings().model_copy(update={'use_beta_prices': True}))
     workspace.calculate()
@@ -65,40 +53,6 @@ def test_beta_is_usable_but_keeps_dates_and_cannot_resurrect_missing_live_items(
     workspace.market.import_scan(empty)
     with workspace.provider(None, workspace.market_key, datetime.now(UTC)) as provider:
         assert provider.current_prices() == {}
-
-
-def test_seed_reset_preserves_credentials_and_rejects_corruption_before_deleting(tmp_path, seed):
-    package, _ = seed
-    root = tmp_path / 'server'
-    result = prepare(root, package)
-    assert result['backup_created'] is False and not result['profile']['realm_names']
-    atomic_json(root/'upstreams/credentials.json', {'ahl_token': 'fixture-private-token'})
-    sentinel = root/'workers/old.json'
-    atomic_json(sentinel, {'test': True})
-    with exclusive_lock(root), pytest.raises(RuntimeError):
-        prepare(root, package, reset=True, confirmation='RESET_TEST_DATA')
-    assert sentinel.exists()
-    with pytest.raises(ValueError):
-        prepare(root, package, reset=True)
-    assert sentinel.exists()
-    (package/'baseline.json').write_text('{}', 'utf-8')
-    with pytest.raises(ValueError):
-        prepare(root, package, reset=True, confirmation='RESET_TEST_DATA')
-    assert sentinel.exists()
-
-
-def test_successful_reset_removes_only_test_state(tmp_path, seed):
-    package, _ = seed
-    root = tmp_path/'server'
-    prepare(root, package)
-    atomic_json(root/'upstreams/credentials.json', {'ahl_token': 'fixture-private-token'})
-    for folder in ['workers', 'pairing', 'collector-archive', 'forwarding']:
-        atomic_json(root/folder/'test.json', {'test': True})
-    prepare(root, package, reset=True, confirmation='RESET_TEST_DATA')
-    assert json.loads((root/'upstreams/credentials.json').read_text())['ahl_token'] == 'fixture-private-token'
-    assert not (root/'workers/test.json').exists() and not (root/'collector-archive/test.json').exists()
-    assert len(json.loads((root/'markets.json').read_text())['profiles']) == 1
-    assert not (root/'backups').exists()
 
 
 def test_new_npc_prices_replace_old_but_manual_and_sparse_values_are_preserved(workspace):
@@ -205,10 +159,10 @@ def test_fyi_cached_or_304_beta_cannot_replace_release(tmp_path, workspace, cach
     assert workspace.npc_catalog.snapshot().sha256 == beta.sha256
 
 
-def test_release_recipe_update_rejects_incompatible_or_incomplete_and_keeps_beta(workspace, seed):
+def test_release_recipe_update_rejects_incompatible_or_incomplete_and_keeps_beta(workspace, baseline):
     from ahledger.models import JobSpec
     from ahledger.parsers import Parsed
-    _, document = seed
+    document = baseline
     atomic_json(workspace.bootstrap.path, document.model_dump(mode='json'))
     spec = JobSpec(dataset='crafting', url='https://api.ahledger.com/v1/crafting/forever.pvp.alliance.eu',
                    market='forever.pvp.alliance.eu', params={'profession': 'Tailoring'})

@@ -5,13 +5,16 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import uvicorn
 
+from ahledger.util import atomic_json
+from cennik.core.models import Item, PriceObservation, Recipe
 from cennik.server.app import create_server
-from cennik.server.prepare import prepare
+from cennik.workspace.bootstrap import BootstrapDocument
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "funpayparsers"))
@@ -33,17 +36,27 @@ def main():
     for name in ('node', 'playwright', 'browser'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--seed', required=True, type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
-    prepared = prepare(args.output/'server', args.seed)
     first, second = port(), port()
     origin = f'http://127.0.0.1:{first}'
     secret = 'hub-ui-fixture-'+'x'*40
     backend = create_server(args.output/'server', 'owner-ui-fixture-'+'x'*40, public_origin=origin, hub_secret=secret)
-    workspace = backend.state.catalog.workspace(prepared['profile']['id'])
+    profile = backend.state.catalog.profiles()[0]
+    workspace = backend.state.catalog.workspace(profile.id)
+    stamp = datetime.now(UTC) - timedelta(days=7)
+    fixture = BootstrapDocument(version='hub-ui-fixture', created_at=datetime.now(UTC),
+        source_market='forever.pvp.alliance.us',
+        items={2589: Item(item_id=2589, name='Linen Cloth', vendor_sell_copper=13, observed_at=stamp)},
+        prices={2589: PriceObservation(item_id=2589, market='forever.pvp.alliance.us', observed_at=stamp,
+            granularity='scan', min_copper=10, median_copper=12, quantity=100, source='AHL1')},
+        references={2589: 20}, recipes=[Recipe(spell_id=100, result_item_id=4238, qty_min=1, qty_max=1,
+            version_hash='a'*64, profession='Tailoring', inputs=[{'item_id': 2589, 'quantity': 3}])])
+    atomic_json(workspace.bootstrap.path, fixture.model_dump(mode='json'))
     workspace.market.names.put([('item', 2589, 'Льняная ткань')], 'ruRU', stamp=time.time())
-    workspace.save_settings(workspace.settings().model_copy(update={'auto_refresh': False, 'auto_fyi': False}))
+    workspace.save_settings(workspace.settings().model_copy(update={'auto_refresh': False, 'auto_fyi': False,
+        'use_beta_prices': True}))
+    workspace.calculate()
     workspace.source_updates.ready_at = float('inf')
     workspace.recalculate_pending.clear()
     workspace.sources.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
@@ -67,7 +80,7 @@ def main():
                 time.sleep(.05)
             assert server.started
         subprocess.run([args.node, str(Path(__file__).with_suffix('.cjs')), args.playwright, args.browser,
-            str(args.output.resolve()), origin, prepared['profile']['id']], check=True, timeout=240)
+            str(args.output.resolve()), origin, profile.id], check=True, timeout=240)
     finally:
         for server in reversed(servers):
             server.should_exit = True

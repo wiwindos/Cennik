@@ -21,7 +21,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--lots", type=int, nargs="+", default=[10000, 100000])
-    parser.add_argument("--seed", type=Path, help="Use actual beta items, recipes, NPC rules and prices")
     parser.add_argument("--rss", action="store_true", help="Linux process RSS instead of Python tracemalloc")
     args = parser.parse_args()
     if args.root.exists() and any(args.root.iterdir()):
@@ -29,10 +28,6 @@ def main():
     if any(n < 1 or n > 2_000_000 for n in args.lots):
         parser.error("Допустимо от 1 до 2 000 000 лотов")
     results = []
-    baseline = npc = rules = None
-    if args.seed:
-        from cennik.server.prepare import validate_package
-        _, baseline, npc, rules = validate_package(args.seed)
     for n in args.lots:
         identity = uuid4().hex
         market = f"forever.{identity}.alliance.eu"
@@ -52,20 +47,6 @@ def main():
             "auction_context": {"scope_id": entry["scope_id"], "server_id": identity, "revision": 1, "auction_type": "ordinary",
                 "npc_id": 1, "realm": "Synthetic", "map_id": 1, "x": 50, "y": 50, "session_id": "synthetic"}}
         w = Workspace(root, market_key=market, server_mode=True)
-        if baseline:
-            atomic_json(w.bootstrap.path, baseline.model_dump(mode="json"))
-            w.npc_catalog.install(npc)
-            w.analytics.disenchant.install(rules)
-            w.save_settings(w.settings().model_copy(update={"own_data_only": True}))
-            prices = list(baseline.prices.items())
-            patterns, variants = [], []
-            for item_id, price in prices:
-                item = baseline.items.get(item_id)
-                variants.append({"name": item.name if item else str(item_id), "divisible": True,
-                    "vendor_sell": item.vendor_sell_copper if item else None})
-                patterns.append(f"{item_id}:1:{price.min_copper}:0:4:{len(variants)}")
-            scan["variants"] = variants
-            scan["data"] = ";".join(patterns[i % len(patterns)] for i in range(n))
         if not args.rss:
             tracemalloc.start()
         try:
@@ -84,8 +65,6 @@ def main():
                 "process_max_rss_mib": rss,
                 "run_status": run.get("run", {}).get("status"),
                 "opportunities": run.get("run", {}).get("signal_count"),
-                "seed_version": baseline.version if baseline else None,
-                "recipes": len(baseline.recipes) if baseline else 0,
                 "at": datetime.now(UTC).isoformat()}
             results.append(row)
             print(json.dumps(row), flush=True)

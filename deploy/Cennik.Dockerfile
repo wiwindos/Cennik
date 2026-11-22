@@ -5,7 +5,6 @@ COPY requirements.server.lock.txt pyproject.toml ./
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.server.lock.txt \
     && useradd --uid 10001 --create-home cennik && mkdir /data && chown cennik:cennik /data
 COPY src ./src
-COPY release-seed ./release-seed
 RUN pip install --no-cache-dir --no-deps .
 USER 10001:10001
 EXPOSE 8770
